@@ -1,43 +1,92 @@
-name: Update market data and deploy Pages
+name: Morning Invest · Update & Deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      market:
+        description: Market to refresh
+        required: true
+        default: ALL
+        type: choice
+        options:
+          - ALL
+          - KR
+          - US
   push:
     branches: ["main"]
   schedule:
-    # GitHub Actions cron is UTC.
-    # 07:10 UTC = 16:10 KST: Korean market after close
-    - cron: "10 7 * * 1-5"
-    # 22:10 UTC = 07:10 KST next day: US market after close with buffer
-    - cron: "10 22 * * 1-5"
+    - cron: "10 16 * * 1-5"
+      timezone: "Asia/Seoul"
+    - cron: "10 7 * * 2-6"
+      timezone: "Asia/Seoul"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: morning-invest-pages
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      refresh_market: ${{ steps.market.outputs.refresh_market }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve refresh market
+        id: market
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            if [[ "${{ github.event.schedule }}" == "10 16 * * 1-5" ]]; then
+              MARKET="KR"
+            else
+              MARKET="US"
+            fi
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            MARKET="${{ inputs.market }}"
+          else
+            MARKET="NONE"
+          fi
+          echo "refresh_market=$MARKET" >> "$GITHUB_OUTPUT"
+          echo "Refresh market: $MARKET"
 
       - name: Set up Python
+        if: steps.market.outputs.refresh_market != 'NONE'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
+        if: steps.market.outputs.refresh_market != 'NONE'
         run: pip install -r requirements.txt
 
-      - name: Generate market data
-        run: python scanner.py
+      - name: Refresh market data
+        if: steps.market.outputs.refresh_market != 'NONE'
+        run: python scanner.py --market "${{ steps.market.outputs.refresh_market }}"
+
+      - name: Save generated data
+        if: steps.market.outputs.refresh_market != 'NONE'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data/*.json
+          if git diff --cached --quiet; then
+            echo "No data changes"
+          else
+            git commit -m "data: refresh ${{ steps.market.outputs.refresh_market }} [skip ci]"
+            git push
+          fi
 
       - name: Configure Pages
         uses: actions/configure-pages@v6
