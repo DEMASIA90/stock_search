@@ -1,64 +1,191 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
+import io
+import json
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable
+
+import pandas as pd
+import requests
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "docs" / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+KR_CACHE = DATA_DIR / "universe_kr.json"
+US_CACHE = DATA_DIR / "universe_us.json"
+
+KIND_URL = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
+OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/131 Safari/537.36"
+    )
+}
+
 
 @dataclass(frozen=True)
 class Stock:
     ticker: str
+    symbol: str
     name: str
     market: str
     currency: str
+    exchange: str
 
-US = [
-    Stock('AAPL','Apple','US','USD'), Stock('MSFT','Microsoft','US','USD'),
-    Stock('NVDA','NVIDIA','US','USD'), Stock('AMZN','Amazon','US','USD'),
-    Stock('GOOGL','Alphabet A','US','USD'), Stock('META','Meta Platforms','US','USD'),
-    Stock('TSLA','Tesla','US','USD'), Stock('AVGO','Broadcom','US','USD'),
-    Stock('BRK-B','Berkshire Hathaway B','US','USD'), Stock('JPM','JPMorgan Chase','US','USD'),
-    Stock('V','Visa','US','USD'), Stock('MA','Mastercard','US','USD'),
-    Stock('LLY','Eli Lilly','US','USD'), Stock('WMT','Walmart','US','USD'),
-    Stock('ORCL','Oracle','US','USD'), Stock('NFLX','Netflix','US','USD'),
-    Stock('COST','Costco','US','USD'), Stock('AMD','AMD','US','USD'),
-    Stock('CRM','Salesforce','US','USD'), Stock('BAC','Bank of America','US','USD'),
-    Stock('KO','Coca-Cola','US','USD'), Stock('PEP','PepsiCo','US','USD'),
-    Stock('MCD',"McDonald's",'US','USD'), Stock('DIS','Walt Disney','US','USD'),
-    Stock('INTC','Intel','US','USD'), Stock('QCOM','Qualcomm','US','USD'),
-    Stock('TXN','Texas Instruments','US','USD'), Stock('AMAT','Applied Materials','US','USD'),
-    Stock('MU','Micron Technology','US','USD'), Stock('UBER','Uber','US','USD'),
-    Stock('PLTR','Palantir','US','USD'), Stock('ABNB','Airbnb','US','USD'),
-    Stock('NKE','Nike','US','USD'), Stock('SBUX','Starbucks','US','USD'),
-    Stock('PYPL','PayPal','US','USD'), Stock('SOFI','SoFi Technologies','US','USD'),
-    Stock('GS','Goldman Sachs','US','USD'), Stock('MS','Morgan Stanley','US','USD'),
-    Stock('XOM','Exxon Mobil','US','USD'), Stock('CVX','Chevron','US','USD'),
-    Stock('UNH','UnitedHealth','US','USD'), Stock('JNJ','Johnson & Johnson','US','USD'),
-    Stock('PG','Procter & Gamble','US','USD'), Stock('HD','Home Depot','US','USD'),
-    Stock('CSCO','Cisco','US','USD'), Stock('IBM','IBM','US','USD'),
-    Stock('GE','GE Aerospace','US','USD'), Stock('CAT','Caterpillar','US','USD'),
-]
 
-KR = [
-    Stock('005930.KS','삼성전자','KR','KRW'), Stock('000660.KS','SK하이닉스','KR','KRW'),
-    Stock('373220.KS','LG에너지솔루션','KR','KRW'), Stock('207940.KS','삼성바이오로직스','KR','KRW'),
-    Stock('005380.KS','현대차','KR','KRW'), Stock('000270.KS','기아','KR','KRW'),
-    Stock('068270.KS','셀트리온','KR','KRW'), Stock('105560.KS','KB금융','KR','KRW'),
-    Stock('055550.KS','신한지주','KR','KRW'), Stock('035420.KS','NAVER','KR','KRW'),
-    Stock('035720.KS','카카오','KR','KRW'), Stock('005490.KS','POSCO홀딩스','KR','KRW'),
-    Stock('006400.KS','삼성SDI','KR','KRW'), Stock('051910.KS','LG화학','KR','KRW'),
-    Stock('012330.KS','현대모비스','KR','KRW'), Stock('028260.KS','삼성물산','KR','KRW'),
-    Stock('000810.KS','삼성화재','KR','KRW'), Stock('012450.KS','한화에어로스페이스','KR','KRW'),
-    Stock('329180.KS','HD현대중공업','KR','KRW'), Stock('015760.KS','한국전력','KR','KRW'),
-    Stock('033780.KS','KT&G','KR','KRW'), Stock('009150.KS','삼성전기','KR','KRW'),
-    Stock('017670.KS','SK텔레콤','KR','KRW'), Stock('066570.KS','LG전자','KR','KRW'),
-    Stock('011170.KS','롯데케미칼','KR','KRW'), Stock('086790.KS','하나금융지주','KR','KRW'),
-    Stock('024110.KS','기업은행','KR','KRW'), Stock('316140.KS','우리금융지주','KR','KRW'),
-    Stock('047050.KS','포스코인터내셔널','KR','KRW'), Stock('034020.KS','두산에너빌리티','KR','KRW'),
-    Stock('247540.KQ','에코프로비엠','KR','KRW'), Stock('196170.KQ','알테오젠','KR','KRW'),
-    Stock('028300.KQ','HLB','KR','KRW'), Stock('086520.KQ','에코프로','KR','KRW'),
-    Stock('402340.KS','SK스퀘어','KR','KRW'), Stock('042660.KS','한화오션','KR','KRW'),
-    Stock('010140.KS','삼성중공업','KR','KRW'), Stock('267260.KS','HD현대일렉트릭','KR','KRW'),
-    Stock('010130.KS','고려아연','KR','KRW'), Stock('003670.KS','포스코퓨처엠','KR','KRW'),
-    Stock('096770.KS','SK이노베이션','KR','KRW'), Stock('003550.KS','LG','KR','KRW'),
-    Stock('030200.KS','KT','KR','KRW'), Stock('032830.KS','삼성생명','KR','KRW'),
-    Stock('018260.KS','삼성에스디에스','KR','KRW'), Stock('009540.KS','HD한국조선해양','KR','KRW'),
-    Stock('010950.KS','S-Oil','KR','KRW'), Stock('090430.KS','아모레퍼시픽','KR','KRW'),
-]
+def _save_cache(path: Path, stocks: Iterable[Stock]) -> None:
+    payload = [asdict(s) for s in stocks]
+    path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
-ALL = US + KR
+
+def _load_cache(path: Path) -> list[Stock]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [Stock(**row) for row in data]
+    except Exception:
+        return []
+
+
+def _kr_market(market_type: str, suffix: str, exchange: str) -> list[Stock]:
+    response = requests.get(
+        KIND_URL,
+        params={"method": "download", "searchType": "13", "marketType": market_type},
+        headers=HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    tables = pd.read_html(io.BytesIO(response.content), header=0)
+    if not tables:
+        raise RuntimeError(f"KRX table not found: {exchange}")
+
+    df = tables[0]
+    code_col = next((c for c in df.columns if "종목코드" in str(c)), None)
+    name_col = next((c for c in df.columns if "회사명" in str(c)), None)
+    if code_col is None or name_col is None:
+        raise RuntimeError(f"KRX columns not found: {list(df.columns)}")
+
+    stocks: list[Stock] = []
+    for _, row in df.iterrows():
+        raw_code = str(row.get(code_col, "")).strip()
+        code = re.sub(r"\.0$", "", raw_code)
+        code = re.sub(r"\D", "", code).zfill(6)
+        name = str(row.get(name_col, "")).strip()
+        if not re.fullmatch(r"\d{6}", code) or not name or name.lower() == "nan":
+            continue
+        if "스팩" in name:
+            continue
+        stocks.append(
+            Stock(
+                ticker=f"{code}{suffix}",
+                symbol=code,
+                name=name,
+                market="KR",
+                currency="KRW",
+                exchange=exchange,
+            )
+        )
+    return stocks
+
+
+def fetch_kr_universe() -> tuple[list[Stock], str]:
+    try:
+        stocks = _kr_market("stockMkt", ".KS", "KOSPI") + _kr_market("kosdaqMkt", ".KQ", "KOSDAQ")
+        dedup = {s.ticker: s for s in stocks}
+        result = sorted(dedup.values(), key=lambda s: (s.exchange, s.symbol))
+        if len(result) < 1000:
+            raise RuntimeError(f"KRX universe unexpectedly small: {len(result)}")
+        _save_cache(KR_CACHE, result)
+        return result, "KRX"
+    except Exception as exc:
+        cached = _load_cache(KR_CACHE)
+        if cached:
+            print(f"KRX listing failed; using cache: {exc}")
+            return cached, "CACHE"
+        raise
+
+
+def _read_pipe(url: str) -> pd.DataFrame:
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    return pd.read_csv(io.StringIO(response.text), sep="|", dtype=str)
+
+
+def _is_us_equity(name: str, symbol: str) -> bool:
+    if not name or not symbol:
+        return False
+    if not re.fullmatch(r"[A-Z0-9.\-]+", symbol):
+        return False
+    blocked = re.compile(
+        r"\b(warrant|warrants|right|rights|unit|units|preferred|debenture|debentures|bond|bonds)\b|notes? due",
+        re.IGNORECASE,
+    )
+    return blocked.search(name) is None
+
+
+def fetch_us_universe() -> tuple[list[Stock], str]:
+    try:
+        nasdaq = _read_pipe(NASDAQ_LISTED_URL)
+        other = _read_pipe(OTHER_LISTED_URL)
+        stocks: list[Stock] = []
+
+        for _, row in nasdaq.iterrows():
+            symbol = str(row.get("Symbol", "")).strip()
+            name = str(row.get("Security Name", "")).strip()
+            if symbol.startswith("File Creation Time"):
+                continue
+            if str(row.get("ETF", "N")).strip() != "N" or str(row.get("Test Issue", "N")).strip() != "N":
+                continue
+            if not _is_us_equity(name, symbol):
+                continue
+            ticker = symbol.replace(".", "-")
+            stocks.append(Stock(ticker, symbol, name, "US", "USD", "NASDAQ"))
+
+        exchange_names = {
+            "N": "NYSE",
+            "A": "NYSE American",
+            "P": "NYSE Arca",
+            "Z": "Cboe BZX",
+            "V": "IEX",
+        }
+        for _, row in other.iterrows():
+            symbol = str(row.get("ACT Symbol", "")).strip()
+            name = str(row.get("Security Name", "")).strip()
+            exchange_code = str(row.get("Exchange", "")).strip()
+            if symbol.startswith("File Creation Time"):
+                continue
+            if str(row.get("ETF", "N")).strip() != "N" or str(row.get("Test Issue", "N")).strip() != "N":
+                continue
+            if not _is_us_equity(name, symbol):
+                continue
+            ticker = symbol.replace(".", "-")
+            stocks.append(Stock(ticker, symbol, name, "US", "USD", exchange_names.get(exchange_code, exchange_code or "US")))
+
+        dedup = {s.ticker: s for s in stocks}
+        result = sorted(dedup.values(), key=lambda s: (s.exchange, s.symbol))
+        if len(result) < 3000:
+            raise RuntimeError(f"US universe unexpectedly small: {len(result)}")
+        _save_cache(US_CACHE, result)
+        return result, "NASDAQ_TRADER"
+    except Exception as exc:
+        cached = _load_cache(US_CACHE)
+        if cached:
+            print(f"US listing failed; using cache: {exc}")
+            return cached, "CACHE"
+        raise
+
+
+def get_universe(market: str) -> tuple[list[Stock], str]:
+    market = market.upper()
+    if market == "KR":
+        return fetch_kr_universe()
+    if market == "US":
+        return fetch_us_universe()
+    raise ValueError(f"Unsupported market: {market}")

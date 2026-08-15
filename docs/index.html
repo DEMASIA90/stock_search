@@ -3,69 +3,85 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0c11" />
-  <title>Band Scout · 5-Signal Stock Screener</title>
+  <meta name="theme-color" content="#090b10" />
+  <title>Morning Invest</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><span class="mark">B</span><div><b>Band Scout</b><small>5-Signal Stock Screener</small></div></div>
-      <button id="infoBtn" class="ghost">?</button>
+      <div class="brand">
+        <span class="mark">M</span>
+        <div><b>Morning Invest</b><small id="updated">—</small></div>
+      </div>
+      <button id="reloadBtn" class="icon-btn" aria-label="새로고침">↻</button>
     </header>
 
-    <section class="hero">
-      <div class="eyebrow">STATIC · SERVERLESS DEPLOYMENT</div>
-      <h1>하단 근접 종목을<br><em>100점으로 비교.</em></h1>
-      <p>볼린저 하단, RSI, 거래량, 반전 모멘텀, MACD를 각각 20점으로 환산한 관심도 스크리너입니다.</p>
-    </section>
+    <main>
+      <section class="market-tabs" id="marketTabs">
+        <button class="market-tab active" data-market="KR">국장</button>
+        <button class="market-tab" data-market="US">미장</button>
+      </section>
 
-    <section class="panel control-panel">
-      <div class="segmented" id="marketTabs">
-        <button class="seg active" data-market="ALL">전체</button>
-        <button class="seg" data-market="KR">국장</button>
-        <button class="seg" data-market="US">미장</button>
-      </div>
-      <div class="filters">
-        <label><span>하단 거리</span><select id="distance"><option value="2">2% 이내</option><option value="5">5% 이내</option><option value="8" selected>8% 이내</option><option value="999">전체</option></select></label>
-        <label><span>최소 점수</span><select id="minScore"><option value="0">제한 없음</option><option value="55" selected>55점 이상</option><option value="70">70점 이상</option><option value="85">85점 이상</option></select></label>
-        <label><span>정렬</span><select id="sort"><option value="score">종합점수</option><option value="gap">하단 근접</option><option value="rsi">RSI 낮은순</option><option value="volume">거래량 증가</option></select></label>
-      </div>
-    </section>
+      <section class="headline">
+        <div>
+          <span class="eyebrow" id="marketLabel">KOREA</span>
+          <h1>TOP 20</h1>
+        </div>
+        <div class="market-meta">
+          <b id="marketDate">—</b>
+          <span id="coverage">—</span>
+        </div>
+      </section>
 
-    <section class="summary">
-      <div><span class="section-label">TODAY'S SIGNALS</span><h2>관심 종목</h2></div>
-      <div class="meta"><b id="count">—</b><small id="updated">데이터 로딩 중</small></div>
-    </section>
+      <section class="toolbar">
+        <button class="sort-btn active" data-sort="rank">추천순</button>
+        <button class="sort-btn" data-sort="gap">하단근접</button>
+        <button class="sort-btn" data-sort="rsi">RSI</button>
+        <button class="sort-btn" data-sort="volume">거래량</button>
+      </section>
 
-    <div id="status" class="status">데이터를 불러오는 중입니다.</div>
-    <section id="list" class="list"></section>
+      <div id="status" class="status">데이터를 불러오는 중입니다.</div>
+      <section id="stockList" class="stock-list"></section>
+    </main>
 
-    <section class="panel method">
-      <span class="section-label">SCORING MODEL</span>
-      <h3>5단계 종합점수</h3>
-      <div class="method-grid">
-        <div><b>01</b><span>볼린저 하단 근접</span><strong>20</strong></div>
-        <div><b>02</b><span>RSI 과매도</span><strong>20</strong></div>
-        <div><b>03</b><span>거래량 증가</span><strong>20</strong></div>
-        <div><b>04</b><span>단기 반전</span><strong>20</strong></div>
-        <div><b>05</b><span>MACD 개선</span><strong>20</strong></div>
-      </div>
-      <p>총점은 투자수익을 예측하는 확률이 아니라, 현재 정의한 기술적 조건이 동시에 얼마나 충족되는지를 비교하기 위한 정규화 점수입니다.</p>
-    </section>
-
-    <footer>본 화면은 투자정보 프로토타입이며 매수·매도 권유가 아닙니다. 데이터는 지연되거나 누락될 수 있습니다.</footer>
+    <footer>정보 제공용 · 투자 판단의 책임은 사용자에게 있습니다.</footer>
   </div>
 
   <div id="modal" class="backdrop" aria-hidden="true">
     <article class="modal">
-      <header class="modal-head"><div><span id="modalTicker" class="section-label"></span><h2 id="modalName"></h2></div><button id="closeModal" class="ghost">×</button></header>
-      <div class="score-hero"><div class="score-ring"><b id="modalScore">—</b><small>/100</small></div><div><span>관심도 등급</span><strong id="modalGrade">—</strong><small id="modalDate"></small></div></div>
-      <div id="scoreBars" class="score-bars"></div>
-      <div class="quote-grid" id="quoteGrid"></div>
-      <div class="chart-card"><div class="chart-title"><b>Price · Bollinger Band</b><span>최근 140 거래일</span></div><div id="chart" class="chart"></div></div>
+      <header class="modal-head">
+        <div>
+          <span id="modalTicker" class="eyebrow"></span>
+          <h2 id="modalName"></h2>
+        </div>
+        <button id="closeModal" class="icon-btn" aria-label="닫기">×</button>
+      </header>
+
+      <section class="detail-top">
+        <div class="score-box"><b id="modalScore">—</b><span>/100</span></div>
+        <div class="detail-price"><strong id="modalPrice">—</strong><span id="modalChange">—</span></div>
+      </section>
+
+      <section id="scoreBars" class="score-bars"></section>
+      <section id="quoteGrid" class="quote-grid"></section>
+
+      <section class="chart-card">
+        <div class="chart-head">
+          <b>Price</b>
+          <div id="periodTabs" class="period-tabs">
+            <button data-days="20">1M</button>
+            <button data-days="60">3M</button>
+            <button data-days="120">6M</button>
+            <button class="active" data-days="180">1Y</button>
+          </div>
+        </div>
+        <div id="chart" class="chart"></div>
+        <div class="legend"><span class="price-line">Price</span><span class="sma-line">SMA20</span><span class="band-line">Band</span></div>
+      </section>
     </article>
   </div>
+
   <script src="./app.js"></script>
 </body>
 </html>

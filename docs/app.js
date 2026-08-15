@@ -1,13 +1,197 @@
-const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
-let DATA=null; const state={market:'ALL'};
-const labels={bollinger:'볼린저 하단',rsi:'RSI 과매도',volume:'거래량 증가',reversal:'단기 반전',macd:'MACD 개선'};
+const $ = (q) => document.querySelector(q);
+const $$ = (q) => [...document.querySelectorAll(q)];
 
-function money(v,c){if(v==null)return'—';return c==='KRW'?'₩'+Math.round(v).toLocaleString('ko-KR'):'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
-function pct(v,d=1){if(v==null)return'—';const n=Number(v);return `${n>0?'+':''}${n.toFixed(d)}%`;}
-function proximity(x){if(x==='LOWER_BREAK')return '<span class="badge break">하단 이탈</span>';if(x==='VERY_NEAR')return '<span class="badge near">2% 이내</span>';if(x==='NEAR')return '<span class="badge near">5% 이내</span>';return '';}
-function filtered(){let a=[...DATA.items]; if(state.market!=='ALL')a=a.filter(x=>x.market===state.market);const dist=Number($('#distance').value),min=Number($('#minScore').value);a=a.filter(x=>x.gap_pct!=null&&x.gap_pct<=dist&&x.score>=min);const sort=$('#sort').value;if(sort==='score')a.sort((x,y)=>y.score-x.score);if(sort==='gap')a.sort((x,y)=>Math.abs(x.gap_pct)-Math.abs(y.gap_pct));if(sort==='rsi')a.sort((x,y)=>x.rsi14-y.rsi14);if(sort==='volume')a.sort((x,y)=>(y.volume_ratio||0)-(x.volume_ratio||0));return a;}
-function render(){const a=filtered();$('#count').textContent=`${a.length}개`;$('#status').style.display=a.length?'none':'block';$('#status').textContent='현재 조건을 만족하는 종목이 없습니다.';$('#list').innerHTML=a.map((s,i)=>`<button class="stock" data-ticker="${s.ticker}"><div class="grade ${s.grade}"><b>${s.grade}</b></div><div><div class="stock-title"><strong>${s.name}</strong>${proximity(s.proximity)}</div><div class="ticker">${s.ticker} · ${s.market} · ${s.date}</div><div class="mini"><span>하단 <b>${pct(s.gap_pct)}</b></span><span>RSI <b>${s.rsi14?.toFixed(1)??'—'}</b></span><span>거래량 <b>${s.volume_ratio?.toFixed(2)??'—'}x</b></span></div></div><div class="price"><strong>${money(s.close,s.currency)}</strong><div class="total">${s.score.toFixed(1)} / 100</div></div></button>`).join('');$$('.stock').forEach(b=>b.onclick=()=>openStock(DATA.items.find(x=>x.ticker===b.dataset.ticker)));}
-function openStock(s){$('#modal').classList.add('open');$('#modal').setAttribute('aria-hidden','false');$('#modalTicker').textContent=`${s.market} · ${s.ticker}`;$('#modalName').textContent=s.name;$('#modalScore').textContent=s.score.toFixed(1);$('#modalGrade').textContent=`Grade ${s.grade}`;$('#modalDate').textContent=`기준일 ${s.date}`;$('#scoreBars').innerHTML=Object.entries(s.scores).map(([k,v])=>`<div class="bar-row"><span>${labels[k]}</span><div class="bar"><i style="width:${v/20*100}%"></i></div><b>${v.toFixed(1)}</b></div>`).join('');$('#quoteGrid').innerHTML=`<div><span>현재가</span><b>${money(s.close,s.currency)}</b></div><div><span>Lower</span><b>${money(s.lower,s.currency)}</b></div><div><span>하단 거리</span><b>${pct(s.gap_pct,2)}</b></div><div><span>RSI 14</span><b>${s.rsi14?.toFixed(1)??'—'}</b></div><div><span>거래량 / 20D</span><b>${s.volume_ratio?.toFixed(2)??'—'}x</b></div><div><span>1일 수익률</span><b>${pct(s.ret1_pct,2)}</b></div><div><span>3일 수익률</span><b>${pct(s.ret3_pct,2)}</b></div><div><span>MACD Hist</span><b>${s.macd_hist?.toFixed(3)??'—'}</b></div>`;drawChart($('#chart'),s.chart,s.currency);}
-function drawChart(el,d,c){if(!d?.length){el.innerHTML='';return;}const W=Math.max(320,el.clientWidth||700),H=Math.max(260,el.clientHeight||330),p={l:8,r:56,t:16,b:24};const vals=d.flatMap(x=>[x.close,x.lower,x.upper].filter(Number.isFinite)),mn=Math.min(...vals),mx=Math.max(...vals),sp=Math.max(mx-mn,Math.abs(mx)*.02,1),lo=mn-sp*.08,hi=mx+sp*.08;const X=i=>p.l+i/Math.max(1,d.length-1)*(W-p.l-p.r),Y=v=>p.t+(1-(v-lo)/(hi-lo))*(H-p.t-p.b);const path=k=>d.map((x,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(x[k]).toFixed(1)}`).join(' ');const poly=d.map((x,i)=>`${X(i)},${Y(x.upper)}`).join(' ')+' '+[...d].reverse().map((x,ri)=>{const i=d.length-1-ri;return `${X(i)},${Y(x.lower)}`}).join(' ');let grid='';for(let i=0;i<5;i++){const yy=p.t+i*(H-p.t-p.b)/4,val=hi-i*(hi-lo)/4;grid+=`<line x1="${p.l}" x2="${W-p.r}" y1="${yy}" y2="${yy}" stroke="#202631"/><text x="${W-p.r+6}" y="${yy+4}" fill="#718096" font-size="9">${c==='KRW'?Math.round(val).toLocaleString('ko-KR'):'$'+val.toFixed(val>100?0:1)}</text>`}el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="bf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#72a6ff" stop-opacity=".14"/><stop offset="1" stop-color="#72a6ff" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="${poly}" fill="url(#bf)"/><path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('sma20')}" fill="none" stroke="#f2c468" stroke-width="1.1"/><path d="${path('close')}" fill="none" stroke="#73efb1" stroke-width="2"/></svg>`;}
-async function init(){try{const r=await fetch('./data/market.json?ts='+Date.now());if(!r.ok)throw new Error('market.json not found');DATA=await r.json();const dt=new Date(DATA.generated_at_utc);$('#updated').textContent=`업데이트 ${dt.toLocaleString('ko-KR')}`;render();}catch(e){$('#status').textContent='아직 시장 데이터가 생성되지 않았습니다. GitHub Actions에서 Update & Deploy를 1회 실행하세요.';}}
-$('#marketTabs').onclick=e=>{const b=e.target.closest('.seg');if(!b)return;$$('.seg').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.market=b.dataset.market;render();};['distance','minScore','sort'].forEach(id=>$('#'+id).onchange=render);$('#closeModal').onclick=()=>$('#modal').classList.remove('open');$('#modal').onclick=e=>{if(e.target===$('#modal'))$('#closeModal').click()};$('#infoBtn').onclick=()=>alert('Band Scout는 서버 없이 GitHub Pages에서 동작합니다. 시장 데이터 계산은 GitHub Actions가 정해진 시간에 Python scanner.py를 실행해 생성합니다.');init();
+const SCORE_LABELS = {
+  bollinger: '볼린저',
+  rsi: 'RSI',
+  volume: '거래량',
+  reversal: '반전',
+  macd: 'MACD',
+};
+
+const state = { market: 'KR', sort: 'rank', data: { KR: null, US: null }, selected: null, chartDays: 180 };
+
+function money(v, currency) {
+  if (v == null) return '—';
+  return currency === 'KRW'
+    ? '₩' + Math.round(v).toLocaleString('ko-KR')
+    : '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function pct(v, digits = 1) {
+  if (v == null) return '—';
+  const n = Number(v);
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
+}
+
+function changeClass(v) {
+  return Number(v) > 0 ? 'up' : Number(v) < 0 ? 'down' : '';
+}
+
+function currentData() {
+  return state.data[state.market];
+}
+
+function sortedItems(items) {
+  const out = [...items];
+  if (state.sort === 'gap') out.sort((a, b) => Math.abs(a.gap_pct ?? 999) - Math.abs(b.gap_pct ?? 999));
+  else if (state.sort === 'rsi') out.sort((a, b) => (a.rsi14 ?? 999) - (b.rsi14 ?? 999));
+  else if (state.sort === 'volume') out.sort((a, b) => (b.volume_ratio ?? 0) - (a.volume_ratio ?? 0));
+  else out.sort((a, b) => a.rank - b.rank);
+  return out;
+}
+
+function render() {
+  const data = currentData();
+  $('#marketLabel').textContent = state.market === 'KR' ? 'KOREA' : 'UNITED STATES';
+  if (!data) {
+    $('#status').style.display = 'block';
+    $('#status').textContent = '데이터가 아직 생성되지 않았습니다.';
+    $('#stockList').innerHTML = '';
+    $('#marketDate').textContent = '—';
+    $('#coverage').textContent = '—';
+    return;
+  }
+
+  const dt = data.generated_at_utc ? new Date(data.generated_at_utc) : null;
+  $('#updated').textContent = dt && !Number.isNaN(dt.getTime())
+    ? dt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  $('#marketDate').textContent = data.market_date ? `${data.market_date} 기준` : '—';
+  $('#coverage').textContent = `${Number(data.universe_count).toLocaleString()}종목 · ${Number(data.coverage_pct).toFixed(0)}% 수집`;
+
+  const items = sortedItems(data.top20 || []);
+  $('#status').style.display = items.length ? 'none' : 'block';
+  $('#stockList').innerHTML = items.map((s) => `
+    <button class="stock-card" data-ticker="${s.ticker}">
+      <div class="rank">${String(s.rank).padStart(2, '0')}</div>
+      <div class="stock-main">
+        <div class="stock-name"><strong>${escapeHtml(s.name)}</strong><span class="grade ${s.grade}">${s.grade}</span></div>
+        <div class="ticker">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)}</div>
+        <div class="chips">
+          <span>Band <b>${pct(s.gap_pct, 1)}</b></span>
+          <span>RSI <b>${s.rsi14?.toFixed(1) ?? '—'}</b></span>
+          <span>Vol <b>${s.volume_ratio?.toFixed(2) ?? '—'}x</b></span>
+        </div>
+      </div>
+      <div class="stock-right">
+        <strong>${money(s.close, s.currency)}</strong>
+        <div class="day-change ${changeClass(s.day_change_pct)}">${pct(s.day_change_pct, 2)}</div>
+        <div class="score">${s.score.toFixed(1)}</div>
+      </div>
+    </button>
+  `).join('');
+
+  $$('.stock-card').forEach((button) => {
+    button.onclick = () => openStock((data.top20 || []).find((x) => x.ticker === button.dataset.ticker));
+  });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
+}
+
+function openStock(stock) {
+  if (!stock) return;
+  state.selected = stock;
+  state.chartDays = 180;
+  $$('#periodTabs button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === 180));
+  $('#modal').classList.add('open');
+  $('#modal').setAttribute('aria-hidden', 'false');
+  $('#modalTicker').textContent = `${stock.symbol} · ${stock.exchange}`;
+  $('#modalName').textContent = stock.name;
+  $('#modalScore').textContent = stock.score.toFixed(1);
+  $('#modalPrice').textContent = money(stock.close, stock.currency);
+  $('#modalChange').textContent = pct(stock.day_change_pct, 2);
+  $('#modalChange').className = changeClass(stock.day_change_pct);
+
+  $('#scoreBars').innerHTML = Object.entries(stock.scores).map(([key, value]) => `
+    <div class="bar-row">
+      <span>${SCORE_LABELS[key]}</span>
+      <div class="bar"><i style="width:${Math.max(0, Math.min(100, value / 20 * 100))}%"></i></div>
+      <b>${value.toFixed(1)}</b>
+    </div>
+  `).join('');
+
+  $('#quoteGrid').innerHTML = `
+    <div><span>Lower</span><b>${money(stock.lower, stock.currency)}</b></div>
+    <div><span>Band 거리</span><b>${pct(stock.gap_pct, 2)}</b></div>
+    <div><span>RSI 14</span><b>${stock.rsi14?.toFixed(1) ?? '—'}</b></div>
+    <div><span>거래량</span><b>${stock.volume_ratio?.toFixed(2) ?? '—'}x</b></div>
+    <div><span>3일</span><b>${pct(stock.ret3_pct, 2)}</b></div>
+    <div><span>5일</span><b>${pct(stock.ret5_pct, 2)}</b></div>
+    <div><span>SMA20</span><b>${money(stock.sma20, stock.currency)}</b></div>
+    <div><span>SMA60 이격</span><b>${pct(stock.trend60_pct, 1)}</b></div>
+  `;
+  drawSelectedChart();
+}
+
+function drawSelectedChart() {
+  if (!state.selected) return;
+  const source = state.selected.chart || [];
+  const data = source.slice(-state.chartDays);
+  drawChart($('#chart'), data, state.selected.currency);
+}
+
+function drawChart(el, data, currency) {
+  if (!data.length) { el.innerHTML = ''; return; }
+  const W = Math.max(320, el.clientWidth || 700), H = Math.max(260, el.clientHeight || 330);
+  const pad = { l: 8, r: 58, t: 16, b: 24 };
+  const values = data.flatMap((d) => [d.close, d.lower, d.upper].filter(Number.isFinite));
+  const min = Math.min(...values), max = Math.max(...values), span = Math.max(max - min, Math.abs(max) * .02, 1);
+  const lo = min - span * .08, hi = max + span * .08;
+  const X = (i) => pad.l + i / Math.max(1, data.length - 1) * (W - pad.l - pad.r);
+  const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const path = (key) => data.map((d, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(d[key]).toFixed(1)}`).join(' ');
+  const polygon = data.map((d, i) => `${X(i)},${Y(d.upper)}`).join(' ') + ' ' + [...data].reverse().map((d, ri) => {
+    const i = data.length - 1 - ri; return `${X(i)},${Y(d.lower)}`;
+  }).join(' ');
+  let grid = '';
+  for (let i = 0; i < 5; i++) {
+    const y = pad.t + i * (H - pad.t - pad.b) / 4;
+    const value = hi - i * (hi - lo) / 4;
+    const label = currency === 'KRW' ? Math.round(value).toLocaleString('ko-KR') : '$' + value.toFixed(value >= 100 ? 0 : 1);
+    grid += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" stroke="#202631"/><text x="${W-pad.r+6}" y="${y+4}" fill="#718096" font-size="9">${label}</text>`;
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="bandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7aa8ff" stop-opacity=".14"/><stop offset="1" stop-color="#7aa8ff" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="${polygon}" fill="url(#bandFill)"/><path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('sma20')}" fill="none" stroke="#f0c36b" stroke-width="1.2"/><path d="${path('close')}" fill="none" stroke="#79efb6" stroke-width="2"/></svg>`;
+}
+
+async function loadData(force = false) {
+  $('#status').style.display = 'block';
+  $('#status').textContent = '데이터를 불러오는 중입니다.';
+  const ts = force ? `?ts=${Date.now()}` : '';
+  const loads = await Promise.allSettled([
+    fetch(`./data/kr.json${ts}`).then((r) => { if (!r.ok) throw new Error(); return r.json(); }),
+    fetch(`./data/us.json${ts}`).then((r) => { if (!r.ok) throw new Error(); return r.json(); }),
+  ]);
+  state.data.KR = loads[0].status === 'fulfilled' ? loads[0].value : null;
+  state.data.US = loads[1].status === 'fulfilled' ? loads[1].value : null;
+  render();
+}
+
+$('#marketTabs').onclick = (event) => {
+  const button = event.target.closest('.market-tab'); if (!button) return;
+  $$('.market-tab').forEach((b) => b.classList.remove('active'));
+  button.classList.add('active'); state.market = button.dataset.market; state.sort = 'rank';
+  $$('.sort-btn').forEach((b) => b.classList.toggle('active', b.dataset.sort === 'rank'));
+  render();
+};
+
+$('.toolbar').onclick = (event) => {
+  const button = event.target.closest('.sort-btn'); if (!button) return;
+  $$('.sort-btn').forEach((b) => b.classList.remove('active')); button.classList.add('active');
+  state.sort = button.dataset.sort; render();
+};
+
+$('#periodTabs').onclick = (event) => {
+  const button = event.target.closest('button'); if (!button) return;
+  $$('#periodTabs button').forEach((b) => b.classList.remove('active')); button.classList.add('active');
+  state.chartDays = Number(button.dataset.days); drawSelectedChart();
+};
+
+$('#closeModal').onclick = () => $('#modal').classList.remove('open');
+$('#modal').onclick = (event) => { if (event.target === $('#modal')) $('#closeModal').click(); };
+$('#reloadBtn').onclick = () => loadData(true);
+window.addEventListener('resize', () => { if ($('#modal').classList.contains('open')) drawSelectedChart(); });
+
+loadData(false);
