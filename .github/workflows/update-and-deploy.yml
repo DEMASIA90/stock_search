@@ -261,7 +261,7 @@ jobs:
 
     steps:
       - name: Download built site
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: morning-invest-site
 
@@ -269,33 +269,48 @@ jobs:
         run: tar -xzf morning-invest-site.tar.gz
 
       - name: Deploy to Firebase Hosting
+        id: firebase_deploy
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_MORNINGINV }}
           projectId: morninginv
           channelId: live
+          target: morninginv
+          entryPoint: .
+          force: true
           firebaseToolsVersion: "15.25.1"
 
-      - name: Verify Firebase live release
+      - name: Verify exact Firebase target and live release
         shell: bash
+        env:
+          DEPLOY_URLS: ${{ steps.firebase_deploy.outputs.urls }}
         run: |
           set -euo pipefail
-          EXPECTED_SHA="${{ github.sha }}"
 
-          for TRY in 1 2 3 4 5 6; do
-            echo "Firebase verification attempt $TRY/6"
-            BODY=$(curl -fsSL "https://morninginv.web.app/build-info.json?run=${{ github.run_id }}&try=$TRY" || true)
+          echo "Firebase action URLs: ${DEPLOY_URLS:-<empty>}"
+
+          if [[ -n "${DEPLOY_URLS:-}" ]] && [[ "$DEPLOY_URLS" != *"morninginv.web.app"* ]] && [[ "$DEPLOY_URLS" != *"morninginv.firebaseapp.com"* ]]; then
+            echo "::error::Firebase action deployed to a different Hosting site: $DEPLOY_URLS"
+            exit 1
+          fi
+
+          EXPECTED_SHA="${{ github.sha }}"
+          LIVE_URL="https://morninginv.web.app/build-info.json"
+
+          for TRY in 1 2 3 4 5 6 7 8; do
+            echo "Verify morninginv.web.app attempt $TRY/8"
+            BODY=$(curl -fsSL -H 'Cache-Control: no-cache' "${LIVE_URL}?run=${{ github.run_id }}&try=$TRY&ts=$(date +%s)" || true)
+            echo "$BODY"
 
             if echo "$BODY" | grep -q "\"github_sha\": \"$EXPECTED_SHA\""; then
-              echo "Firebase live release verified: $EXPECTED_SHA"
-              echo "$BODY"
+              echo "Exact Firebase Hosting site verified: morninginv"
+              echo "Live build SHA verified: $EXPECTED_SHA"
               exit 0
             fi
 
-            echo "Firebase is not serving this build yet."
-            echo "$BODY"
             sleep 10
           done
 
-          echo "::error::Firebase deploy action completed, but morninginv.web.app is not serving the current build."
+          echo "::error::Deployment did not appear on https://morninginv.web.app/. Check Firebase Hosting site ID / release history."
           exit 1
+
