@@ -51,20 +51,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking v7.4 source files..."
+          echo "Checking v7.5 source files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' scanner.py || {
-            echo "::error::scanner.py is not Morning Invest v7.4"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.5"' scanner.py || {
+            echo "::error::scanner.py is not Morning Invest v7.5"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not Morning Invest v7.4"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.5"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not Morning Invest v7.5"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' universe.py || {
-            echo "::error::universe.py is not Morning Invest v7.4. Replace the repository-root file named exactly universe.py."
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.5"' universe.py || {
+            echo "::error::universe.py is not Morning Invest v7.5. Replace the repository-root file named exactly universe.py."
             exit 1
           }
 
@@ -78,9 +78,9 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v7.4"
-          echo "hydrate_data.py: v7.4"
-          echo "universe.py: v7.4"
+          echo "scanner.py: v7.5"
+          echo "hydrate_data.py: v7.5"
+          echo "universe.py: v7.5"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
 
       - name: Resolve refresh market
@@ -135,7 +135,7 @@ jobs:
 
       - name: Scan selected market
         run: |
-          echo "Running Morning Invest source set v7.4"
+          echo "Running Morning Invest source set v7.5"
           python scanner.py --market "${{ steps.market.outputs.market }}"
 
       - name: Remove scanner-only root caches
