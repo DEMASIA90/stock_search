@@ -32,6 +32,7 @@ concurrency:
 
 env:
   FIREBASE_LIVE: https://morninginv.web.app
+  GITHUB_PAGES_LIVE: https://demasia90.github.io/stock_search
 
 jobs:
   build:
@@ -70,7 +71,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Restore unchanged market data from live hosting
+      - name: Restore previous market snapshots
         run: |
           python hydrate_data.py \
             --market "${{ steps.market.outputs.market }}" \
@@ -81,7 +82,19 @@ jobs:
         shell: bash
         run: |
           echo "Hydrated docs/data before scan:"
-          find docs/data -maxdepth 2 -type f -printf '%p %k KB\n' | sort || true
+          for DIR in kr us us-etf; do
+            echo "---- $DIR ----"
+            if [[ -s "docs/data/$DIR/summary.json" ]]; then
+              echo "summary: PRESENT ($(du -h "docs/data/$DIR/summary.json" | cut -f1))"
+            else
+              echo "summary: MISSING"
+            fi
+            if [[ -s "docs/data/$DIR/bundle.zip" ]]; then
+              echo "bundle: PRESENT ($(du -h "docs/data/$DIR/bundle.zip" | cut -f1))"
+            else
+              echo "bundle: MISSING"
+            fi
+          done
 
       - name: Scan selected market
         run: python scanner.py --market "${{ steps.market.outputs.market }}"
