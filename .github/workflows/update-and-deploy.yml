@@ -77,6 +77,12 @@ jobs:
             --base-url "${FIREBASE_LIVE}" \
             --base-url "${GITHUB_PAGES_LIVE}"
 
+      - name: Inspect hydrated market snapshots
+        shell: bash
+        run: |
+          echo "Hydrated docs/data before scan:"
+          find docs/data -maxdepth 2 -type f -printf '%p %k KB\n' | sort || true
+
       - name: Scan selected market
         run: python scanner.py --market "${{ steps.market.outputs.market }}"
 
