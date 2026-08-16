@@ -198,8 +198,62 @@ def migrate_legacy_json(category: str, base: str) -> bool:
     return True
 
 
-def restore_category(category: str, bases: list[str]) -> bool:
+def migrate_checkout_legacy(category: str, backup_dir: Path) -> bool:
+    legacy_name = LEGACY_FILE[category]
+    src = backup_dir / legacy_name
+    if not src.is_file():
+        return False
+
+    print(f"[hydrate] {category}: try checked-out legacy {legacy_name}")
+    payload = json.loads(src.read_text(encoding="utf-8"))
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("checked-out legacy JSON has no items list")
+
+    dest = DATA_DIR / CATEGORY_DIR[category]
+    shutil.rmtree(dest, ignore_errors=True)
+    stocks = dest / "stocks"
+    stocks.mkdir(parents=True, exist_ok=True)
+
+    summary_items = []
+    for pos, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        if not item.get("rank"):
+            item["rank"] = pos
+        filename = detail_filename(item)
+        relative = f"data/{CATEGORY_DIR[category]}/stocks/{filename}"
+        summary_items.append(summary_item(item, relative))
+        (stocks / filename).write_text(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    summary_payload = {k: v for k, v in payload.items() if k != "items"}
+    summary_payload.update({
+        "storage_model": "summary_plus_lazy_stock_detail_v7_checkout_migration",
+        "detail_count": len(summary_items),
+        "passed_count": summary_payload.get("passed_count", len(summary_items)),
+        "items": summary_items,
+    })
+    (dest / "summary.json").write_text(
+        json.dumps(summary_payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    old_cache = backup_dir / ROOT_UNIVERSE_CACHE[category]
+    if old_cache.is_file():
+        shutil.copy2(old_cache, DATA_DIR / ROOT_UNIVERSE_CACHE[category])
+        shutil.copy2(old_cache, dest / "universe.json")
+
+    build_bundle(dest)
+    print(f"[hydrate] {category}: migrated checked-out legacy ({len(summary_items):,} items)")
+    return True
+
+
+def restore_category(category: str, bases: list[str], checkout_backup: Path | None = None) -> bool:
     errors = []
+    bases = [b for b in bases if b and b.strip()]
     for base in bases:
         try:
             return restore_v7_bundle(category, base)
@@ -210,6 +264,13 @@ def restore_category(category: str, bases: list[str]) -> bool:
             return migrate_legacy_json(category, base)
         except Exception as exc:
             errors.append(f"legacy@{base}: {type(exc).__name__}: {exc}")
+
+    if checkout_backup is not None:
+        try:
+            if migrate_checkout_legacy(category, checkout_backup):
+                return True
+        except Exception as exc:
+            errors.append(f"checkout-legacy: {type(exc).__name__}: {exc}")
 
     shutil.rmtree(DATA_DIR / CATEGORY_DIR[category], ignore_errors=True)
     print(f"[hydrate] {category}: no previous snapshot available")
@@ -224,7 +285,25 @@ def main() -> None:
     parser.add_argument("--base-url", action="append", dest="base_urls", default=[])
     args = parser.parse_args()
 
-    bases = args.base_urls or ["https://morninginv.web.app"]
+    bases = [b.strip() for b in args.base_urls if b and b.strip()]
+    if not bases:
+        bases = [
+            "https://morninginv.web.app",
+            "https://demasia90.github.io/stock_search",
+        ]
+    print(f"[hydrate] bootstrap bases={bases}")
+
+    # Migration safety: old tracked v6 JSON/cache files may still exist in the
+    # checkout. Preserve them before clearing docs/data so they remain a final
+    # bootstrap source when Hosting has no KR snapshot yet.
+    checkout_backup = Path("/tmp/morning-invest-checkout-legacy")
+    shutil.rmtree(checkout_backup, ignore_errors=True)
+    checkout_backup.mkdir(parents=True, exist_ok=True)
+    for name in [*LEGACY_FILE.values(), *ROOT_UNIVERSE_CACHE.values()]:
+        src = DATA_DIR / name
+        if src.is_file():
+            shutil.copy2(src, checkout_backup / name)
+            print(f"[hydrate] preserved checkout legacy: {name}")
 
     shutil.rmtree(DATA_DIR, ignore_errors=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -232,7 +311,7 @@ def main() -> None:
     restored = []
     missing = []
     for category in RESTORE_BY_MARKET[args.market]:
-        if restore_category(category, bases):
+        if restore_category(category, bases, checkout_backup=checkout_backup):
             restored.append(category)
         else:
             missing.append(category)

@@ -8,6 +8,7 @@ import random
 import re
 import shutil
 import time
+import traceback
 import zipfile
 from collections import Counter
 from datetime import datetime, time as dtime, timezone
@@ -1267,18 +1268,42 @@ def main():
             scan_category(category, usdkrw=usdkrw)
         except Exception as exc:
             failures.append((category, str(exc)))
-            print(f"ERROR {category}: {exc}")
+            print(f"ERROR {category}: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
 
     if failures:
         print("=" * 72)
-        print("SCAN FAILURES")
+        print("SCAN FAILURES / FALLBACK CHECK")
+        unresolved = []
+
         for failed_category, message in failures:
-            print(f" - {failed_category}: {message}")
-        print("Any hydrated previous snapshot remains in place for a failed category.")
+            category_dir = DATA_DIR / CATEGORY_DIR[failed_category]
+            summary_ok = (category_dir / "summary.json").is_file() and (category_dir / "summary.json").stat().st_size > 0
+            bundle_ok = (category_dir / "bundle.zip").is_file() and (category_dir / "bundle.zip").stat().st_size > 0
+            stocks_ok = (category_dir / "stocks").is_dir()
+
+            if summary_ok and bundle_ok and stocks_ok:
+                print(
+                    f" - {failed_category}: fresh scan failed ({message}) "
+                    "-> retaining hydrated previous snapshot"
+                )
+            else:
+                print(
+                    f" - {failed_category}: fresh scan failed ({message}) "
+                    "-> NO VALID FALLBACK SNAPSHOT"
+                )
+                unresolved.append(failed_category)
+
         print("=" * 72)
 
-    if failures and len(failures) == len(categories):
-        raise SystemExit(1)
+        if unresolved:
+            print(
+                "Unresolved categories have no fresh output and no previous snapshot: "
+                + ", ".join(unresolved)
+            )
+            raise SystemExit(1)
+
+        print("Partial refresh is safe: failed categories retained their last valid snapshot.")
 
 
 if __name__ == "__main__":
