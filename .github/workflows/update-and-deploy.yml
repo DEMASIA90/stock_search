@@ -1,4 +1,4 @@
-name: Morning Invest · Update & Deploy
+name: Morning Invest · Build & Deploy
 
 on:
   workflow_dispatch:
@@ -12,18 +12,17 @@ on:
           - ALL
           - KR
           - US
+          - US_ETF
+          - US_GROUP
 
   schedule:
-    # 한국장 마감 후: 평일 16:10 KST
     - cron: "10 16 * * 1-5"
       timezone: "Asia/Seoul"
-
-    # 미국장 마감 후: 화~토 07:10 KST
     - cron: "10 7 * * 2-6"
       timezone: "Asia/Seoul"
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -31,19 +30,22 @@ concurrency:
   group: morning-invest-refresh
   cancel-in-progress: false
 
+env:
+  FIREBASE_LIVE: https://morninginv.web.app
+
 jobs:
   build:
-    name: Scan market & build site
+    name: Build ephemeral market data
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    outputs:
+      market: ${{ steps.market.outputs.market }}
 
     steps:
-      - name: Checkout
+      - name: Checkout code only
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
-      - name: Resolve market
+      - name: Resolve refresh market
         id: market
         shell: bash
         run: |
@@ -51,17 +53,13 @@ jobs:
             if [[ "${{ github.event.schedule }}" == "10 16 * * 1-5" ]]; then
               MARKET="KR"
             else
-              MARKET="US"
+              MARKET="US_GROUP"
             fi
           else
             MARKET="${{ inputs.market }}"
           fi
-
           echo "market=$MARKET" >> "$GITHUB_OUTPUT"
-          echo "======================================"
-          echo " Morning Invest"
-          echo " Refresh market: $MARKET"
-          echo "======================================"
+          echo "Refresh market: $MARKET"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -72,33 +70,60 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Refresh market data
+      - name: Restore unchanged market data from live hosting
+        run: |
+          python hydrate_data.py \
+            --market "${{ steps.market.outputs.market }}" \
+            --base-url "${FIREBASE_LIVE}" \
+            --base-url "${GITHUB_PAGES_LIVE}"
+
+      - name: Scan selected market
         run: python scanner.py --market "${{ steps.market.outputs.market }}"
 
-      - name: Save generated market data
+      - name: Remove scanner-only root caches
+        run: rm -f docs/data/universe_kr.json docs/data/universe_us.json docs/data/universe_us_etf.json
+
+      - name: Verify complete deploy tree
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          for DIR in kr us us-etf; do
+            test -s "docs/data/$DIR/summary.json"
+            test -s "docs/data/$DIR/bundle.zip"
+            test -d "docs/data/$DIR/stocks"
+          done
+          echo "Generated file count:"
+          find docs/data -type f | wc -l
+          echo "Generated data size:"
+          du -sh docs/data
 
-          git add docs/data/*.json
-
-          if git diff --cached --quiet; then
-            echo "No market-data changes to commit."
-          else
-            git commit -m "data: refresh ${{ steps.market.outputs.market }} [skip ci]"
-            git pull --rebase origin main
-            git push origin HEAD:main
-          fi
+      - name: Build lightweight GitHub Pages fallback
+        shell: bash
+        run: |
+          rm -rf pages-lite
+          mkdir -p pages-lite
+          cp docs/index.html docs/app.js docs/styles.css pages-lite/
+          touch pages-lite/.nojekyll
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
-      - name: Upload GitHub Pages artifact
+      - name: Upload lightweight GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ./docs
+          path: ./pages-lite
           include-hidden-files: true
+
+      - name: Pack Firebase deploy artifact
+        run: tar -czf morning-invest-site.tar.gz docs firebase.json .firebaserc
+
+      - name: Upload Firebase deploy artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: morning-invest-site
+          path: morning-invest-site.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
   deploy_pages:
     name: Deploy GitHub Pages
@@ -117,24 +142,16 @@ jobs:
     name: Deploy Firebase Hosting
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      # build job에서 생성한 JSON이 main에 커밋된 뒤,
-      # 최신 main을 다시 체크아웃해서 Firebase에도 동일한 데이터를 배포합니다.
-      - name: Checkout latest main
-        uses: actions/checkout@v6
+      - name: Download built site
+        uses: actions/download-artifact@v5
         with:
-          ref: main
-          fetch-depth: 1
+          name: morning-invest-site
 
-      - name: Verify Firebase configuration
-        shell: bash
-        run: |
-          test -f firebase.json || (echo "firebase.json not found" && exit 1)
-          test -f .firebaserc || (echo ".firebaserc not found" && exit 1)
-          test -f docs/index.html || (echo "docs/index.html not found" && exit 1)
-          echo "Firebase project: morninginv"
+      - name: Extract built site
+        run: tar -xzf morning-invest-site.tar.gz
 
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
