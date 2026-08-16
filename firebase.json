@@ -26,7 +26,7 @@
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "no-cache, must-revalidate"
+            "value": "no-cache, no-store, must-revalidate"
           }
         ]
       },
@@ -35,7 +35,25 @@
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "no-cache, must-revalidate"
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/styles.css",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/build-info.json",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
           }
         ]
       }
