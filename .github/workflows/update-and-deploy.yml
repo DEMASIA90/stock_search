@@ -14,6 +14,7 @@ on:
           - US
           - US_ETF
           - US_GROUP
+          - UI_ONLY
 
   schedule:
     - cron: "10 16 * * 1-5"
@@ -109,9 +110,16 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Restore previous market snapshots
+        shell: bash
         run: |
+          RESTORE_MARKET="${{ steps.market.outputs.market }}"
+          if [[ "$RESTORE_MARKET" == "UI_ONLY" ]]; then
+            RESTORE_MARKET="KR"
+            echo "UI_ONLY: restoring all live market snapshots without rescanning."
+          fi
+
           python hydrate_data.py \
-            --market "${{ steps.market.outputs.market }}" \
+            --market "$RESTORE_MARKET" \
             --base-url "${FIREBASE_LIVE}" \
             --base-url "${GITHUB_PAGES_LIVE}"
 
@@ -134,9 +142,14 @@ jobs:
           done
 
       - name: Scan selected market
+        if: steps.market.outputs.market != 'UI_ONLY'
         run: |
           echo "Running Morning Invest source set v7.5"
           python scanner.py --market "${{ steps.market.outputs.market }}"
+
+      - name: Skip market scan for UI-only deploy
+        if: steps.market.outputs.market == 'UI_ONLY'
+        run: echo "UI_ONLY selected — existing live market snapshots will be redeployed with the new UI."
 
       - name: Remove scanner-only root caches
         run: rm -f docs/data/universe_kr.json docs/data/universe_us.json docs/data/universe_us_etf.json
@@ -186,12 +199,25 @@ jobs:
           echo "Generated data size:"
           du -sh docs/data
 
+      - name: Stamp UI build
+        shell: bash
+        run: |
+          cat > docs/build-info.json <<EOF
+          {
+            "ui_build": "20260817-ui1",
+            "github_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          EOF
+          echo "UI build: 20260817-ui1"
+          cat docs/build-info.json
+
       - name: Build lightweight GitHub Pages fallback
         shell: bash
         run: |
           rm -rf pages-lite
           mkdir -p pages-lite
-          cp docs/index.html docs/app.js docs/styles.css pages-lite/
+          cp docs/index.html docs/app.js docs/styles.css docs/build-info.json pages-lite/
           touch pages-lite/.nojekyll
 
       - name: Configure GitHub Pages
@@ -249,3 +275,27 @@ jobs:
           projectId: morninginv
           channelId: live
           firebaseToolsVersion: "15.25.1"
+
+      - name: Verify Firebase live release
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_SHA="${{ github.sha }}"
+
+          for TRY in 1 2 3 4 5 6; do
+            echo "Firebase verification attempt $TRY/6"
+            BODY=$(curl -fsSL "https://morninginv.web.app/build-info.json?run=${{ github.run_id }}&try=$TRY" || true)
+
+            if echo "$BODY" | grep -q "\"github_sha\": \"$EXPECTED_SHA\""; then
+              echo "Firebase live release verified: $EXPECTED_SHA"
+              echo "$BODY"
+              exit 0
+            fi
+
+            echo "Firebase is not serving this build yet."
+            echo "$BODY"
+            sleep 10
+          done
+
+          echo "::error::Firebase deploy action completed, but morninginv.web.app is not serving the current build."
+          exit 1
