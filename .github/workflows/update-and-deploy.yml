@@ -87,11 +87,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          FAILED=0
           for DIR in kr us us-etf; do
-            test -s "docs/data/$DIR/summary.json"
-            test -s "docs/data/$DIR/bundle.zip"
-            test -d "docs/data/$DIR/stocks"
+            echo "---- verify $DIR ----"
+
+            if [[ ! -s "docs/data/$DIR/summary.json" ]]; then
+              echo "::error::$DIR/summary.json is missing or empty"
+              FAILED=1
+            else
+              echo "summary.json: OK ($(du -h "docs/data/$DIR/summary.json" | cut -f1))"
+            fi
+
+            if [[ ! -s "docs/data/$DIR/bundle.zip" ]]; then
+              echo "::error::$DIR/bundle.zip is missing or empty"
+              FAILED=1
+            else
+              echo "bundle.zip: OK ($(du -h "docs/data/$DIR/bundle.zip" | cut -f1))"
+            fi
+
+            if [[ ! -d "docs/data/$DIR/stocks" ]]; then
+              echo "::error::$DIR/stocks directory is missing"
+              FAILED=1
+            else
+              COUNT=$(find "docs/data/$DIR/stocks" -maxdepth 1 -type f -name '*.json' | wc -l)
+              echo "stock details: $COUNT"
+            fi
           done
+
+          echo "---- generated docs/data tree ----"
+          find docs/data -maxdepth 2 -type f -printf '%p %k KB\n' | sort || true
+
+          if [[ "$FAILED" -ne 0 ]]; then
+            echo "::error::Deploy tree incomplete. Check 'Scan selected market' above to see which category failed."
+            exit 1
+          fi
+
           echo "Generated file count:"
           find docs/data -type f | wc -l
           echo "Generated data size:"
