@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
 import shutil
 import time
-import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -17,21 +19,24 @@ CATEGORY_DIR = {
     "US_ETF": "us-etf",
 }
 
-RESTORE_BY_MARKET = {
-    "ALL": [],
-    # Partial refreshes restore all three Hosting snapshots first. The selected
-    # category is then overwritten by scanner.py, while its restored universe
-    # snapshot remains available as an outage fallback.
-    "KR": ["KR", "US", "US_ETF"],
-    "US": ["KR", "US", "US_ETF"],
-    "US_ETF": ["KR", "US", "US_ETF"],
-    "US_GROUP": ["KR", "US", "US_ETF"],
+LEGACY_FILE = {
+    "KR": "kr.json",
+    "US": "us.json",
+    "US_ETF": "us_etf.json",
 }
 
 ROOT_UNIVERSE_CACHE = {
     "KR": "universe_kr.json",
     "US": "universe_us.json",
     "US_ETF": "universe_us_etf.json",
+}
+
+RESTORE_BY_MARKET = {
+    "ALL": ["KR", "US", "US_ETF"],
+    "KR": ["KR", "US", "US_ETF"],
+    "US": ["KR", "US", "US_ETF"],
+    "US_ETF": ["KR", "US", "US_ETF"],
+    "US_GROUP": ["KR", "US", "US_ETF"],
 }
 
 
@@ -44,57 +49,173 @@ def safe_extract(zf: zipfile.ZipFile, destination: Path) -> None:
     zf.extractall(destination)
 
 
-def download(url: str, output: Path) -> None:
+def download(url: str, output: Path, timeout: int = 90) -> None:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "MorningInvest-GitHubActions/1.0",
+            "User-Agent": "MorningInvest-GitHubActions/1.1",
             "Cache-Control": "no-cache",
         },
     )
-    with urllib.request.urlopen(req, timeout=90) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         if getattr(response, "status", 200) != 200:
             raise RuntimeError(f"HTTP {response.status}")
         output.write_bytes(response.read())
 
 
-def restore_category(category: str, bases: list[str]) -> None:
+def detail_filename(item: dict) -> str:
+    raw = str(item.get("symbol") or item.get("ticker") or "stock")
+    symbol = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    symbol = (symbol or "stock")[:36]
+    digest = hashlib.sha1(str(item.get("ticker", raw)).encode("utf-8")).hexdigest()[:12]
+    return f"{symbol}-{digest}.json"
+
+
+def summary_item(item: dict, detail_path: str) -> dict:
+    bt = item.get("backtest") or {}
+    forecast = bt.get("forecast") or {}
+    return {
+        "ticker": item.get("ticker"),
+        "symbol": item.get("symbol"),
+        "name": item.get("name"),
+        "category": item.get("category"),
+        "exchange": item.get("exchange"),
+        "currency": item.get("currency"),
+        "date": item.get("date"),
+        "close": item.get("close"),
+        "day_change_pct": item.get("day_change_pct"),
+        "rank": item.get("rank"),
+        "score": item.get("score"),
+        "scores": item.get("scores") or {},
+        "backtest": {
+            "available": bool(bt.get("available")),
+            "signals": bt.get("signals"),
+            "avg_20d": bt.get("avg_20d"),
+            "win_20d": bt.get("win_20d"),
+            "quality_score": bt.get("quality_score"),
+            "quality_label": bt.get("quality_label", "NORMAL"),
+            "forecast_available": bool(forecast.get("available")),
+        },
+        "detail_path": detail_path,
+    }
+
+
+def build_bundle(dest: Path) -> None:
+    summary = dest / "summary.json"
+    stocks = dest / "stocks"
+    bundle = dest / "bundle.zip"
+    if not summary.is_file() or not stocks.is_dir():
+        raise RuntimeError("cannot build bundle: summary/stocks missing")
+
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.write(summary, "summary.json")
+        universe = dest / "universe.json"
+        if universe.is_file():
+            zf.write(universe, "universe.json")
+        for detail in sorted(stocks.glob("*.json")):
+            zf.write(detail, f"stocks/{detail.name}")
+
+
+def restore_v7_bundle(category: str, base: str) -> bool:
     folder = CATEGORY_DIR[category]
     dest = DATA_DIR / folder
-    tmp = Path("/tmp") / f"morning-invest-{folder}.zip"
+    tmp = Path("/tmp") / f"morning-invest-{folder}-bundle.zip"
+    url = f"{base.rstrip('/')}/data/{folder}/bundle.zip?ts={int(time.time())}"
 
+    print(f"[hydrate] {category}: try v7 bundle")
+    download(url, tmp)
+    if not zipfile.is_zipfile(tmp):
+        raise RuntimeError("downloaded v7 bundle is not a ZIP")
+
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(tmp, "r") as zf:
+        safe_extract(zf, dest)
+
+    if not (dest / "summary.json").is_file():
+        raise RuntimeError("summary.json missing after bundle extraction")
+    if not (dest / "stocks").is_dir():
+        raise RuntimeError("stocks directory missing after bundle extraction")
+
+    shutil.copy2(tmp, dest / "bundle.zip")
+    universe = dest / "universe.json"
+    if universe.is_file():
+        shutil.copy2(universe, DATA_DIR / ROOT_UNIVERSE_CACHE[category])
+
+    print(f"[hydrate] {category}: restored v7 bundle")
+    return True
+
+
+def migrate_legacy_json(category: str, base: str) -> bool:
+    """Convert previous v6 monolithic JSON into v7 summary/detail files."""
+    legacy_name = LEGACY_FILE[category]
+    tmp = Path("/tmp") / f"morning-invest-{legacy_name}"
+    url = f"{base.rstrip('/')}/data/{legacy_name}?ts={int(time.time())}"
+
+    print(f"[hydrate] {category}: try legacy {legacy_name}")
+    download(url, tmp)
+
+    payload = json.loads(tmp.read_text(encoding="utf-8"))
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("legacy JSON has no items list")
+
+    dest = DATA_DIR / CATEGORY_DIR[category]
+    shutil.rmtree(dest, ignore_errors=True)
+    stocks = dest / "stocks"
+    stocks.mkdir(parents=True, exist_ok=True)
+
+    summary_items = []
+    for pos, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        if not item.get("rank"):
+            item["rank"] = pos
+
+        filename = detail_filename(item)
+        relative = f"data/{CATEGORY_DIR[category]}/stocks/{filename}"
+        summary_items.append(summary_item(item, relative))
+        (stocks / filename).write_text(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    summary_payload = {k: v for k, v in payload.items() if k != "items"}
+    summary_payload.update(
+        {
+            "storage_model": "summary_plus_lazy_stock_detail_v7_legacy_migration",
+            "detail_count": len(summary_items),
+            "passed_count": summary_payload.get("passed_count", len(summary_items)),
+            "items": summary_items,
+        }
+    )
+    (dest / "summary.json").write_text(
+        json.dumps(summary_payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    build_bundle(dest)
+    print(f"[hydrate] {category}: migrated legacy data ({len(summary_items):,} items)")
+    return True
+
+
+def restore_category(category: str, bases: list[str]) -> bool:
     errors = []
     for base in bases:
-        url = f"{base.rstrip('/')}/data/{folder}/bundle.zip?ts={int(time.time())}"
         try:
-            print(f"[hydrate] {category}: {url}")
-            download(url, tmp)
-            if not zipfile.is_zipfile(tmp):
-                raise RuntimeError("downloaded file is not a ZIP")
-            shutil.rmtree(dest, ignore_errors=True)
-            dest.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(tmp, "r") as zf:
-                safe_extract(zf, dest)
-            if not (dest / "summary.json").is_file():
-                raise RuntimeError("summary.json missing after extraction")
-            if not (dest / "stocks").is_dir():
-                raise RuntimeError("stocks directory missing after extraction")
-            shutil.copy2(tmp, dest / "bundle.zip")
-
-            universe_snapshot = dest / "universe.json"
-            if universe_snapshot.is_file():
-                shutil.copy2(universe_snapshot, DATA_DIR / ROOT_UNIVERSE_CACHE[category])
-
-            print(f"[hydrate] {category}: restored")
-            return
+            return restore_v7_bundle(category, base)
         except Exception as exc:
-            errors.append(f"{base}: {type(exc).__name__}: {exc}")
-            shutil.rmtree(dest, ignore_errors=True)
+            errors.append(f"v7@{base}: {type(exc).__name__}: {exc}")
 
-    raise RuntimeError(
-        f"Unable to restore {category}. Run ALL once after installing v7. "
-        + " | ".join(errors)
-    )
+        try:
+            return migrate_legacy_json(category, base)
+        except Exception as exc:
+            errors.append(f"legacy@{base}: {type(exc).__name__}: {exc}")
+
+    shutil.rmtree(DATA_DIR / CATEGORY_DIR[category], ignore_errors=True)
+    print(f"[hydrate] {category}: no previous snapshot available")
+    for err in errors:
+        print(f"[hydrate]   {err}")
+    return False
 
 
 def main() -> None:
@@ -108,14 +229,18 @@ def main() -> None:
     shutil.rmtree(DATA_DIR, ignore_errors=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    restore = RESTORE_BY_MARKET[args.market]
-    if not restore:
-        print("[hydrate] ALL refresh: no previous market data needed")
-        return
+    restored = []
+    missing = []
+    for category in RESTORE_BY_MARKET[args.market]:
+        if restore_category(category, bases):
+            restored.append(category)
+        else:
+            missing.append(category)
 
-    print(f"[hydrate] refresh={args.market}; restoring live snapshots={restore}")
-    for category in restore:
-        restore_category(category, bases)
+    print(f"[hydrate] restored={restored or 'none'}")
+    print(f"[hydrate] missing={missing or 'none'}")
+    # Missing previous snapshots are non-fatal here.
+    # scanner.py gets a chance to generate them from current market data.
 
 
 if __name__ == "__main__":
