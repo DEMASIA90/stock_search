@@ -11,11 +11,11 @@ import time
 import traceback
 import zipfile
 from collections import Counter
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "7.4"
+MORNING_INVEST_COMPONENT_VERSION = "7.5"
 
 import numpy as np
 import pandas as pd
@@ -30,11 +30,22 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # ----------------------------
 # Morning Invest strategy v4
 # ----------------------------
-PERIOD = "3y"
-BATCH_SIZE = 32
-RETRY_BATCH_SIZE = 8
+# Fetch by explicit date range instead of relying on Yahoo's period parsing.
+HISTORY_CALENDAR_DAYS = 1150
+BATCH_SIZE = 24
+RETRY_BATCH_SIZE = 4
+DOWNLOAD_THREADS = 4
+PRIMARY_BATCH_SLEEP = (0.55, 0.95)
+RETRY_BATCH_SLEEP = (1.5, 2.8)
+RETRY_ATTEMPTS = 3
 CHART_POINTS = 120
-MIN_COVERAGE = 0.20
+
+# Never publish a materially incomplete market snapshot.
+MIN_COVERAGE = {
+    "KR": 0.95,
+    "US": 0.95,
+    "US_ETF": 0.95,
+}
 
 BB_WINDOW = 20
 BB_SIGMA = 2.0
@@ -637,8 +648,11 @@ def _turnover_score_series(ind: pd.DataFrame) -> pd.DataFrame:
     recent_mean = turnover.rolling(5, min_periods=5).mean()
     prior_mean = turnover.shift(5).rolling(115, min_periods=115).mean()
     r = recent_mean / prior_mean.replace(0, np.nan)
+    safe_r = r.where(r > 0)
 
-    raw = 0.4 * np.log(r)
+    # log() is only defined for positive R. Zero/invalid turnover is left NaN
+    # and receives 0 after the caller's fillna, without RuntimeWarning noise.
+    raw = 0.4 * np.log(safe_r)
     raw = raw.clip(-0.3, 0.3)
 
     bullish_value = ind["Turnover"].where(ind["Bull"], 0.0).rolling(5, min_periods=5).sum()
@@ -1002,15 +1016,18 @@ def frame_for(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 def download_batch(tickers: list[str], timeout=40) -> pd.DataFrame:
+    end = datetime.now(timezone.utc).date() + timedelta(days=1)
+    start = end - timedelta(days=HISTORY_CALENDAR_DAYS)
     return yf.download(
         tickers=tickers,
-        period=PERIOD,
+        start=start.isoformat(),
+        end=end.isoformat(),
         interval="1d",
         group_by="ticker",
         auto_adjust=False,
         actions=False,
         progress=False,
-        threads=True,
+        threads=min(DOWNLOAD_THREADS, max(1, len(tickers))),
         timeout=timeout,
         multi_level_index=True,
     )
@@ -1140,7 +1157,18 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     missing: list[str] = []
     by_ticker = {s.ticker: s for s in universe}
 
-    batches = list(chunks(universe, BATCH_SIZE))
+    # Step-0 restricted symbols are excluded before requesting Yahoo prices.
+    # This both follows the strategy definition and avoids wasting requests on
+    # halted/watch-list symbols that often have no current Yahoo history.
+    scan_universe = [s for s in universe if s.ticker not in restricted]
+    rejection["restricted_status"] += len(universe) - len(scan_universe)
+
+    print(
+        f"[{category}] price-download universe={len(scan_universe):,} "
+        f"(step-0 restricted skipped={len(universe)-len(scan_universe):,})"
+    )
+
+    batches = list(chunks(scan_universe, BATCH_SIZE))
     total_batches = len(batches)
     for batch_no, batch in enumerate(batches, 1):
         tickers = [s.ticker for s in batch]
@@ -1174,36 +1202,76 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                 f"[{category}] {batch_no}/{total_batches} batches ({pct:5.1f}%) | "
                 f"priced={len(priced_tickers):,} | passed={len(results):,}"
             )
-        time.sleep(random.uniform(0.18, 0.42))
+        time.sleep(random.uniform(*PRIMARY_BATCH_SLEEP))
 
-    retry = [t for t in dict.fromkeys(missing) if t not in results]
+    retry = [t for t in dict.fromkeys(missing) if t not in results and t in by_ticker]
     if retry:
-        print(f"[{category}] retrying {len(retry):,} symbols")
-        for retry_no, batch in enumerate(chunks(retry, RETRY_BATCH_SIZE), 1):
-            try:
-                raw = download_batch(batch, timeout=50)
-            except Exception:
-                time.sleep(1.0)
-                continue
-            for ticker in batch:
-                try:
-                    frame = frame_for(raw, ticker)
-                    if frame is not None and not frame.empty:
-                        priced_tickers.add(ticker)
-                    item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted)
-                    if item is not None:
-                        results[ticker] = item
-                except Exception:
-                    pass
-            if retry_no % 10 == 0:
-                print(f"[{category}] retry batch {retry_no}")
-            time.sleep(random.uniform(0.35, 0.7))
+        print(f"[{category}] retrying {len(retry):,} symbols with bounded backoff")
 
-    coverage = len(priced_tickers) / max(1, len(universe))
-    if len(priced_tickers) < 100 or coverage < MIN_COVERAGE:
+        remaining = retry
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            if not remaining:
+                break
+
+            print(f"[{category}] retry attempt {attempt}/{RETRY_ATTEMPTS}: {len(remaining):,} symbols")
+            next_remaining = []
+
+            for retry_no, batch in enumerate(chunks(remaining, RETRY_BATCH_SIZE), 1):
+                try:
+                    raw = download_batch(batch, timeout=55)
+                except Exception as exc:
+                    next_remaining.extend(batch)
+                    print(
+                        f"[{category}] retry attempt {attempt} batch {retry_no} failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    time.sleep(min(12.0, 2.5 * attempt))
+                    continue
+
+                for ticker in batch:
+                    try:
+                        frame = frame_for(raw, ticker)
+                        if frame is not None and not frame.empty:
+                            priced_tickers.add(ticker)
+                            item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted)
+                            if item is not None:
+                                results[ticker] = item
+                        else:
+                            next_remaining.append(ticker)
+                    except Exception:
+                        next_remaining.append(ticker)
+
+                if retry_no % 20 == 0:
+                    print(
+                        f"[{category}] retry attempt {attempt} batch {retry_no} | "
+                        f"still-missing~{len(next_remaining):,}"
+                    )
+                time.sleep(random.uniform(*RETRY_BATCH_SLEEP))
+
+            remaining = list(dict.fromkeys(next_remaining))
+            if remaining and attempt < RETRY_ATTEMPTS:
+                backoff = min(30.0, 5.0 * (2 ** (attempt - 1)))
+                print(
+                    f"[{category}] {len(remaining):,} symbols still missing; "
+                    f"cooling down {backoff:.0f}s before next retry"
+                )
+                time.sleep(backoff)
+
+        if remaining:
+            print(
+                f"[{category}] final unavailable symbols after retries: "
+                f"{len(remaining):,}"
+            )
+
+    expected_price_count = len(scan_universe)
+    coverage = len(priced_tickers) / max(1, expected_price_count)
+    required_coverage = MIN_COVERAGE[category]
+
+    if len(priced_tickers) < 100 or coverage < required_coverage:
         raise RuntimeError(
-            f"{category} price coverage too low: {len(priced_tickers)}/{len(universe)} ({coverage:.1%}). "
-            "Existing site data was not overwritten."
+            f"{category} price coverage too low: "
+            f"{len(priced_tickers)}/{expected_price_count} ({coverage:.1%}), "
+            f"required>={required_coverage:.0%}. Existing site data was not overwritten."
         )
 
     items = sorted(results.values(), key=lambda x: (-x["score"], x["symbol"]))
@@ -1221,6 +1289,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         "universe_source": universe_source,
         "restriction_snapshot": restriction_meta,
         "universe_count": len(universe),
+        "price_download_universe_count": expected_price_count,
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
