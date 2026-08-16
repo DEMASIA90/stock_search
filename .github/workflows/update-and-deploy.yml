@@ -268,49 +268,55 @@ jobs:
       - name: Extract built site
         run: tar -xzf morning-invest-site.tar.gz
 
-      - name: Deploy to Firebase Hosting
-        id: firebase_deploy
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_MORNINGINV }}
-          projectId: morninginv
-          channelId: live
-          target: morninginv
-          entryPoint: .
-          force: true
-          firebaseToolsVersion: "15.25.1"
-
-      - name: Verify exact Firebase target and live release
+      - name: Deploy directly to Firebase default Hosting site
         shell: bash
         env:
-          DEPLOY_URLS: ${{ steps.firebase_deploy.outputs.urls }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_MORNINGINV }}
         run: |
           set -euo pipefail
 
-          echo "Firebase action URLs: ${DEPLOY_URLS:-<empty>}"
+          SA_FILE="$RUNNER_TEMP/morninginv-firebase-service-account.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$SA_FILE"
+          chmod 600 "$SA_FILE"
 
-          if [[ -n "${DEPLOY_URLS:-}" ]] && [[ "$DEPLOY_URLS" != *"morninginv.web.app"* ]] && [[ "$DEPLOY_URLS" != *"morninginv.firebaseapp.com"* ]]; then
-            echo "::error::Firebase action deployed to a different Hosting site: $DEPLOY_URLS"
-            exit 1
-          fi
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+
+          echo "Firebase project: morninginv"
+          echo "Expected default Hosting URL: https://morninginv.web.app"
+          echo "Deploy command: firebase deploy --only hosting --project morninginv"
+
+          npx -y firebase-tools@15.25.1 deploy \
+            --only hosting \
+            --project morninginv \
+            --non-interactive
+
+          rm -f "$SA_FILE"
+
+      - name: Verify morninginv.web.app is serving this build
+        shell: bash
+        run: |
+          set -euo pipefail
 
           EXPECTED_SHA="${{ github.sha }}"
           LIVE_URL="https://morninginv.web.app/build-info.json"
 
           for TRY in 1 2 3 4 5 6 7 8; do
-            echo "Verify morninginv.web.app attempt $TRY/8"
-            BODY=$(curl -fsSL -H 'Cache-Control: no-cache' "${LIVE_URL}?run=${{ github.run_id }}&try=$TRY&ts=$(date +%s)" || true)
+            echo "Firebase live verification $TRY/8"
+            BODY=$(curl -fsSL \
+              -H 'Cache-Control: no-cache' \
+              "${LIVE_URL}?run=${{ github.run_id }}&try=$TRY&ts=$(date +%s)" || true)
+
             echo "$BODY"
 
             if echo "$BODY" | grep -q "\"github_sha\": \"$EXPECTED_SHA\""; then
-              echo "Exact Firebase Hosting site verified: morninginv"
-              echo "Live build SHA verified: $EXPECTED_SHA"
+              echo "SUCCESS: morninginv.web.app is serving the current GitHub build."
+              echo "GitHub SHA: $EXPECTED_SHA"
               exit 0
             fi
 
             sleep 10
           done
 
-          echo "::error::Deployment did not appear on https://morninginv.web.app/. Check Firebase Hosting site ID / release history."
+          echo "::error::Firebase CLI deploy finished, but morninginv.web.app is not serving the current build."
           exit 1
 
