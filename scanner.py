@@ -1269,10 +1269,16 @@ def main():
             failures.append((category, str(exc)))
             print(f"ERROR {category}: {exc}")
 
+    if failures:
+        print("=" * 72)
+        print("SCAN FAILURES")
+        for failed_category, message in failures:
+            print(f" - {failed_category}: {message}")
+        print("Any hydrated previous snapshot remains in place for a failed category.")
+        print("=" * 72)
+
     if failures and len(failures) == len(categories):
         raise SystemExit(1)
-    if failures:
-        print("Partial refresh completed; failed categories:", failures)
 
 
 if __name__ == "__main__":
