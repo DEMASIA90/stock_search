@@ -46,6 +46,43 @@ jobs:
       - name: Checkout code only
         uses: actions/checkout@v6
 
+      - name: Verify Morning Invest source set
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Commit: ${{ github.sha }}"
+          echo "Checking v7.4 source files..."
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' scanner.py || {
+            echo "::error::scanner.py is not Morning Invest v7.4"
+            exit 1
+          }
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not Morning Invest v7.4"
+            exit 1
+          }
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "7.4"' universe.py || {
+            echo "::error::universe.py is not Morning Invest v7.4. Replace the repository-root file named exactly universe.py."
+            exit 1
+          }
+
+          grep -q 'KRX_KIND_DIRECT_STATUS_WITH_BADGE_FALLBACK' universe.py || {
+            echo "::error::universe.py does not contain the new KIND direct-status implementation."
+            exit 1
+          }
+
+          if grep -q 'KR restriction snapshot incomplete' universe.py; then
+            echo "::error::Old KR restriction implementation is still present in universe.py."
+            exit 1
+          fi
+
+          echo "scanner.py: v7.4"
+          echo "hydrate_data.py: v7.4"
+          echo "universe.py: v7.4"
+          echo "KR restriction implementation: direct KIND status pages + badge fallback"
+
       - name: Resolve refresh market
         id: market
         shell: bash
@@ -97,7 +134,9 @@ jobs:
           done
 
       - name: Scan selected market
-        run: python scanner.py --market "${{ steps.market.outputs.market }}"
+        run: |
+          echo "Running Morning Invest source set v7.4"
+          python scanner.py --market "${{ steps.market.outputs.market }}"
 
       - name: Remove scanner-only root caches
         run: rm -f docs/data/universe_kr.json docs/data/universe_us.json docs/data/universe_us_etf.json
