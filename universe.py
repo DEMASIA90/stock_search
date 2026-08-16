@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+MORNING_INVEST_COMPONENT_VERSION = "7.4"
+
 import pandas as pd
 import requests
 from lxml import html as lxml_html
@@ -255,12 +257,20 @@ def _scan_kind_corp_badges(stocks: list[Stock]) -> tuple[set[str], int]:
     return restricted, len(seen_codes)
 
 
-def _scan_kind_issue_page(url: str, method: str, stocks: list[Stock]) -> set[str]:
+def _scan_kind_issue_page(
+    url: str,
+    method: str,
+    stocks: list[Stock],
+    extra_params: dict[str, str] | None = None,
+) -> set[str]:
     name_to_code = {s.name: s.symbol for s in stocks}
     valid_symbols = {s.symbol for s in stocks}
+    params = {"method": method, "currentPageSize": "3000", "pageIndex": "1"}
+    if extra_params:
+        params.update(extra_params)
     response = requests.get(
         url,
-        params={"method": method, "currentPageSize": "3000", "pageIndex": "1"},
+        params=params,
         headers=HEADERS,
         timeout=35,
     )
@@ -288,39 +298,76 @@ def _scan_kind_issue_page(url: str, method: str, stocks: list[Stock]) -> set[str
 
 
 def fetch_kr_restricted_symbols(stocks: list[Stock]) -> tuple[set[str], dict]:
-    """Return current KRX/KIND restricted symbols used by step-0 screening.
+    """Return current KRX/KIND restricted symbols for step-0 screening.
 
-    The current-company badge crawl is the validation backbone. Separate official
-    KIND issue pages are unioned to capture management and trading-halt rows even
-    when the badge markup changes.
+    v7.2 policy:
+    1) Direct official KIND market-action pages are the primary source.
+    2) The full-company badge crawl is additive validation only.
+    3) If all required direct pages succeed, an incomplete badge crawl must not
+       block the entire KR publication.
+    4) If a required direct page fails, a fully verified badge crawl can still
+       act as the fail-closed fallback. Otherwise KR publication is stopped.
     """
-    badge_restricted, scanned_codes = _scan_kind_corp_badges(stocks)
-    if scanned_codes < 900:
+    restricted: set[str] = set()
+    issue_sources: dict[str, object] = {}
+    direct_success = 0
+
+    # These are separate current-status pages maintained by KIND.
+    # paxreq=y on trading-halt requests is used so the all-market list is returned.
+    pages = [
+        ("management", KIND_ADMIN_URL, "searchAdminIssueList", None),
+        ("halt", KIND_HALT_URL, "searchTradingHaltIssueMain", {"paxreq": "y"}),
+        ("warning", KIND_WARNING_URL, "investattentwarnriskyMain", None),
+    ]
+
+    for label, url, method, extra in pages:
+        try:
+            values = _scan_kind_issue_page(url, method, stocks, extra_params=extra)
+            restricted.update(values)
+            issue_sources[label] = len(values)
+            direct_success += 1
+            print(f"KR restriction direct page {label}: {len(values)} symbols")
+        except Exception as exc:
+            issue_sources[label] = f"error:{type(exc).__name__}:{exc}"
+            print(f"KR restriction direct page {label} unavailable: {type(exc).__name__}: {exc}")
+
+    badge_restricted: set[str] = set()
+    scanned_codes = 0
+    badge_error = None
+    try:
+        badge_restricted, scanned_codes = _scan_kind_corp_badges(stocks)
+        if scanned_codes >= 900:
+            restricted.update(badge_restricted)
+            print(
+                f"KR restriction company-badge validation: verified {scanned_codes} listed codes, "
+                f"restricted={len(badge_restricted)}"
+            )
+        else:
+            print(
+                f"KR restriction company-badge validation incomplete: {scanned_codes} codes. "
+                "Direct issue pages will be used instead."
+            )
+    except Exception as exc:
+        badge_error = f"{type(exc).__name__}:{exc}"
+        print(f"KR restriction badge crawl unavailable: {badge_error}")
+
+    direct_complete = direct_success == len(pages)
+    badge_complete = scanned_codes >= 900
+
+    if not direct_complete and not badge_complete:
         raise RuntimeError(
-            f"KR restriction snapshot incomplete ({scanned_codes} listed codes seen). "
+            "KR restriction sources incomplete: "
+            f"direct_pages={direct_success}/{len(pages)}, badge_verified={scanned_codes}. "
             "KR data was not published to avoid bypassing step-0 status filters."
         )
 
-    restricted = set(badge_restricted)
-    issue_sources = {}
-    pages = [
-        ("management", KIND_ADMIN_URL, "searchAdminIssueList"),
-        ("halt", KIND_HALT_URL, "searchTradingHaltIssueMain"),
-        ("warning", KIND_WARNING_URL, "investattentwarnriskyMain"),
-    ]
-    for label, url, method in pages:
-        try:
-            values = _scan_kind_issue_page(url, method, stocks)
-            restricted.update(values)
-            issue_sources[label] = len(values)
-        except Exception as exc:
-            # Badge crawl remains authoritative fallback; keep explicit metadata.
-            issue_sources[label] = f"error:{type(exc).__name__}"
-            print(f"KR issue page {label} unavailable: {exc}")
-
     return restricted, {
-        "source": "KRX_KIND_CURRENT_STATUS",
-        "listed_codes_verified": scanned_codes,
+        "source": "KRX_KIND_DIRECT_STATUS_WITH_BADGE_FALLBACK",
+        "direct_pages_ok": direct_success,
+        "direct_pages_total": len(pages),
+        "listed_codes_verified_by_badges": scanned_codes,
+        "badge_restricted_count": len(badge_restricted),
+        "badge_error": badge_error,
         "restricted_count": len(restricted),
         "issue_pages": issue_sources,
     }

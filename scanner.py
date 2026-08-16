@@ -15,6 +15,8 @@ from datetime import datetime, time as dtime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+MORNING_INVEST_COMPONENT_VERSION = "7.4"
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
