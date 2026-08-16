@@ -1,6 +1,5 @@
 {
   "hosting": {
-    "target": "morninginv",
     "public": "docs",
     "ignore": [
       "firebase.json",
