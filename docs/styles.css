@@ -43,10 +43,10 @@ button{cursor:pointer}
 .search-box kbd{font-family:inherit;font-size:10px;color:var(--muted);border:1px solid var(--line);background:#0b0e14;border-radius:8px;padding:4px 7px;white-space:nowrap}
 .status{border:1px dashed var(--line);border-radius:14px;padding:26px;text-align:center;color:var(--muted);font-size:12px}
 .table-card{border:1px solid var(--line);border-radius:17px;background:rgba(16,19,26,.9);overflow:hidden;box-shadow:var(--shadow)}
-.table-scroll{overflow-x:auto}
+.table-scroll{width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1040px}
-thead{position:sticky;top:76px;z-index:5;background:#0d1016}
-th{height:45px;border-bottom:1px solid var(--line);color:#778396;font-size:10px;font-weight:750;text-align:right;padding:0 11px;white-space:nowrap}
+thead{position:static;background:#0d1016}
+th{height:45px;border-bottom:1px solid var(--line);color:#778396;font-size:10px;font-weight:750;text-align:right;padding:0 11px;white-space:nowrap;vertical-align:middle}
 th.rank-col{text-align:center;width:52px}
 th.stock-col{text-align:left;width:245px}
 th.total-col{width:78px;color:var(--accent)}
@@ -159,7 +159,15 @@ tbody tr.bt-good:hover,tbody tr.bt-strong:hover{background-color:#151d1b}
 }
 
 
-.backtest-btn:disabled{opacity:.38;cursor:not-allowed}
-.detail-loading,.detail-error{grid-column:1/-1;min-height:72px;display:grid;place-items:center;color:var(--muted);font-size:11px;border:1px dashed var(--line);border-radius:12px}
-.detail-error{color:#ff8b82}
-.chart-loading-inline{height:100%;border:0}
+/* Morning Invest UI hotfix 20260817-ui1 */
+#desktopTable thead,
+.backtest-table thead {
+  position: static !important;
+  top: auto !important;
+}
+#desktopTable th {
+  background:#0d1016;
+}
+#desktopTable .table-scroll {
+  position:relative;
+}
