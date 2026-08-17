@@ -217,7 +217,7 @@ jobs:
         run: |
           rm -rf pages-lite
           mkdir -p pages-lite
-          cp docs/index.html docs/app.js docs/styles.css docs/build-info.json pages-lite/
+          cp docs/index.html docs/app.js docs/styles.css docs/news-config.js docs/build-info.json pages-lite/
           touch pages-lite/.nojekyll
 
       - name: Configure GitHub Pages
