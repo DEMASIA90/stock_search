@@ -56,6 +56,16 @@ MAX_DAILY_PERCENT_B = 0.35
 MONTHLY_HA_BEARISH_EXCLUDE = 10
 SQUEEZE_BANDWIDTH = 0.08
 
+# Score model.
+SWING_LOOKBACK_DAYS = 200
+SWING_FULL_SCORE_DAYS = 5  # ~1 trading week
+SWING_MAX_SCORE = 0.5
+SWING_MIN_SCORE = 0.1
+HA_COMBINED_CAP = 0.7
+RAW_MAX_SCORE = 3.0
+DISPLAY_SCORE_MULTIPLIER = 33.3
+DISPLAY_MAX_SCORE = 99.9
+
 # Backtest: current strategy recreated point-in-time on each historical daily close.
 # Signal is actionable only from the next trading day's open.
 BACKTEST_LOOKBACK_DAYS = 252
@@ -84,7 +94,6 @@ FORECAST_MIN_ANALOGS = 5
 # Large-cap universe filter.
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # 10조원
 STOCK_SHARES_CACHE_DAYS = 30
-ETF_ASSET_CACHE_DAYS = 3
 MARKET_SIZE_RETRY_ATTEMPTS = 3
 MARKET_SIZE_MIN_LOOKUP_COVERAGE = 0.90
 
@@ -336,18 +345,35 @@ def score_percent_b(percent_b: float, bandwidth: float) -> tuple[float, bool]:
     return round(score, 6), squeeze
 
 
+def _swing_score_from_age(age: int | None) -> float:
+    """Score a prior upper-band touch by trading-session age.
+
+    1~5 sessions ago: full 0.5.
+    6~200 sessions ago: linear decay from 0.5 to 0.1.
+    Older/no touch: 0.
+    """
+    if age is None or age < 1 or age > SWING_LOOKBACK_DAYS:
+        return 0.0
+    if age <= SWING_FULL_SCORE_DAYS:
+        return SWING_MAX_SCORE
+    span = SWING_LOOKBACK_DAYS - SWING_FULL_SCORE_DAYS
+    progress = (age - SWING_FULL_SCORE_DAYS) / span
+    score = SWING_MAX_SCORE - (SWING_MAX_SCORE - SWING_MIN_SCORE) * progress
+    return round(max(SWING_MIN_SCORE, min(SWING_MAX_SCORE, score)), 6)
+
+
 def score_prior_upper_swing(percent_b: pd.Series) -> tuple[float, int | None]:
-    # Current bar is age 0. We accept any >=0.95 observation 5~40 trading days ago.
+    # Use the most recent prior %B>=0.95 observation within 200 trading sessions.
+    # Current bar is never counted as its own prior swing.
     values = pd.to_numeric(percent_b, errors="coerce").to_numpy(dtype=float)
     last = len(values) - 1
-    found_ages = []
-    for age in range(5, 41):
+    for age in range(1, SWING_LOOKBACK_DAYS + 1):
         i = last - age
         if i < 0:
             break
         if np.isfinite(values[i]) and values[i] >= 0.95:
-            found_ages.append(age)
-    return (0.3, min(found_ages)) if found_ages else (0.0, None)
+            return _swing_score_from_age(age), age
+    return 0.0, None
 
 
 def score_psar(frame: pd.DataFrame) -> tuple[float, int | None, int]:
@@ -491,29 +517,15 @@ def _cache_age_days(entry: dict) -> float:
 
 
 def _fetch_stock_size_basis(stock: Stock) -> dict | None:
-    """Fetch slowly-changing size basis from Yahoo.
+    """Fetch slowly-changing equity market-size basis from Yahoo.
 
-    Stocks: shares outstanding, then current market cap = shares * latest close.
-    ETFs: totalAssets/netAssets (AUM-like size), because corporate market cap is
-    not the appropriate ETF size concept.
+    ETFs are deliberately exempt from the KRW 10T market-size filter and must
+    never trigger per-ticker AUM/market-cap lookups here.
     """
-    ticker = yf.Ticker(stock.ticker)
-
     if stock.category == "US_ETF":
-        info = ticker.get_info() or {}
-        assets = finite(info.get("totalAssets"))
-        if not np.isfinite(assets) or assets <= 0:
-            assets = finite(info.get("netAssets"))
-        if not np.isfinite(assets) or assets <= 0:
-            assets = finite(info.get("marketCap"))
-        if np.isfinite(assets) and assets > 0:
-            return {
-                "basis": "total_assets",
-                "value": float(assets),
-                "currency": "USD",
-                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }
         return None
+
+    ticker = yf.Ticker(stock.ticker)
 
     # Equity: cache share count and recompute market cap from today's close.
     try:
@@ -555,9 +567,15 @@ def resolve_market_size(
     thresholds: dict,
     size_cache: dict,
 ) -> tuple[float, float, str] | None:
-    """Return (native_size, KRW_size, basis). Fail closed when unknown."""
+    """Return (native_size, KRW_size, basis) for equities.
+
+    US ETFs are exempt and return an explicit non-network sentinel.
+    """
+    if stock.category == "US_ETF":
+        return np.nan, np.nan, "exempt"
+
     entry = size_cache.get(stock.ticker)
-    max_age = ETF_ASSET_CACHE_DAYS if stock.category == "US_ETF" else STOCK_SHARES_CACHE_DAYS
+    max_age = STOCK_SHARES_CACHE_DAYS
 
     if not isinstance(entry, dict) or _cache_age_days(entry) > max_age:
         entry = None
@@ -637,19 +655,22 @@ def analyze(
     if monthly_bearish_streak >= MONTHLY_HA_BEARISH_EXCLUDE:
         return None, "monthly_ha_bear_10plus"
 
-    # 0. Large-cap filter: current market size must be at least KRW 10T.
-    # For ETFs, total assets (AUM-like size) is used instead of corporate market cap.
-    size_info = resolve_market_size(stock, close, thresholds, size_cache)
-    if size_info is None:
-        return None, "market_size_unavailable"
-    market_size_native, market_size_krw, market_size_basis = size_info
-    if market_size_krw < MIN_MARKET_SIZE_KRW:
-        return None, "market_size_lt_10t"
+    # 0. Large-cap filter: equities must be >= KRW 10T.
+    # US ETFs are fully exempt: no AUM/market-cap request and all pass this step.
+    if stock.category == "US_ETF":
+        market_size_native, market_size_krw, market_size_basis = np.nan, np.nan, "exempt"
+    else:
+        size_info = resolve_market_size(stock, close, thresholds, size_cache)
+        if size_info is None:
+            return None, "market_size_unavailable"
+        market_size_native, market_size_krw, market_size_basis = size_info
+        if market_size_krw < MIN_MARKET_SIZE_KRW:
+            return None, "market_size_lt_10t"
 
     # 1. Daily %B score, with squeeze penalty.
     s1, squeeze = score_percent_b(percent_b, bandwidth)
 
-    # 2. Previous upper-band swing in the 5~40 trading-day window.
+    # 2. Previous upper-band swing within 200 trading sessions; recent touches score more.
     s2, upper_swing_age = score_prior_upper_swing(ind["PercentB"])
 
     # 3. PSAR: >=5 days above, then transition below, valid for d=0..3.
@@ -665,7 +686,7 @@ def analyze(
     s6, m_ha_age, m_ha_bear_streak = ha_reversal_score(monthly_ha, max_age=1, unit=0.15, streak_cap=3)
 
     # 7. Multi-timeframe HA cap.
-    s7 = round(min(s4 + s5 + s6, 0.6), 6)
+    s7 = round(min(s4 + s5 + s6, HA_COMBINED_CAP), 6)
 
     # 8. Trading-value regime score.
     s8, turnover_r, bullish_turnover_share = score_turnover(ind)
@@ -687,6 +708,7 @@ def analyze(
         "close": clean(close),
         "day_change_pct": clean(day_change, 2),
         "score": total,
+        "display_score": round(total * DISPLAY_SCORE_MULTIPLIER, 1),
         "scores": {
             "s1_percent_b": round(s1, 4),
             "s2_upper_swing": round(s2, 4),
@@ -879,9 +901,19 @@ def build_historical_scores(
     s1 = s1.where(~(bw < SQUEEZE_BANDWIDTH), s1 * 0.5)
     hist["s1"] = s1
 
-    # 2) upper-band observation 5~40 sessions ago
-    prior_upper = pb.shift(5).rolling(36, min_periods=1).max()
-    hist["s2"] = (prior_upper >= 0.95).astype(float) * 0.3
+    # 2) most-recent prior upper-band observation within 200 sessions.
+    # Point-in-time reconstruction: today's %B is only eligible for future days.
+    s2_values = np.zeros(len(ind), dtype=float)
+    last_upper_pos: int | None = None
+    pb_values = pb.to_numpy(dtype=float)
+    for i, value in enumerate(pb_values):
+        if last_upper_pos is not None:
+            age = i - last_upper_pos
+            if age <= SWING_LOOKBACK_DAYS:
+                s2_values[i] = _swing_score_from_age(age)
+        if np.isfinite(value) and value >= 0.95:
+            last_upper_pos = i
+    hist["s2"] = pd.Series(s2_values, index=ind.index)
 
     # 3) PSAR transition event
     psar_hist = _psar_score_series(frame)
@@ -909,7 +941,7 @@ def build_historical_scores(
     hist["monthly_bear_streak"] = pd.to_numeric(m_daily["bear_streak"], errors="coerce")
 
     # 7) HA cap
-    hist["s7"] = (hist["s4"] + hist["s5"] + hist["s6"]).clip(upper=0.6)
+    hist["s7"] = (hist["s4"] + hist["s5"] + hist["s6"]).clip(upper=HA_COMBINED_CAP)
 
     # 8) trading-value score
     t_hist = _turnover_score_series(ind)
@@ -1237,6 +1269,7 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "day_change_pct": item["day_change_pct"],
         "rank": item["rank"],
         "score": item["score"],
+        "display_score": item.get("display_score", round(float(item["score"]) * DISPLAY_SCORE_MULTIPLIER, 1)),
         "scores": item["scores"],
         "market_size_krw": (item.get("metrics") or {}).get("market_size_krw"),
         "market_size_basis": (item.get("metrics") or {}).get("market_size_basis"),
@@ -1288,7 +1321,7 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict], s
         encoding="utf-8",
     )
 
-    # Persist slow-changing shares / ETF asset-size cache inside the Hosting snapshot.
+    # Persist slow-changing equity share/market-cap cache inside the Hosting snapshot.
     sizes_file = category_dir / "sizes.json"
     sizes_file.write_text(
         json.dumps(size_cache, ensure_ascii=False, separators=(",", ":")),
@@ -1325,10 +1358,15 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
 
     print("=" * 72)
     print(f"Morning Invest | {category} | universe={len(universe):,} | restricted={len(restricted):,}")
+    size_rule = (
+        "market size filter=OFF (ETF exempt)"
+        if category == "US_ETF"
+        else f"market size>=KRW {MIN_MARKET_SIZE_KRW/1e12:.0f}T"
+    )
     print(
         f"thresholds: close>={thresholds['min_price']:.4f} {thresholds['currency']}, "
         f"20d turnover>={thresholds['min_turnover20']:.0f} {thresholds['currency']}, "
-        f"market size>=KRW {MIN_MARKET_SIZE_KRW/1e12:.0f}T"
+        f"{size_rule}"
     )
     print("=" * 72)
 
@@ -1455,15 +1493,20 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             f"required>={required_coverage:.0%}. Existing site data was not overwritten."
         )
 
-    size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
-    size_success = rejection["market_size_lt_10t"] + len(results)
-    size_coverage = size_success / max(1, size_attempted)
-    if size_attempted >= 10 and size_coverage < MARKET_SIZE_MIN_LOOKUP_COVERAGE:
-        raise RuntimeError(
-            f"{category} market-size lookup coverage too low: "
-            f"{size_success}/{size_attempted} ({size_coverage:.1%}), "
-            f"required>={MARKET_SIZE_MIN_LOOKUP_COVERAGE:.0%}. Existing site data was not overwritten."
-        )
+    if category == "US_ETF":
+        size_attempted = 0
+        size_success = 0
+        size_coverage = np.nan
+    else:
+        size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
+        size_success = rejection["market_size_lt_10t"] + len(results)
+        size_coverage = size_success / max(1, size_attempted)
+        if size_attempted >= 10 and size_coverage < MARKET_SIZE_MIN_LOOKUP_COVERAGE:
+            raise RuntimeError(
+                f"{category} market-size lookup coverage too low: "
+                f"{size_success}/{size_attempted} ({size_coverage:.1%}), "
+                f"required>={MARKET_SIZE_MIN_LOOKUP_COVERAGE:.0%}. Existing site data was not overwritten."
+            )
 
     # No score floor is applied here: 0 and negative scores remain visible.
     items = sorted(results.values(), key=lambda x: (-x["score"], x["symbol"]))
@@ -1473,7 +1516,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_V8_LARGECAP_BB_HA_PSAR_TURNOVER",
+        "strategy": "MI_V8_1_SWING200_BB_HA_PSAR_TURNOVER",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1485,11 +1528,22 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
-        "market_size_min_krw": MIN_MARKET_SIZE_KRW,
-        "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if size_attempted else None,
+        "market_size_min_krw": None if category == "US_ETF" else MIN_MARKET_SIZE_KRW,
+        "market_size_filter": "exempt" if category == "US_ETF" else "krw_10t_min",
+        "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if size_attempted and np.isfinite(size_coverage) else None,
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
-        "max_score": 2.7,
+        "max_score": RAW_MAX_SCORE,
+        "display_score_multiplier": DISPLAY_SCORE_MULTIPLIER,
+        "max_display_score": DISPLAY_MAX_SCORE,
+        "swing_model": {
+            "upper_band_percent_b": 0.95,
+            "lookback_sessions": SWING_LOOKBACK_DAYS,
+            "full_score_sessions": SWING_FULL_SCORE_DAYS,
+            "max_score": SWING_MAX_SCORE,
+            "min_score_at_lookback": SWING_MIN_SCORE,
+        },
+        "ha_combined_cap": HA_COMBINED_CAP,
         "backtest_model": {
             "history": "max_1_trading_year",
             "min_signal_score": BACKTEST_MIN_SCORE,
