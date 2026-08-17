@@ -44,7 +44,7 @@ button{cursor:pointer}
 .status{border:1px dashed var(--line);border-radius:14px;padding:26px;text-align:center;color:var(--muted);font-size:12px}
 .table-card{border:1px solid var(--line);border-radius:17px;background:rgba(16,19,26,.9);overflow:hidden;box-shadow:var(--shadow)}
 .table-scroll{width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
-table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1040px}
+table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:960px}
 thead{position:static;background:#0d1016}
 th{height:45px;border-bottom:1px solid var(--line);color:#778396;font-size:10px;font-weight:750;text-align:right;padding:0 11px;white-space:nowrap;vertical-align:middle}
 th.rank-col{text-align:center;width:52px}
@@ -192,7 +192,7 @@ tbody tr.expanded{background:#121b19;box-shadow:inset 3px 0 0 rgba(120,242,182,.
 .inline-backtest-btn{padding:6px 10px}
 .detail-section-title{margin:18px 0 8px;color:#8190a4;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
 .inline-detail-card .score-grid{margin-top:0}
-.inline-detail-card .metric-grid{grid-template-columns:repeat(5,1fr)}
+.inline-detail-card .metric-grid{grid-template-columns:repeat(3,1fr)}
 .inline-detail-card .backtest-panel{margin-top:10px}
 .inline-detail-card .detail-loading{min-height:58px}
 @media(max-width:760px){

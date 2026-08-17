@@ -18,14 +18,15 @@ function dataUrl(path, force=false) {
   return force ? `${url}?ts=${Date.now()}` : url;
 }
 
+const DEFAULT_TOP_N = 50;
+const BACKTEST_MIN_DISPLAY_SCORE = 70.0;
+
 const SCORE_COLUMNS = [
   ['s1_percent_b', '① %B'],
   ['s2_upper_swing', '② Swing'],
-  ['s3_psar', '③ SAR'],
+  ['s3_monthly_psar', '③ M-PSAR'],
   ['s4_daily_ha', '④ D-HA'],
-  ['s5_weekly_ha', '⑤ W-HA'],
-  ['s6_monthly_ha', '⑥ M-HA'],
-  ['s8_turnover', '⑧ Value'],
+  ['s5_ma60_slope', '⑤ MA60↑'],
 ];
 
 const state = {
@@ -74,8 +75,8 @@ function scoreClass(v) {
 function displayScore(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return '—';
-  // Raw strategy max is 3.0; UI scale is 33.3x => 99.9 max.
-  return (Math.min(99.9, n * 33.3)).toFixed(1);
+  // Raw strategy max is 3.5; normalize to a 100-point UI scale.
+  return (Math.min(100, Math.max(0, n / 3.5 * 100))).toFixed(1);
 }
 function sizeText(stock) {
   if (stock?.category === 'US_ETF') return '';
@@ -116,13 +117,22 @@ function applyFilter() {
   const data = currentData();
   const items = data?.items || [];
   const q = state.query.trim().toLowerCase();
+
+  // Keep the complete summary in memory for search.
+  // With no query, only the strategy's top 50 are rendered.
+  // With a query, search ALL summary items so ranks below 50 remain discoverable.
   state.filtered = q
     ? items.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.exchange}`.toLowerCase().includes(q))
-    : items;
+    : items.slice(0, DEFAULT_TOP_N);
+
   state.rendered = 0;
   $('#stockTableBody').innerHTML = '';
   $('#mobileList').innerHTML = '';
-  $('#resultCount').textContent = `${state.filtered.length.toLocaleString()}개`;
+
+  $('#resultCount').textContent = q
+    ? `${state.filtered.length.toLocaleString()}개 검색`
+    : `상위 ${state.filtered.length.toLocaleString()}개 · 전체 ${items.length.toLocaleString()}개`;
+
   renderNextBatch();
 }
 
@@ -172,13 +182,14 @@ function mobileHtml(s) {
     <div class="mobile-top">
       <span class="mobile-rank">${s.rank}</span>
       <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}${sizeText(s)}</span></div>
-      <div class="mobile-score"><strong>${displayScore(s.score)}</strong><span>/ 99.9</span></div>
+      <div class="mobile-score"><strong>${displayScore(s.score)}</strong><span>/ 100</span></div>
     </div>
     <div class="mobile-grid">
       <span>① %B<b>${Number(sc.s1_percent_b || 0).toFixed(3)}</b></span>
-      <span>③ SAR<b>${Number(sc.s3_psar || 0).toFixed(3)}</b></span>
-      <span>⑤ W-HA<b>${Number(sc.s5_weekly_ha || 0).toFixed(3)}</b></span>
-      <span>⑧ Value<b class="${scoreClass(sc.s8_turnover)}">${Number(sc.s8_turnover || 0).toFixed(3)}</b></span>
+      <span>② Swing<b>${Number(sc.s2_upper_swing || 0).toFixed(3)}</b></span>
+      <span>③ M-PSAR<b>${Number(sc.s3_monthly_psar || 0).toFixed(3)}</b></span>
+      <span>④ D-HA<b>${Number(sc.s4_daily_ha || 0).toFixed(3)}</b></span>
+      <span>⑤ MA60↑<b>${Number(sc.s5_ma60_slope || 0).toFixed(3)}</b></span>
     </div>
   </button>`;
 }
@@ -255,7 +266,7 @@ function inlineDetailShell(summary, mobile=false) {
       <button class="inline-close icon-btn" aria-label="상세 닫기">×</button>
     </header>
     <section class="detail-hero">
-      <div class="detail-score"><strong>${displayScore(summary.score)}</strong><span>/ 99.9</span></div>
+      <div class="detail-score"><strong>${displayScore(summary.score)}</strong><span>/ 100</span></div>
       <div class="detail-price"><strong>${money(summary.close, summary.currency)}</strong><span class="${changeClass(summary.day_change_pct)}">${dayPct(summary.day_change_pct,2)}</span></div>
     </section>
 
@@ -272,13 +283,13 @@ function inlineDetailShell(summary, mobile=false) {
         </div>
       </div>
       <div class="chart detail-chart"><div class="detail-loading chart-loading-inline">차트 로딩 중…</div></div>
-      <div class="legend"><span class="price-line">Price</span><span class="mid-line">BB Mid</span><span class="band-line">Band</span></div>
+      <div class="legend"><span class="price-line">Price</span><span class="mid-line">BB Mid</span><span class="band-line">Band</span><span>MA60</span></div>
     </section>
 
     <section class="backtest-panel inline-backtest-panel" hidden>
       <div class="backtest-head">
-        <div><span class="eyebrow">BACKTEST</span><h3>총점 33.3점 이상 과거 신호 성과</h3></div>
-        <span class="backtest-rule">1Y · 총점 ≥ 33.3 · Next Open</span>
+        <div><span class="eyebrow">BACKTEST</span><h3>총점 70점 이상 과거 신호 성과</h3></div>
+        <span class="backtest-rule">1Y · 총점 ≥ 70.0 · Next Open</span>
       </div>
       <div class="backtest-summary"></div>
       <section class="forecast-panel" hidden>
@@ -314,7 +325,7 @@ async function openInlineStock(summary, target) {
     target.insertAdjacentHTML('afterend', `<div class="inline-detail-wrap mobile-detail-wrap">${inlineDetailShell(summary,true)}</div>`);
     state.detailEl = target.nextElementSibling;
   } else {
-    target.insertAdjacentHTML('afterend', `<tr class="inline-detail-row"><td colspan="10"><div class="inline-detail-wrap">${inlineDetailShell(summary,false)}</div></td></tr>`);
+    target.insertAdjacentHTML('afterend', `<tr class="inline-detail-row"><td colspan="8"><div class="inline-detail-wrap">${inlineDetailShell(summary,false)}</div></td></tr>`);
     state.detailEl = target.nextElementSibling;
   }
 
@@ -348,20 +359,20 @@ function renderInlineStockDetail(stock) {
   root.querySelectorAll('.inline-period-tabs button').forEach((b)=>b.classList.toggle('active',Number(b.dataset.days)===120));
 
   const s = stock.scores || {}, m = stock.metrics || {};
-  root.querySelector('.detail-score-grid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('') +
-    `<div class="score-tile cap"><span>⑦ HA Cap</span><b>${Number(s.s7_ha_capped || 0).toFixed(3)}</b></div>`;
+  root.querySelector('.detail-score-grid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('');
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
+  const psarState = m.monthly_psar_below ? `아래 · ${Number(m.monthly_psar_below_streak || 0)}개월 연속` : '위';
+  const maSlope = m.ma60_slope_pct == null ? '—' : `${Number(m.ma60_slope_pct) > 0 ? '+' : ''}${(Number(m.ma60_slope_pct) * 100).toFixed(3)}%/일`;
   root.querySelector('.detail-metric-grid').innerHTML = `
     <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${stock.category === 'US_ETF' ? 'ETF 면제' : marketSize(m.market_size_krw)}</b></div>
     <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
     <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
-    <div><span>R (5 / 115)</span><b>${m.turnover_r == null ? '—' : Number(m.turnover_r).toFixed(2)}x</b></div>
-    <div><span>Bull Value</span><b>${pct(m.bullish_turnover_share,0)}</b></div>
     <div><span>Upper Swing</span><b>${age(m.upper_swing_age,'D')}</b></div>
-    <div><span>PSAR</span><b>${age(m.psar_age,'D')}</b></div>
-    <div><span>D / W / M HA</span><b>${age(m.daily_ha_age,'D')} · ${age(m.weekly_ha_age,'W')} · ${age(m.monthly_ha_age,'M')}</b></div>
-    <div><span>20D Value</span><b>${formatCompact(m.turnover20, stock.currency)}</b></div>`;
+    <div><span>월봉 PSAR</span><b>${psarState}</b></div>
+    <div><span>Daily HA 반전</span><b>${age(m.daily_ha_age,'D')} · 직전 음봉 ${Number(m.daily_ha_prior_bear || 0)}일</b></div>
+    <div><span>MA60</span><b>${m.ma60 == null ? '—' : money(m.ma60, stock.currency)}</b></div>
+    <div><span>MA60 기울기</span><b>${maSlope}</b></div>`;
 
   drawSelectedChart();
 }
@@ -477,13 +488,13 @@ function renderBacktest(stock) {
 
   if (!bt.available) {
     panel.querySelector('.forecast-panel').hidden = true;
-    rule.textContent = '1Y · 총점 ≥ 33.3 · 데이터 부족';
+    rule.textContent = '1Y · 총점 ≥ 70.0 · 데이터 부족';
     summary.innerHTML = backtestMetric('Signals', '0');
     body.innerHTML = '';
     return;
   }
 
-  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? 1)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
+  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? 2.45)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
   summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
     backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),
@@ -497,24 +508,13 @@ function renderBacktest(stock) {
   renderForecast(stock);
   body.innerHTML = trades.length
     ? trades.map(t => `<tr><td>${escapeHtml(t.signal_date || '—')}</td><td>${t.score == null ? '—' : displayScore(t.score)}</td><td class="${changeClass((t.ret_5d || 0)*100)}">${ratioPct(t.ret_5d)}</td><td class="${changeClass((t.ret_10d || 0)*100)}">${ratioPct(t.ret_10d)}</td><td class="${changeClass((t.ret_20d || 0)*100)}">${ratioPct(t.ret_20d)}</td><td class="up">${ratioPct(t.mfe_20d)}</td><td class="down">${ratioPct(t.mae_20d)}</td></tr>`).join('')
-    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 총점 33.3점 이상 독립 신호가 없습니다.</td></tr>`;
+    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 총점 70점 이상 독립 신호가 없습니다.</td></tr>`;
 }
 
-function formatCompact(v, currency) {
-  if (v == null) return '—'; const n = Number(v);
-  if (currency === 'KRW') {
-    if (n >= 1e12) return `${(n/1e12).toFixed(1)}조`;
-    if (n >= 1e8) return `${(n/1e8).toFixed(1)}억`;
-    return `₩${Math.round(n).toLocaleString('ko-KR')}`;
-  }
-  if (n >= 1e9) return `$${(n/1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n/1e6).toFixed(1)}M`;
-  return `$${Math.round(n).toLocaleString('en-US')}`;
-}
 
 function chartRows(stock) {
   const c = stock.chart || {}, d = c.d || [];
-  return d.map((date,i) => ({ date, close:c.c?.[i], mid:c.m?.[i], upper:c.u?.[i], lower:c.l?.[i] }));
+  return d.map((date,i) => ({ date, close:c.c?.[i], mid:c.m?.[i], upper:c.u?.[i], lower:c.l?.[i], ma60:c.a60?.[i] }));
 }
 function drawSelectedChart() {
   if (!state.selected) return;
@@ -528,10 +528,10 @@ function drawChart(el, data, currency) {
   const pad={l:8,r:58,t:15,b:22};
   const vals=data.flatMap((d)=>[d.close,d.upper,d.lower]); const min=Math.min(...vals), max=Math.max(...vals), span=Math.max(max-min,Math.abs(max)*.02,1); const lo=min-span*.08, hi=max+span*.08;
   const X=(i)=>pad.l+i/Math.max(1,data.length-1)*(W-pad.l-pad.r), Y=(v)=>pad.t+(1-(v-lo)/(hi-lo))*(H-pad.t-pad.b);
-  const path=(key)=>data.map((d,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(d[key]).toFixed(1)}`).join(' ');
+  const path=(key)=>data.filter((d)=>Number.isFinite(d[key])).map((d,i,arr)=>{ const realIndex=data.indexOf(d); return `${i?'L':'M'}${X(realIndex).toFixed(1)},${Y(d[key]).toFixed(1)}`; }).join(' ');
   const poly=data.map((d,i)=>`${X(i)},${Y(d.upper)}`).join(' ')+' '+[...data].reverse().map((d,ri)=>{const i=data.length-1-ri;return `${X(i)},${Y(d.lower)}`}).join(' ');
   let grid=''; for(let i=0;i<5;i++){const y=pad.t+i*(H-pad.t-pad.b)/4,v=hi-i*(hi-lo)/4,label=currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):'$'+v.toFixed(v>=100?0:1);grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" stroke="#202631"/><text x="${W-pad.r+6}" y="${y+4}" fill="#718096" font-size="9">${label}</text>`}
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="bandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7faaff" stop-opacity=".14"/><stop offset="1" stop-color="#7faaff" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="${poly}" fill="url(#bandFill)"/><path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('mid')}" fill="none" stroke="#efc46a" stroke-width="1.2"/><path d="${path('close')}" fill="none" stroke="#78f2b6" stroke-width="2"/></svg>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="bandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7faaff" stop-opacity=".14"/><stop offset="1" stop-color="#7faaff" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="${poly}" fill="url(#bandFill)"/><path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('mid')}" fill="none" stroke="#efc46a" stroke-width="1.2"/><path d="${path('ma60')}" fill="none" stroke="#b899ff" stroke-width="1.4"/><path d="${path('close')}" fill="none" stroke="#78f2b6" stroke-width="2"/></svg>`;
 }
 
 $('#marketTabs').addEventListener('click', (e) => { const b=e.target.closest('.market-tab'); if(b){ collapseInlineDetail(); switchCategory(b.dataset.category); } });
