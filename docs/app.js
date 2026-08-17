@@ -18,13 +18,13 @@ function dataUrl(path, force=false) {
   return force ? `${url}?ts=${Date.now()}` : url;
 }
 
-const DEFAULT_TOP_N = 50;
+const DEFAULT_TOP_N = 20;
 const BACKTEST_MIN_DISPLAY_SCORE = 70.0;
 
 const SCORE_COLUMNS = [
   ['s1_percent_b', '① %B'],
   ['s2_upper_swing', '② Swing'],
-  ['s3_monthly_psar', '③ M-PSAR'],
+  ['s3_weekly_psar', '③ W-PSAR'],
   ['s4_daily_ha', '④ D-HA'],
   ['s5_ma60_slope', '⑤ MA60↑'],
 ];
@@ -119,8 +119,8 @@ function applyFilter() {
   const q = state.query.trim().toLowerCase();
 
   // Keep the complete summary in memory for search.
-  // With no query, only the strategy's top 50 are rendered.
-  // With a query, search ALL summary items so ranks below 50 remain discoverable.
+  // With no query, only the strategy's top 20 are rendered.
+  // With a query, search ALL hard-eligible summary items so ranks below 20 remain discoverable.
   state.filtered = q
     ? items.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.exchange}`.toLowerCase().includes(q))
     : items.slice(0, DEFAULT_TOP_N);
@@ -147,7 +147,7 @@ function renderMeta() {
     ? dt.toLocaleString('ko-KR', { timeZone:'Asia/Seoul', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' })
     : '—';
   $('#marketDate').textContent = data.market_date ? `${data.market_date} 기준` : '—';
-  $('#coverage').textContent = `${Number(data.passed_count || 0).toLocaleString()} 통과 · ${Number(data.universe_count || 0).toLocaleString()} 전체`;
+  $('#coverage').textContent = `${Number(data.passed_count || 0).toLocaleString()} 검색대상 · ${Number(data.universe_count || 0).toLocaleString()} 전체`;
 }
 
 
@@ -187,7 +187,7 @@ function mobileHtml(s) {
     <div class="mobile-grid">
       <span>① %B<b>${Number(sc.s1_percent_b || 0).toFixed(3)}</b></span>
       <span>② Swing<b>${Number(sc.s2_upper_swing || 0).toFixed(3)}</b></span>
-      <span>③ M-PSAR<b>${Number(sc.s3_monthly_psar || 0).toFixed(3)}</b></span>
+      <span>③ W-PSAR<b>${Number(sc.s3_weekly_psar || 0).toFixed(3)}</b></span>
       <span>④ D-HA<b>${Number(sc.s4_daily_ha || 0).toFixed(3)}</b></span>
       <span>⑤ MA60↑<b>${Number(sc.s5_ma60_slope || 0).toFixed(3)}</b></span>
     </div>
@@ -362,14 +362,18 @@ function renderInlineStockDetail(stock) {
   root.querySelector('.detail-score-grid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('');
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
-  const psarState = m.monthly_psar_below ? `아래 · ${Number(m.monthly_psar_below_streak || 0)}개월 연속` : '위';
+  const psarState = m.weekly_psar_below
+    ? (m.weekly_psar_flip_age == null
+        ? '아래 · 반전 5주 이상'
+        : `아래 · 반전 ${Number(m.weekly_psar_flip_age)}주 경과`)
+    : '위';
   const maSlope = m.ma60_slope_pct == null ? '—' : `${Number(m.ma60_slope_pct) > 0 ? '+' : ''}${(Number(m.ma60_slope_pct) * 100).toFixed(3)}%/일`;
   root.querySelector('.detail-metric-grid').innerHTML = `
     <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${stock.category === 'US_ETF' ? 'ETF 면제' : marketSize(m.market_size_krw)}</b></div>
     <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
     <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
     <div><span>Upper Swing</span><b>${age(m.upper_swing_age,'D')}</b></div>
-    <div><span>월봉 PSAR</span><b>${psarState}</b></div>
+    <div><span>주봉 PSAR</span><b>${psarState}</b></div>
     <div><span>Daily HA 반전</span><b>${age(m.daily_ha_age,'D')} · 직전 음봉 ${Number(m.daily_ha_prior_bear || 0)}일</b></div>
     <div><span>MA60</span><b>${m.ma60 == null ? '—' : money(m.ma60, stock.currency)}</b></div>
     <div><span>MA60 기울기</span><b>${maSlope}</b></div>`;
