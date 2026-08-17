@@ -203,3 +203,42 @@ tbody tr.expanded{background:#121b19;box-shadow:inset 3px 0 0 rgba(120,242,182,.
   .inline-detail-card .chart{height:285px}
   .mobile-detail-wrap .inline-detail-card{border-radius:0 0 15px 15px}
 }
+
+
+/* Morning Invest v8.6 — 바닥의 민족 */
+:root{
+  --floor-cream:#fff4de;
+  --floor-red:#ff5a5f;
+  --floor-orange:#ff9f43;
+  --floor-yellow:#ffd166;
+}
+.topbar{height:82px;background:linear-gradient(180deg,rgba(8,10,15,.96),rgba(8,10,15,.82));}
+.floor-brand{gap:13px;text-decoration:none}
+.floor-mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#ff6b6b,#ff9f43);color:#130a08;font-size:17px;box-shadow:0 8px 24px rgba(255,90,95,.22);transform:rotate(-4deg)}
+.brand-copy b{display:block;color:var(--floor-cream);font-size:22px;letter-spacing:-.055em;line-height:1}
+.brand-copy small{display:block;margin-top:7px;color:#7e8999;font-size:9px;font-weight:700;letter-spacing:.01em}
+.topbar-tools{display:flex;align-items:center;gap:12px}
+.developer-sign{text-align:right;line-height:1.05}
+.developer-sign small{display:block;color:#5e6878;font-size:7px;text-transform:uppercase;letter-spacing:.12em}
+.developer-sign b{display:block;margin-top:4px;color:#9ba6b5;font-size:10px;letter-spacing:.015em}
+.summary{align-items:end}
+.summary h1{font-size:39px;letter-spacing:-.065em;background:linear-gradient(90deg,#fff4de,#ffc66d 68%,#ff7a68);-webkit-background-clip:text;background-clip:text;color:transparent}
+.summary-kicker{margin:7px 0 0;color:#6f7c8f;font-size:10px;font-weight:650}
+#desktopTable table{min-width:1080px}
+#desktopTable th{font-size:9px;letter-spacing:-.01em}
+.total .score-pill{display:inline-flex;min-width:52px;justify-content:center;padding:5px 8px;border-radius:999px;font-weight:900;font-size:12px;font-variant-numeric:tabular-nums}
+.total.heat-60 .score-pill,.mobile-score.heat-60{color:#ffd4a3;background:rgba(255,159,67,.12);box-shadow:inset 0 0 0 1px rgba(255,159,67,.20)}
+.total.heat-70 .score-pill,.mobile-score.heat-70{color:#ffac91;background:rgba(255,111,78,.16);box-shadow:inset 0 0 0 1px rgba(255,111,78,.28)}
+.total.heat-80 .score-pill,.mobile-score.heat-80{color:#fff0ed;background:linear-gradient(135deg,rgba(255,76,83,.30),rgba(194,38,54,.20));box-shadow:inset 0 0 0 1px rgba(255,85,91,.48),0 0 22px rgba(255,65,70,.08)}
+tbody tr.heat-60{background-image:linear-gradient(90deg,rgba(255,159,67,.035),transparent 42%)}
+tbody tr.heat-70{background-image:linear-gradient(90deg,rgba(255,103,76,.055),transparent 50%)}
+tbody tr.heat-80{background-image:linear-gradient(90deg,rgba(255,73,80,.090),transparent 58%);box-shadow:inset 3px 0 0 rgba(255,82,88,.50)}
+.mobile-card.heat-60{border-color:rgba(255,159,67,.18)}
+.mobile-card.heat-70{border-color:rgba(255,103,76,.28);background-image:linear-gradient(135deg,rgba(255,103,76,.05),transparent 55%)}
+.mobile-card.heat-80{border-color:rgba(255,78,84,.46);box-shadow:inset 3px 0 0 rgba(255,78,84,.48);background-image:linear-gradient(135deg,rgba(255,78,84,.09),transparent 60%)}
+.detail-score.heat-60 strong{color:#ffb464}.detail-score.heat-70 strong{color:#ff806a}.detail-score.heat-80 strong{color:#ff555c;text-shadow:0 0 24px rgba(255,65,70,.20)}
+@media(max-width:760px){
+  .topbar{height:72px}.brand-copy b{font-size:19px}.developer-sign small{display:none}.developer-sign b{font-size:9px}.floor-mark{width:34px;height:34px}.summary h1{font-size:31px}.summary-kicker{font-size:9px}
+}
+
+.mobile-score.heat-60,.mobile-score.heat-70,.mobile-score.heat-80{padding:5px 7px;border-radius:10px}

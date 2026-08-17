@@ -2,9 +2,9 @@ const $ = (q) => document.querySelector(q);
 const $$ = (q) => [...document.querySelectorAll(q)];
 
 const CATEGORY = {
-  KR: { label: 'KOREA', dir: 'kr' },
-  US: { label: 'UNITED STATES', dir: 'us' },
-  US_ETF: { label: 'US ETF', dir: 'us-etf' },
+  KR: { label: '국장 바닥 TOP100', dir: 'kr' },
+  US: { label: '미장 바닥 TOP100', dir: 'us' },
+  US_ETF: { label: '미장 ETF 바닥 TOP100', dir: 'us-etf' },
 };
 
 const DATA_BASE = location.hostname.endsWith('github.io')
@@ -18,15 +18,16 @@ function dataUrl(path, force=false) {
   return force ? `${url}?ts=${Date.now()}` : url;
 }
 
-const DEFAULT_TOP_N = 20;
-const BACKTEST_MIN_DISPLAY_SCORE = 70.0;
+const DEFAULT_TOP_N = 100;
+const BACKTEST_MIN_DISPLAY_SCORE = 50.0;
 
 const SCORE_COLUMNS = [
-  ['s1_percent_b', '① %B'],
-  ['s2_upper_swing', '② Swing'],
-  ['s3_weekly_psar', '③ W-PSAR'],
-  ['s4_daily_ha', '④ D-HA'],
-  ['s5_ma60_slope', '⑤ MA60↑'],
+  ['s1_percent_b', '① 볼린저 하단 접근'],
+  ['s2_upper_swing', '② 과거 상단 이력'],
+  ['s3_daily_ha', '③ 일봉 HA 반전'],
+  ['s4_weekly_ha', '④ 주봉 HA 양봉'],
+  ['s5_monthly_ha', '⑤ 월봉 HA 양봉'],
+  ['s6_ma60_slope', '⑥ 60일선 상승'],
 ];
 
 const state = {
@@ -75,8 +76,19 @@ function scoreClass(v) {
 function displayScore(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return '—';
-  // Raw strategy max is 3.5; normalize to a 100-point UI scale.
-  return (Math.min(100, Math.max(0, n / 3.5 * 100))).toFixed(1);
+  // Raw strategy max is 5.0; normalize to a 100-point UI scale.
+  return (Math.min(100, Math.max(0, n / 5.0 * 100))).toFixed(1);
+}
+function displayScoreNumber(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n / 5.0 * 100)) : 0;
+}
+function heatClass(raw) {
+  const n = displayScoreNumber(raw);
+  if (n >= 80) return 'heat-80';
+  if (n >= 70) return 'heat-70';
+  if (n >= 60) return 'heat-60';
+  return '';
 }
 function sizeText(stock) {
   if (stock?.category === 'US_ETF') return '';
@@ -119,8 +131,8 @@ function applyFilter() {
   const q = state.query.trim().toLowerCase();
 
   // Keep the complete summary in memory for search.
-  // With no query, only the strategy's top 20 are rendered.
-  // With a query, search ALL hard-eligible summary items so ranks below 20 remain discoverable.
+  // With no query, only the strategy's top 100 are rendered.
+  // With a query, search ALL hard-eligible summary items so ranks below 100 remain discoverable.
   state.filtered = q
     ? items.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.exchange}`.toLowerCase().includes(q))
     : items.slice(0, DEFAULT_TOP_N);
@@ -138,7 +150,7 @@ function applyFilter() {
 
 function renderMeta() {
   const data = currentData();
-  $('#categoryLabel').textContent = CATEGORY[state.category].label;
+  $('#categoryTitle').textContent = CATEGORY[state.category].label;
   if (!data) {
     $('#updated').textContent = '—'; $('#marketDate').textContent = '—'; $('#coverage').textContent = '—'; return;
   }
@@ -168,28 +180,29 @@ function btBadge(stock) {
 
 function rowHtml(s) {
   const sc = s.scores || {};
-  return `<tr class="${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
+  return `<tr class="${btRowClass(s)} ${heatClass(s.score)}" data-ticker="${escapeHtml(s.ticker)}">
     <td class="rank">${Number(s.rank).toLocaleString()}</td>
     <td class="stock"><div class="stock-name"><strong>${escapeHtml(s.name)}</strong>${btBadge(s)}</div><div class="stock-sub">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}${sizeText(s)}</div></td>
-    <td class="total">${displayScore(s.score)}</td>
+    <td class="total ${heatClass(s.score)}"><span class="score-pill">${displayScore(s.score)}</span></td>
     ${SCORE_COLUMNS.map(([k]) => `<td class="${scoreClass(sc[k])}">${Number(sc[k] || 0).toFixed(3)}</td>`).join('')}
   </tr>`;
 }
 
 function mobileHtml(s) {
   const sc = s.scores || {};
-  return `<button class="mobile-card ${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
+  return `<button class="mobile-card ${btRowClass(s)} ${heatClass(s.score)}" data-ticker="${escapeHtml(s.ticker)}">
     <div class="mobile-top">
       <span class="mobile-rank">${s.rank}</span>
       <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}${sizeText(s)}</span></div>
-      <div class="mobile-score"><strong>${displayScore(s.score)}</strong><span>/ 100</span></div>
+      <div class="mobile-score ${heatClass(s.score)}"><strong>${displayScore(s.score)}</strong><span>/ 100</span></div>
     </div>
     <div class="mobile-grid">
-      <span>① %B<b>${Number(sc.s1_percent_b || 0).toFixed(3)}</b></span>
-      <span>② Swing<b>${Number(sc.s2_upper_swing || 0).toFixed(3)}</b></span>
-      <span>③ W-PSAR<b>${Number(sc.s3_weekly_psar || 0).toFixed(3)}</b></span>
-      <span>④ D-HA<b>${Number(sc.s4_daily_ha || 0).toFixed(3)}</b></span>
-      <span>⑤ MA60↑<b>${Number(sc.s5_ma60_slope || 0).toFixed(3)}</b></span>
+      <span>① 볼린저 하단<b>${Number(sc.s1_percent_b || 0).toFixed(3)}</b></span>
+      <span>② 과거 상단이력<b>${Number(sc.s2_upper_swing || 0).toFixed(3)}</b></span>
+      <span>③ 일봉 HA 반전<b>${Number(sc.s3_daily_ha || 0).toFixed(3)}</b></span>
+      <span>④ 주봉 HA 양봉<b>${Number(sc.s4_weekly_ha || 0).toFixed(3)}</b></span>
+      <span>⑤ 월봉 HA 양봉<b>${Number(sc.s5_monthly_ha || 0).toFixed(3)}</b></span>
+      <span>⑥ 60일선 상승<b>${Number(sc.s6_ma60_slope || 0).toFixed(3)}</b></span>
     </div>
   </button>`;
 }
@@ -266,7 +279,7 @@ function inlineDetailShell(summary, mobile=false) {
       <button class="inline-close icon-btn" aria-label="상세 닫기">×</button>
     </header>
     <section class="detail-hero">
-      <div class="detail-score"><strong>${displayScore(summary.score)}</strong><span>/ 100</span></div>
+      <div class="detail-score ${heatClass(summary.score)}"><strong>${displayScore(summary.score)}</strong><span>/ 100</span></div>
       <div class="detail-price"><strong>${money(summary.close, summary.currency)}</strong><span class="${changeClass(summary.day_change_pct)}">${dayPct(summary.day_change_pct,2)}</span></div>
     </section>
 
@@ -288,8 +301,8 @@ function inlineDetailShell(summary, mobile=false) {
 
     <section class="backtest-panel inline-backtest-panel" hidden>
       <div class="backtest-head">
-        <div><span class="eyebrow">BACKTEST</span><h3>총점 70점 이상 과거 신호 성과</h3></div>
-        <span class="backtest-rule">1Y · 총점 ≥ 70.0 · Next Open</span>
+        <div><span class="eyebrow">BACKTEST</span><h3>총점 50점 이상 과거 신호 성과</h3></div>
+        <span class="backtest-rule">1Y · 총점 ≥ 50.0 · Next Open</span>
       </div>
       <div class="backtest-summary"></div>
       <section class="forecast-panel" hidden>
@@ -325,7 +338,7 @@ async function openInlineStock(summary, target) {
     target.insertAdjacentHTML('afterend', `<div class="inline-detail-wrap mobile-detail-wrap">${inlineDetailShell(summary,true)}</div>`);
     state.detailEl = target.nextElementSibling;
   } else {
-    target.insertAdjacentHTML('afterend', `<tr class="inline-detail-row"><td colspan="8"><div class="inline-detail-wrap">${inlineDetailShell(summary,false)}</div></td></tr>`);
+    target.insertAdjacentHTML('afterend', `<tr class="inline-detail-row"><td colspan="9"><div class="inline-detail-wrap">${inlineDetailShell(summary,false)}</div></td></tr>`);
     state.detailEl = target.nextElementSibling;
   }
 
@@ -362,19 +375,15 @@ function renderInlineStockDetail(stock) {
   root.querySelector('.detail-score-grid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('');
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
-  const psarState = m.weekly_psar_below
-    ? (m.weekly_psar_flip_age == null
-        ? '아래 · 반전 5주 이상'
-        : `아래 · 반전 ${Number(m.weekly_psar_flip_age)}주 경과`)
-    : '위';
   const maSlope = m.ma60_slope_pct == null ? '—' : `${Number(m.ma60_slope_pct) > 0 ? '+' : ''}${(Number(m.ma60_slope_pct) * 100).toFixed(3)}%/일`;
   root.querySelector('.detail-metric-grid').innerHTML = `
     <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${stock.category === 'US_ETF' ? 'ETF 면제' : marketSize(m.market_size_krw)}</b></div>
     <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
     <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
     <div><span>Upper Swing</span><b>${age(m.upper_swing_age,'D')}</b></div>
-    <div><span>주봉 PSAR</span><b>${psarState}</b></div>
-    <div><span>Daily HA 반전</span><b>${age(m.daily_ha_age,'D')} · 직전 음봉 ${Number(m.daily_ha_prior_bear || 0)}일</b></div>
+    <div><span>일봉 HA 반전</span><b>${age(m.daily_ha_age,'D')} · 직전 음봉 ${Number(m.daily_ha_prior_bear || 0)}일</b></div>
+    <div><span>현재 주봉 HA</span><b>${m.weekly_ha_bull ? '양봉 · +0.5' : '음봉 · +0.0'}</b></div>
+    <div><span>현재 월봉 HA</span><b>${m.monthly_ha_bull ? '양봉 · +0.5' : '음봉 · +0.0'}</b></div>
     <div><span>MA60</span><b>${m.ma60 == null ? '—' : money(m.ma60, stock.currency)}</b></div>
     <div><span>MA60 기울기</span><b>${maSlope}</b></div>`;
 
@@ -492,13 +501,13 @@ function renderBacktest(stock) {
 
   if (!bt.available) {
     panel.querySelector('.forecast-panel').hidden = true;
-    rule.textContent = '1Y · 총점 ≥ 70.0 · 데이터 부족';
+    rule.textContent = '1Y · 총점 ≥ 50.0 · 데이터 부족';
     summary.innerHTML = backtestMetric('Signals', '0');
     body.innerHTML = '';
     return;
   }
 
-  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? 2.45)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
+  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? 2.5)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
   summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
     backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),
@@ -512,7 +521,7 @@ function renderBacktest(stock) {
   renderForecast(stock);
   body.innerHTML = trades.length
     ? trades.map(t => `<tr><td>${escapeHtml(t.signal_date || '—')}</td><td>${t.score == null ? '—' : displayScore(t.score)}</td><td class="${changeClass((t.ret_5d || 0)*100)}">${ratioPct(t.ret_5d)}</td><td class="${changeClass((t.ret_10d || 0)*100)}">${ratioPct(t.ret_10d)}</td><td class="${changeClass((t.ret_20d || 0)*100)}">${ratioPct(t.ret_20d)}</td><td class="up">${ratioPct(t.mfe_20d)}</td><td class="down">${ratioPct(t.mae_20d)}</td></tr>`).join('')
-    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 총점 70점 이상 독립 신호가 없습니다.</td></tr>`;
+    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 총점 50점 이상 독립 신호가 없습니다.</td></tr>`;
 }
 
 
