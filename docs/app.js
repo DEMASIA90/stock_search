@@ -71,6 +71,16 @@ function dayPct(v, digits=2) {
 function scoreClass(v) {
   const n = Number(v || 0); return n > 0 ? 'score-pos' : n < 0 ? 'score-neg' : 'score-zero';
 }
+function displayScore(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return '—';
+  // Raw strategy max is 3.0; UI scale is 33.3x => 99.9 max.
+  return (Math.min(99.9, n * 33.3)).toFixed(1);
+}
+function sizeText(stock) {
+  if (stock?.category === 'US_ETF') return '';
+  return ` · 시총 ${marketSize(stock?.market_size_krw ?? stock?.metrics?.market_size_krw)}`;
+}
 function changeClass(v) { return Number(v) > 0 ? 'up' : Number(v) < 0 ? 'down' : ''; }
 function currentData() { return state.data[state.category]; }
 
@@ -150,8 +160,8 @@ function rowHtml(s) {
   const sc = s.scores || {};
   return `<tr class="${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
     <td class="rank">${Number(s.rank).toLocaleString()}</td>
-    <td class="stock"><div class="stock-name"><strong>${escapeHtml(s.name)}</strong>${btBadge(s)}</div><div class="stock-sub">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)} · ${s.market_size_basis === 'total_assets' ? 'AUM' : '시총'} ${marketSize(s.market_size_krw)}</div></td>
-    <td class="total">${Number(s.score).toFixed(3)}</td>
+    <td class="stock"><div class="stock-name"><strong>${escapeHtml(s.name)}</strong>${btBadge(s)}</div><div class="stock-sub">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}${sizeText(s)}</div></td>
+    <td class="total">${displayScore(s.score)}</td>
     ${SCORE_COLUMNS.map(([k]) => `<td class="${scoreClass(sc[k])}">${Number(sc[k] || 0).toFixed(3)}</td>`).join('')}
   </tr>`;
 }
@@ -161,8 +171,8 @@ function mobileHtml(s) {
   return `<button class="mobile-card ${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
     <div class="mobile-top">
       <span class="mobile-rank">${s.rank}</span>
-      <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)} · ${s.market_size_basis === 'total_assets' ? 'AUM' : '시총'} ${marketSize(s.market_size_krw)}</span></div>
-      <div class="mobile-score"><strong>${Number(s.score).toFixed(3)}</strong><span>/ 2.70</span></div>
+      <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}${sizeText(s)}</span></div>
+      <div class="mobile-score"><strong>${displayScore(s.score)}</strong><span>/ 99.9</span></div>
     </div>
     <div class="mobile-grid">
       <span>① %B<b>${Number(sc.s1_percent_b || 0).toFixed(3)}</b></span>
@@ -245,7 +255,7 @@ function inlineDetailShell(summary, mobile=false) {
       <button class="inline-close icon-btn" aria-label="상세 닫기">×</button>
     </header>
     <section class="detail-hero">
-      <div class="detail-score"><strong>${Number(summary.score).toFixed(3)}</strong><span>/ 2.70</span></div>
+      <div class="detail-score"><strong>${displayScore(summary.score)}</strong><span>/ 99.9</span></div>
       <div class="detail-price"><strong>${money(summary.close, summary.currency)}</strong><span class="${changeClass(summary.day_change_pct)}">${dayPct(summary.day_change_pct,2)}</span></div>
     </section>
 
@@ -267,8 +277,8 @@ function inlineDetailShell(summary, mobile=false) {
 
     <section class="backtest-panel inline-backtest-panel" hidden>
       <div class="backtest-head">
-        <div><span class="eyebrow">BACKTEST</span><h3>1.0점 이상 과거 신호 성과</h3></div>
-        <span class="backtest-rule">1Y · Score ≥ 1.0 · Next Open</span>
+        <div><span class="eyebrow">BACKTEST</span><h3>총점 33.3점 이상 과거 신호 성과</h3></div>
+        <span class="backtest-rule">1Y · 총점 ≥ 33.3 · Next Open</span>
       </div>
       <div class="backtest-summary"></div>
       <section class="forecast-panel" hidden>
@@ -343,7 +353,7 @@ function renderInlineStockDetail(stock) {
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
   root.querySelector('.detail-metric-grid').innerHTML = `
-    <div><span>${m.market_size_basis === 'total_assets' ? 'AUM' : '시가총액'}</span><b>${marketSize(m.market_size_krw)}</b></div>
+    <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${stock.category === 'US_ETF' ? 'ETF 면제' : marketSize(m.market_size_krw)}</b></div>
     <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
     <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
     <div><span>R (5 / 115)</span><b>${m.turnover_r == null ? '—' : Number(m.turnover_r).toFixed(2)}x</b></div>
@@ -467,13 +477,13 @@ function renderBacktest(stock) {
 
   if (!bt.available) {
     panel.querySelector('.forecast-panel').hidden = true;
-    rule.textContent = '1Y · Score ≥ 1.0 · 데이터 부족';
+    rule.textContent = '1Y · 총점 ≥ 33.3 · 데이터 부족';
     summary.innerHTML = backtestMetric('Signals', '0');
     body.innerHTML = '';
     return;
   }
 
-  rule.textContent = `1Y · Score ≥ ${Number(bt.min_signal_score ?? 1).toFixed(1)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
+  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? 1)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
   summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
     backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),
@@ -486,8 +496,8 @@ function renderBacktest(stock) {
   const trades = bt.trades || [];
   renderForecast(stock);
   body.innerHTML = trades.length
-    ? trades.map(t => `<tr><td>${escapeHtml(t.signal_date || '—')}</td><td>${t.score == null ? '—' : Number(t.score).toFixed(3)}</td><td class="${changeClass((t.ret_5d || 0)*100)}">${ratioPct(t.ret_5d)}</td><td class="${changeClass((t.ret_10d || 0)*100)}">${ratioPct(t.ret_10d)}</td><td class="${changeClass((t.ret_20d || 0)*100)}">${ratioPct(t.ret_20d)}</td><td class="up">${ratioPct(t.mfe_20d)}</td><td class="down">${ratioPct(t.mae_20d)}</td></tr>`).join('')
-    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 1.0점 이상 독립 신호가 없습니다.</td></tr>`;
+    ? trades.map(t => `<tr><td>${escapeHtml(t.signal_date || '—')}</td><td>${t.score == null ? '—' : displayScore(t.score)}</td><td class="${changeClass((t.ret_5d || 0)*100)}">${ratioPct(t.ret_5d)}</td><td class="${changeClass((t.ret_10d || 0)*100)}">${ratioPct(t.ret_10d)}</td><td class="${changeClass((t.ret_20d || 0)*100)}">${ratioPct(t.ret_20d)}</td><td class="up">${ratioPct(t.mfe_20d)}</td><td class="down">${ratioPct(t.mae_20d)}</td></tr>`).join('')
+    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 총점 33.3점 이상 독립 신호가 없습니다.</td></tr>`;
 }
 
 function formatCompact(v, currency) {
