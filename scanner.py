@@ -58,7 +58,8 @@ SQUEEZE_BANDWIDTH = 0.08
 
 # Backtest: current strategy recreated point-in-time on each historical daily close.
 # Signal is actionable only from the next trading day's open.
-BACKTEST_EVAL_DAYS = 504
+BACKTEST_LOOKBACK_DAYS = 252
+BACKTEST_MIN_SCORE = 1.0
 BACKTEST_COOLDOWN_DAYS = 10
 BACKTEST_RECENT_TRADES = 12
 
@@ -79,6 +80,13 @@ BACKTEST_STRONG_MIN_QUALITY = 75.0
 FORECAST_DAYS = 20
 FORECAST_MAX_ANALOGS = 12
 FORECAST_MIN_ANALOGS = 5
+
+# Large-cap universe filter.
+MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # 10조원
+STOCK_SHARES_CACHE_DAYS = 30
+ETF_ASSET_CACHE_DAYS = 3
+MARKET_SIZE_RETRY_ATTEMPTS = 3
+MARKET_SIZE_MIN_LOOKUP_COVERAGE = 0.90
 
 CATEGORY_DIR = {
     "KR": "kr",
@@ -452,11 +460,149 @@ def _make_chart(ind: pd.DataFrame) -> dict:
     }
 
 
+
+
+def _size_cache_path(category: str) -> Path:
+    return DATA_DIR / CATEGORY_DIR[category] / "sizes.json"
+
+
+def _load_size_cache(category: str) -> dict:
+    path = _size_cache_path(category)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cache_age_days(entry: dict) -> float:
+    raw = entry.get("fetched_at")
+    if not raw:
+        return 10_000.0
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+    except Exception:
+        return 10_000.0
+
+
+def _fetch_stock_size_basis(stock: Stock) -> dict | None:
+    """Fetch slowly-changing size basis from Yahoo.
+
+    Stocks: shares outstanding, then current market cap = shares * latest close.
+    ETFs: totalAssets/netAssets (AUM-like size), because corporate market cap is
+    not the appropriate ETF size concept.
+    """
+    ticker = yf.Ticker(stock.ticker)
+
+    if stock.category == "US_ETF":
+        info = ticker.get_info() or {}
+        assets = finite(info.get("totalAssets"))
+        if not np.isfinite(assets) or assets <= 0:
+            assets = finite(info.get("netAssets"))
+        if not np.isfinite(assets) or assets <= 0:
+            assets = finite(info.get("marketCap"))
+        if np.isfinite(assets) and assets > 0:
+            return {
+                "basis": "total_assets",
+                "value": float(assets),
+                "currency": "USD",
+                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        return None
+
+    # Equity: cache share count and recompute market cap from today's close.
+    try:
+        shares = finite(ticker.fast_info["shares"])
+    except Exception:
+        shares = np.nan
+    if np.isfinite(shares) and shares > 0:
+        return {
+            "basis": "shares",
+            "value": float(shares),
+            "currency": stock.currency,
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+    # Fallback to direct market cap if Yahoo cannot provide shares.
+    try:
+        market_cap = finite(ticker.fast_info["market_cap"])
+    except Exception:
+        market_cap = np.nan
+    if not np.isfinite(market_cap) or market_cap <= 0:
+        try:
+            info = ticker.get_info() or {}
+            market_cap = finite(info.get("marketCap"))
+        except Exception:
+            market_cap = np.nan
+    if np.isfinite(market_cap) and market_cap > 0:
+        return {
+            "basis": "market_cap",
+            "value": float(market_cap),
+            "currency": stock.currency,
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+    return None
+
+
+def resolve_market_size(
+    stock: Stock,
+    close: float,
+    thresholds: dict,
+    size_cache: dict,
+) -> tuple[float, float, str] | None:
+    """Return (native_size, KRW_size, basis). Fail closed when unknown."""
+    entry = size_cache.get(stock.ticker)
+    max_age = ETF_ASSET_CACHE_DAYS if stock.category == "US_ETF" else STOCK_SHARES_CACHE_DAYS
+
+    if not isinstance(entry, dict) or _cache_age_days(entry) > max_age:
+        entry = None
+        for attempt in range(1, MARKET_SIZE_RETRY_ATTEMPTS + 1):
+            try:
+                entry = _fetch_stock_size_basis(stock)
+                if entry:
+                    size_cache[stock.ticker] = entry
+                    break
+            except Exception as exc:
+                if attempt == MARKET_SIZE_RETRY_ATTEMPTS:
+                    print(f"[{stock.category}] size lookup failed {stock.ticker}: {type(exc).__name__}: {exc}")
+                time.sleep(1.2 * attempt)
+
+    if not isinstance(entry, dict):
+        return None
+
+    basis = str(entry.get("basis") or "")
+    value = finite(entry.get("value"))
+    if not np.isfinite(value) or value <= 0:
+        return None
+
+    if basis == "shares":
+        native_size = value * close
+    elif basis in {"market_cap", "total_assets"}:
+        native_size = value
+    else:
+        return None
+
+    usdkrw = finite(thresholds.get("usdkrw"))
+    if stock.currency == "KRW":
+        size_krw = native_size
+    else:
+        if not np.isfinite(usdkrw) or usdkrw <= 0:
+            return None
+        size_krw = native_size * usdkrw
+
+    return float(native_size), float(size_krw), basis
+
 def analyze(
     stock: Stock,
     raw_frame: pd.DataFrame,
     thresholds: dict,
     restricted_symbols: set[str],
+    size_cache: dict,
 ) -> tuple[dict | None, str]:
     if stock.symbol in restricted_symbols or stock.ticker in restricted_symbols:
         return None, "restricted_status"
@@ -490,6 +636,15 @@ def analyze(
     monthly_bearish_streak = consecutive_bearish_from_end(monthly_ha)
     if monthly_bearish_streak >= MONTHLY_HA_BEARISH_EXCLUDE:
         return None, "monthly_ha_bear_10plus"
+
+    # 0. Large-cap filter: current market size must be at least KRW 10T.
+    # For ETFs, total assets (AUM-like size) is used instead of corporate market cap.
+    size_info = resolve_market_size(stock, close, thresholds, size_cache)
+    if size_info is None:
+        return None, "market_size_unavailable"
+    market_size_native, market_size_krw, market_size_basis = size_info
+    if market_size_krw < MIN_MARKET_SIZE_KRW:
+        return None, "market_size_lt_10t"
 
     # 1. Daily %B score, with squeeze penalty.
     s1, squeeze = score_percent_b(percent_b, bandwidth)
@@ -562,6 +717,9 @@ def analyze(
             "monthly_ha_age": m_ha_age,
             "monthly_ha_prior_bear": m_ha_bear_streak,
             "monthly_ha_current_bear_streak": monthly_bearish_streak,
+            "market_size_native": clean(market_size_native, 0),
+            "market_size_krw": clean(market_size_krw, 0),
+            "market_size_basis": market_size_basis,
         },
         "chart": _make_chart(ind),
         "backtest": backtest_stock(frame, stock.category, thresholds, total),
@@ -906,13 +1064,18 @@ def backtest_stock(
 
     hist = build_historical_scores(frame, category, thresholds)
     n = len(frame)
-    start = max(MIN_TRADING_DAYS - 1, n - BACKTEST_EVAL_DAYS - 21)
-    end = n - 21  # need next open + full 20-session forward window
+    # Search at most the most recent ~1 trading year. The last 20 sessions are
+    # excluded because a complete 20D outcome is not known yet.
+    start = max(MIN_TRADING_DAYS - 1, n - BACKTEST_LOOKBACK_DAYS)
+    end = n - 21
 
     trades = []
     last_signal = -10_000
     for i in range(start, max(start, end)):
         if not bool(hist["eligible"].iloc[i]):
+            continue
+        # Backtest only meaningful historical Morning Invest signals (>=1.0).
+        if finite(hist["score"].iloc[i], -np.inf) < BACKTEST_MIN_SCORE:
             continue
         if i - last_signal < BACKTEST_COOLDOWN_DAYS:
             continue
@@ -976,7 +1139,9 @@ def backtest_stock(
 
     return {
         "available": True,
-        "eval_days": min(BACKTEST_EVAL_DAYS, max(0, end - start)),
+        "lookback_days": BACKTEST_LOOKBACK_DAYS,
+        "min_signal_score": BACKTEST_MIN_SCORE,
+        "eval_days": max(0, end - start),
         "cooldown_days": BACKTEST_COOLDOWN_DAYS,
         "entry_rule": "next_open",
         "signals": len(trades),
@@ -996,7 +1161,10 @@ def backtest_stock(
         "quality_label": quality_label,
         "forecast": forecast,
         "trades": public_trades,
-        "limitations": ["historical_regulatory_status_not_reconstructed"],
+        "limitations": [
+            "historical_regulatory_status_not_reconstructed",
+            "historical_market_cap_not_reconstructed"
+        ],
     }
 
 
@@ -1070,6 +1238,8 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "rank": item["rank"],
         "score": item["score"],
         "scores": item["scores"],
+        "market_size_krw": (item.get("metrics") or {}).get("market_size_krw"),
+        "market_size_basis": (item.get("metrics") or {}).get("market_size_basis"),
         "backtest": {
             "available": bool(bt.get("available")),
             "signals": bt.get("signals"),
@@ -1083,7 +1253,7 @@ def _summary_item(item: dict, detail_path: str) -> dict:
     }
 
 
-def _write_category_site(category: str, payload_meta: dict, items: list[dict]) -> tuple[Path, int]:
+def _write_category_site(category: str, payload_meta: dict, items: list[dict], size_cache: dict) -> tuple[Path, int]:
     """Write a lightweight summary plus one detail JSON per passing symbol.
 
     The generated directory is a deployment artifact only. It is intentionally
@@ -1118,6 +1288,13 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict]) -
         encoding="utf-8",
     )
 
+    # Persist slow-changing shares / ETF asset-size cache inside the Hosting snapshot.
+    sizes_file = category_dir / "sizes.json"
+    sizes_file.write_text(
+        json.dumps(size_cache, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
     # Keep a copy of the last valid listing universe inside the Hosting-only
     # category snapshot. hydrate_data.py restores it to the root cache before
     # the next scan, allowing get_universe() to fall back during source outages.
@@ -1133,6 +1310,8 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict]) -
         zf.write(summary_file, "summary.json")
         if universe_snapshot.is_file():
             zf.write(universe_snapshot, "universe.json")
+        if sizes_file.is_file():
+            zf.write(sizes_file, "sizes.json")
         for detail_file in sorted(stocks_dir.glob("*.json")):
             zf.write(detail_file, f"stocks/{detail_file.name}")
 
@@ -1142,12 +1321,14 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     universe, universe_source = get_universe(category)
     thresholds = thresholds_for(category, usdkrw)
     restricted, restriction_meta = _load_restrictions(category, universe)
+    size_cache = _load_size_cache(category)
 
     print("=" * 72)
     print(f"Morning Invest | {category} | universe={len(universe):,} | restricted={len(restricted):,}")
     print(
         f"thresholds: close>={thresholds['min_price']:.4f} {thresholds['currency']}, "
-        f"20d turnover>={thresholds['min_turnover20']:.0f} {thresholds['currency']}"
+        f"20d turnover>={thresholds['min_turnover20']:.0f} {thresholds['currency']}, "
+        f"market size>=KRW {MIN_MARKET_SIZE_KRW/1e12:.0f}T"
     )
     print("=" * 72)
 
@@ -1185,7 +1366,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                 frame = frame_for(raw, stock.ticker)
                 if frame is not None and not frame.empty:
                     priced_tickers.add(stock.ticker)
-                item, reason = analyze(stock, frame, thresholds, restricted)
+                item, reason = analyze(stock, frame, thresholds, restricted, size_cache)
                 rejection[reason] += 1
                 if item is not None:
                     results[stock.ticker] = item
@@ -1233,7 +1414,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                         frame = frame_for(raw, ticker)
                         if frame is not None and not frame.empty:
                             priced_tickers.add(ticker)
-                            item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted)
+                            item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted, size_cache)
                             if item is not None:
                                 results[ticker] = item
                         else:
@@ -1274,6 +1455,17 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             f"required>={required_coverage:.0%}. Existing site data was not overwritten."
         )
 
+    size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
+    size_success = rejection["market_size_lt_10t"] + len(results)
+    size_coverage = size_success / max(1, size_attempted)
+    if size_attempted >= 10 and size_coverage < MARKET_SIZE_MIN_LOOKUP_COVERAGE:
+        raise RuntimeError(
+            f"{category} market-size lookup coverage too low: "
+            f"{size_success}/{size_attempted} ({size_coverage:.1%}), "
+            f"required>={MARKET_SIZE_MIN_LOOKUP_COVERAGE:.0%}. Existing site data was not overwritten."
+        )
+
+    # No score floor is applied here: 0 and negative scores remain visible.
     items = sorted(results.values(), key=lambda x: (-x["score"], x["symbol"]))
     for rank, item in enumerate(items, 1):
         item["rank"] = rank
@@ -1281,7 +1473,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_BB_HA_PSAR_TURNOVER_V7_LAZY_DATA",
+        "strategy": "MI_V8_LARGECAP_BB_HA_PSAR_TURNOVER",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1293,18 +1485,21 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
+        "market_size_min_krw": MIN_MARKET_SIZE_KRW,
+        "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if size_attempted else None,
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "max_score": 2.7,
         "backtest_model": {
-            "history": "3y_download_approx_2y_evaluation",
+            "history": "max_1_trading_year",
+            "min_signal_score": BACKTEST_MIN_SCORE,
             "entry": "next_trading_day_open",
             "forward_sessions": [5, 10, 20],
             "cooldown_days": BACKTEST_COOLDOWN_DAYS,
             "historical_regulatory_status": "not_reconstructed"
         },
     }
-    out_dir, detail_count = _write_category_site(category, payload_meta, items)
+    out_dir, detail_count = _write_category_site(category, payload_meta, items, size_cache)
     bundle_mb = (out_dir / "bundle.zip").stat().st_size / (1024 * 1024)
     summary_kb = (out_dir / "summary.json").stat().st_size / 1024
     print(
