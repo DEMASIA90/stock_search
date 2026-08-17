@@ -36,6 +36,9 @@ const state = {
   batch: 80,
   query: '',
   selected: null,
+  selectedSummary: null,
+  detailTarget: null,
+  detailEl: null,
   chartDays: 120,
   backtestOpen: false,
   detailCache: new Map(),
@@ -50,6 +53,13 @@ function money(v, currency) {
     ? '₩' + Math.round(v).toLocaleString('ko-KR')
     : '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function marketSize(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  if (n >= 1e12) return `${(n/1e12).toFixed(n>=100e12?0:1)}조`;
+  return `${(n/1e8).toFixed(0)}억`;
+}
+
 function pct(v, digits=1) {
   if (v == null) return '—';
   return `${(Number(v) * 100).toFixed(digits)}%`;
@@ -140,7 +150,7 @@ function rowHtml(s) {
   const sc = s.scores || {};
   return `<tr class="${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
     <td class="rank">${Number(s.rank).toLocaleString()}</td>
-    <td class="stock"><div class="stock-name"><strong>${escapeHtml(s.name)}</strong>${btBadge(s)}</div><div class="stock-sub">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}</div></td>
+    <td class="stock"><div class="stock-name"><strong>${escapeHtml(s.name)}</strong>${btBadge(s)}</div><div class="stock-sub">${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)} · ${s.market_size_basis === 'total_assets' ? 'AUM' : '시총'} ${marketSize(s.market_size_krw)}</div></td>
     <td class="total">${Number(s.score).toFixed(3)}</td>
     ${SCORE_COLUMNS.map(([k]) => `<td class="${scoreClass(sc[k])}">${Number(sc[k] || 0).toFixed(3)}</td>`).join('')}
   </tr>`;
@@ -151,7 +161,7 @@ function mobileHtml(s) {
   return `<button class="mobile-card ${btRowClass(s)}" data-ticker="${escapeHtml(s.ticker)}">
     <div class="mobile-top">
       <span class="mobile-rank">${s.rank}</span>
-      <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)}</span></div>
+      <div class="mobile-title"><strong>${escapeHtml(s.name)} ${btBadge(s)}</strong><span>${escapeHtml(s.symbol)} · ${escapeHtml(s.exchange)} · ${money(s.close, s.currency)} · ${s.market_size_basis === 'total_assets' ? 'AUM' : '시총'} ${marketSize(s.market_size_krw)}</span></div>
       <div class="mobile-score"><strong>${Number(s.score).toFixed(3)}</strong><span>/ 2.70</span></div>
     </div>
     <div class="mobile-grid">
@@ -177,7 +187,7 @@ function bindResultClicks() {
     const target = e.target.closest('tr[data-ticker], .mobile-card[data-ticker]');
     if (!target) return;
     const stock = state.filtered.find((x) => x.ticker === target.dataset.ticker);
-    if (stock) void openStock(stock);
+    if (stock) void openInlineStock(stock, target);
   });
 }
 
@@ -214,59 +224,126 @@ function scoreTile(key, label, scores) {
 }
 
 
-async function openStock(summary) {
+function collapseInlineDetail() {
+  if (state.detailEl) state.detailEl.remove();
+  if (state.detailTarget) state.detailTarget.classList.remove('expanded');
+  state.detailEl = null;
+  state.detailTarget = null;
   state.selected = null;
+  state.selectedSummary = null;
   state.backtestOpen = false;
-  $('#backtestPanel').hidden = true;
-  $('#forecastPanel').hidden = true;
-  $('#backtestBtn').classList.remove('active');
-  $('#backtestBtn').textContent = '백테스트';
-  $('#backtestBtn').disabled = true;
+}
 
-  $('#modalTicker').textContent = `${summary.symbol} · ${summary.exchange}`;
-  $('#modalName').textContent = summary.name;
-  $('#modalScore').textContent = Number(summary.score).toFixed(3);
-  $('#modalPrice').textContent = money(summary.close, summary.currency);
-  $('#modalChange').textContent = dayPct(summary.day_change_pct, 2);
-  $('#modalChange').className = changeClass(summary.day_change_pct);
-  $('#scoreGrid').innerHTML = '<div class="detail-loading">상세 데이터 로딩 중…</div>';
-  $('#metricGrid').innerHTML = '';
-  $('#chart').innerHTML = '<div class="detail-loading chart-loading-inline">차트 로딩 중…</div>';
-  $('#modal').classList.add('open');
-  $('#modal').setAttribute('aria-hidden','false');
+function inlineDetailShell(summary, mobile=false) {
+  const tag = mobile ? 'section' : 'div';
+  return `<${tag} class="inline-detail-card">
+    <header class="inline-detail-head">
+      <div>
+        <span class="eyebrow detail-ticker">${escapeHtml(summary.symbol)} · ${escapeHtml(summary.exchange)}</span>
+        <h2 class="detail-name">${escapeHtml(summary.name)}</h2>
+      </div>
+      <button class="inline-close icon-btn" aria-label="상세 닫기">×</button>
+    </header>
+    <section class="detail-hero">
+      <div class="detail-score"><strong>${Number(summary.score).toFixed(3)}</strong><span>/ 2.70</span></div>
+      <div class="detail-price"><strong>${money(summary.close, summary.currency)}</strong><span class="${changeClass(summary.day_change_pct)}">${dayPct(summary.day_change_pct,2)}</span></div>
+    </section>
+
+    <section class="chart-card detail-chart-first">
+      <div class="chart-head">
+        <b>Daily</b>
+        <div class="chart-controls">
+          <div class="period-tabs inline-period-tabs">
+            <button data-days="20">1M</button>
+            <button data-days="60">3M</button>
+            <button class="active" data-days="120">6M</button>
+          </div>
+          <button class="backtest-btn inline-backtest-btn" disabled>백테스트</button>
+        </div>
+      </div>
+      <div class="chart detail-chart"><div class="detail-loading chart-loading-inline">차트 로딩 중…</div></div>
+      <div class="legend"><span class="price-line">Price</span><span class="mid-line">BB Mid</span><span class="band-line">Band</span></div>
+    </section>
+
+    <section class="backtest-panel inline-backtest-panel" hidden>
+      <div class="backtest-head">
+        <div><span class="eyebrow">BACKTEST</span><h3>1.0점 이상 과거 신호 성과</h3></div>
+        <span class="backtest-rule">1Y · Score ≥ 1.0 · Next Open</span>
+      </div>
+      <div class="backtest-summary"></div>
+      <section class="forecast-panel" hidden>
+        <div class="forecast-head"><div><span class="eyebrow">1 MONTH OUTLOOK</span><h3>백테스트 기반 예상</h3></div><span class="forecast-quality">—</span></div>
+        <div class="forecast-summary"></div>
+        <div class="forecast-chart"></div>
+        <div class="forecast-legend"><span class="forecast-mean">Expected</span><span class="forecast-range">25–75% range</span></div>
+      </section>
+      <div class="backtest-table-wrap">
+        <table class="backtest-table"><thead><tr><th>신호일</th><th>점수</th><th>5D</th><th>10D</th><th>20D</th><th>MFE20</th><th>MAE20</th></tr></thead><tbody class="backtest-body"></tbody></table>
+      </div>
+    </section>
+
+    <section class="detail-section-title">상세 점수</section>
+    <section class="score-grid detail-score-grid"><div class="detail-loading">상세 데이터 로딩 중…</div></section>
+    <section class="metric-grid detail-metric-grid"></section>
+  </${tag}>`;
+}
+
+async function openInlineStock(summary, target) {
+  if (state.detailTarget === target && state.detailEl) {
+    collapseInlineDetail();
+    return;
+  }
+  collapseInlineDetail();
+
+  state.selectedSummary = summary;
+  state.detailTarget = target;
+  target.classList.add('expanded');
+  const mobile = target.classList.contains('mobile-card');
+
+  if (mobile) {
+    target.insertAdjacentHTML('afterend', `<div class="inline-detail-wrap mobile-detail-wrap">${inlineDetailShell(summary,true)}</div>`);
+    state.detailEl = target.nextElementSibling;
+  } else {
+    target.insertAdjacentHTML('afterend', `<tr class="inline-detail-row"><td colspan="10"><div class="inline-detail-wrap">${inlineDetailShell(summary,false)}</div></td></tr>`);
+    state.detailEl = target.nextElementSibling;
+  }
+
+  const detail = state.detailEl.querySelector('.inline-detail-card');
+  detail.scrollIntoView({behavior:'smooth', block:'nearest'});
 
   try {
-    const detail = await ensureDetail(summary);
-    renderStockDetail(detail);
+    const stock = await ensureDetail(summary);
+    if (state.detailTarget !== target) return;
+    renderInlineStockDetail(stock);
   } catch (err) {
     console.error(err);
-    $('#scoreGrid').innerHTML = '<div class="detail-error">상세 데이터를 불러오지 못했습니다.</div>';
-    $('#chart').innerHTML = '';
+    const grid = detail.querySelector('.detail-score-grid');
+    grid.innerHTML = '<div class="detail-error">상세 데이터를 불러오지 못했습니다.</div>';
+    detail.querySelector('.detail-chart').innerHTML = '';
   }
 }
 
-function renderStockDetail(stock) {
-  state.selected = stock; state.chartDays = 120; state.backtestOpen = false;
-  $('#backtestPanel').hidden = true;
-  $('#forecastPanel').hidden = true;
-  $('#backtestBtn').classList.remove('active');
-  $('#backtestBtn').textContent = '백테스트';
-  $('#backtestBtn').disabled = false;
+function renderInlineStockDetail(stock) {
+  if (!state.detailEl) return;
+  state.selected = stock;
   state.chartDays = 120;
-  $$('#periodTabs button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === 120));
-  $('#modalTicker').textContent = `${stock.symbol} · ${stock.exchange}`;
-  $('#modalName').textContent = stock.name;
-  $('#modalScore').textContent = Number(stock.score).toFixed(3);
-  $('#modalPrice').textContent = money(stock.close, stock.currency);
-  $('#modalChange').textContent = dayPct(stock.day_change_pct, 2);
-  $('#modalChange').className = changeClass(stock.day_change_pct);
+  state.backtestOpen = false;
+  const root = state.detailEl;
+  const btn = root.querySelector('.inline-backtest-btn');
+  btn.disabled = false;
+  btn.classList.remove('active');
+  btn.textContent = '백테스트';
+  root.querySelector('.inline-backtest-panel').hidden = true;
+  root.querySelector('.forecast-panel').hidden = true;
+  root.querySelectorAll('.inline-period-tabs button').forEach((b)=>b.classList.toggle('active',Number(b.dataset.days)===120));
 
   const s = stock.scores || {}, m = stock.metrics || {};
-  $('#scoreGrid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('') +
+  root.querySelector('.detail-score-grid').innerHTML = SCORE_COLUMNS.map(([k,l]) => scoreTile(k,l,s)).join('') +
     `<div class="score-tile cap"><span>⑦ HA Cap</span><b>${Number(s.s7_ha_capped || 0).toFixed(3)}</b></div>`;
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
-  $('#metricGrid').innerHTML = `
+  root.querySelector('.detail-metric-grid').innerHTML = `
+    <div><span>${m.market_size_basis === 'total_assets' ? 'AUM' : '시가총액'}</span><b>${marketSize(m.market_size_krw)}</b></div>
     <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
     <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
     <div><span>R (5 / 115)</span><b>${m.turnover_r == null ? '—' : Number(m.turnover_r).toFixed(2)}x</b></div>
@@ -274,10 +351,8 @@ function renderStockDetail(stock) {
     <div><span>Upper Swing</span><b>${age(m.upper_swing_age,'D')}</b></div>
     <div><span>PSAR</span><b>${age(m.psar_age,'D')}</b></div>
     <div><span>D / W / M HA</span><b>${age(m.daily_ha_age,'D')} · ${age(m.weekly_ha_age,'W')} · ${age(m.monthly_ha_age,'M')}</b></div>
-    <div><span>20D Value</span><b>${formatCompact(m.turnover20, stock.currency)}</b></div>
-  `;
+    <div><span>20D Value</span><b>${formatCompact(m.turnover20, stock.currency)}</b></div>`;
 
-  $('#modal').classList.add('open'); $('#modal').setAttribute('aria-hidden','false');
   drawSelectedChart();
 }
 
@@ -303,25 +378,27 @@ function forecastMoney(v, currency) {
 }
 
 function renderForecast(stock) {
+  if (!state.detailEl) return;
   const bt = stock?.backtest || {};
   const fc = bt?.forecast || {};
-  const panel = $('#forecastPanel');
+  const panel = state.detailEl.querySelector('.forecast-panel');
 
   if (!fc.available || !['GOOD','STRONG'].includes(bt.quality_label)) {
     panel.hidden = true;
-    $('#forecastChart').innerHTML = '';
+    panel.querySelector('.forecast-chart').innerHTML = '';
     return;
   }
 
   panel.hidden = false;
-  $('#forecastQuality').textContent = `${bt.quality_label} · BT ${Number(bt.quality_score || 0).toFixed(0)}`;
-  $('#forecastQuality').className = `forecast-quality ${bt.quality_label === 'STRONG' ? 'strong' : 'good'}`;
-  $('#forecastSummary').innerHTML = [
+  const quality = panel.querySelector('.forecast-quality');
+  quality.textContent = `${bt.quality_label} · BT ${Number(bt.quality_score || 0).toFixed(0)}`;
+  quality.className = `forecast-quality ${bt.quality_label === 'STRONG' ? 'strong' : 'good'}`;
+  panel.querySelector('.forecast-summary').innerHTML = [
     backtestMetric('현재가', forecastMoney(fc.current_price, stock.currency)),
     backtestMetric('20D 예상', forecastMoney(fc.expected_price_20d, stock.currency), ratioPct(fc.expected_return_20d)),
     backtestMetric('예상 범위', `${forecastMoney(fc.range_low_20d, stock.currency)} ~ ${forecastMoney(fc.range_high_20d, stock.currency)}`, `유사신호 ${fc.sample_count || 0}개`),
   ].join('');
-  drawForecastChart($('#forecastChart'), fc, stock.currency);
+  drawForecastChart(panel.querySelector('.forecast-chart'), fc, stock.currency);
 }
 
 function drawForecastChart(el, fc, currency) {
@@ -381,18 +458,23 @@ function drawForecastChart(el, fc, currency) {
 }
 
 function renderBacktest(stock) {
+  if (!state.detailEl) return;
   const bt = stock?.backtest || {};
-  const panel = $('#backtestPanel');
+  const panel = state.detailEl.querySelector('.inline-backtest-panel');
+  const rule = panel.querySelector('.backtest-rule');
+  const summary = panel.querySelector('.backtest-summary');
+  const body = panel.querySelector('.backtest-body');
+
   if (!bt.available) {
-    $('#forecastPanel').hidden = true;
-    $('#backtestRule').textContent = '데이터 부족';
-    $('#backtestSummary').innerHTML = backtestMetric('Signals', '0');
-    $('#backtestBody').innerHTML = '';
+    panel.querySelector('.forecast-panel').hidden = true;
+    rule.textContent = '1Y · Score ≥ 1.0 · 데이터 부족';
+    summary.innerHTML = backtestMetric('Signals', '0');
+    body.innerHTML = '';
     return;
   }
 
-  $('#backtestRule').textContent = `약 2Y · Next Open · ${bt.cooldown_days || 10}D cooldown`;
-  $('#backtestSummary').innerHTML = [
+  rule.textContent = `1Y · Score ≥ ${Number(bt.min_signal_score ?? 1).toFixed(1)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
+  summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
     backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),
     backtestMetric('10D Avg', ratioPct(bt.avg_10d), `Win ${winPct(bt.win_10d)}`),
@@ -403,18 +485,9 @@ function renderBacktest(stock) {
 
   const trades = bt.trades || [];
   renderForecast(stock);
-
-  $('#backtestBody').innerHTML = trades.length
-    ? trades.map(t => `<tr>
-        <td>${escapeHtml(t.signal_date || '—')}</td>
-        <td>${t.score == null ? '—' : Number(t.score).toFixed(3)}</td>
-        <td class="${changeClass((t.ret_5d || 0) * 100)}">${ratioPct(t.ret_5d)}</td>
-        <td class="${changeClass((t.ret_10d || 0) * 100)}">${ratioPct(t.ret_10d)}</td>
-        <td class="${changeClass((t.ret_20d || 0) * 100)}">${ratioPct(t.ret_20d)}</td>
-        <td class="up">${ratioPct(t.mfe_20d)}</td>
-        <td class="down">${ratioPct(t.mae_20d)}</td>
-      </tr>`).join('')
-    : `<tr><td colspan="7" class="bt-empty">해당 기간의 독립 신호가 없습니다.</td></tr>`;
+  body.innerHTML = trades.length
+    ? trades.map(t => `<tr><td>${escapeHtml(t.signal_date || '—')}</td><td>${t.score == null ? '—' : Number(t.score).toFixed(3)}</td><td class="${changeClass((t.ret_5d || 0)*100)}">${ratioPct(t.ret_5d)}</td><td class="${changeClass((t.ret_10d || 0)*100)}">${ratioPct(t.ret_10d)}</td><td class="${changeClass((t.ret_20d || 0)*100)}">${ratioPct(t.ret_20d)}</td><td class="up">${ratioPct(t.mfe_20d)}</td><td class="down">${ratioPct(t.mae_20d)}</td></tr>`).join('')
+    : `<tr><td colspan="7" class="bt-empty">최근 1년 내 1.0점 이상 독립 신호가 없습니다.</td></tr>`;
 }
 
 function formatCompact(v, currency) {
@@ -435,7 +508,8 @@ function chartRows(stock) {
 }
 function drawSelectedChart() {
   if (!state.selected) return;
-  drawChart($('#chart'), chartRows(state.selected).slice(-state.chartDays), state.selected.currency);
+  if (!state.detailEl) return;
+  drawChart(state.detailEl.querySelector('.detail-chart'), chartRows(state.selected).slice(-state.chartDays), state.selected.currency);
 }
 function drawChart(el, data, currency) {
   data = data.filter((d) => [d.close,d.mid,d.upper,d.lower].every(Number.isFinite));
@@ -450,26 +524,40 @@ function drawChart(el, data, currency) {
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="bandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7faaff" stop-opacity=".14"/><stop offset="1" stop-color="#7faaff" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="${poly}" fill="url(#bandFill)"/><path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1.1"/><path d="${path('mid')}" fill="none" stroke="#efc46a" stroke-width="1.2"/><path d="${path('close')}" fill="none" stroke="#78f2b6" stroke-width="2"/></svg>`;
 }
 
-$('#marketTabs').addEventListener('click', (e) => { const b=e.target.closest('.market-tab'); if(b) switchCategory(b.dataset.category); });
+$('#marketTabs').addEventListener('click', (e) => { const b=e.target.closest('.market-tab'); if(b){ collapseInlineDetail(); switchCategory(b.dataset.category); } });
 let searchTimer;
-$('#searchInput').addEventListener('input', (e) => { clearTimeout(searchTimer); searchTimer=setTimeout(()=>{state.query=e.target.value; applyFilter();},100); });
-$('#reloadBtn').onclick=()=>switchCategory(state.category,true);
-$('#periodTabs').addEventListener('click',(e)=>{const b=e.target.closest('button');if(!b)return;$$('#periodTabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.chartDays=Number(b.dataset.days);drawSelectedChart();});
-$('#backtestBtn').onclick=()=>{
-  if(!state.selected) return;
-  state.backtestOpen = !state.backtestOpen;
-  $('#backtestPanel').hidden = !state.backtestOpen;
-  $('#backtestBtn').classList.toggle('active', state.backtestOpen);
-  $('#backtestBtn').textContent = state.backtestOpen ? '백테스트 닫기' : '백테스트';
-  if(state.backtestOpen) renderBacktest(state.selected);
-};
-$('#closeModal').onclick=()=>{$('#modal').classList.remove('open');$('#modal').setAttribute('aria-hidden','true');};
-$('#modal').onclick=(e)=>{if(e.target===$('#modal'))$('#closeModal').click();};
-window.addEventListener('resize',()=>{
-  if($('#modal').classList.contains('open')){
+$('#searchInput').addEventListener('input', (e) => { clearTimeout(searchTimer); searchTimer=setTimeout(()=>{state.query=e.target.value; collapseInlineDetail(); applyFilter();},100); });
+$('#reloadBtn').onclick=()=>{ collapseInlineDetail(); switchCategory(state.category,true); };
+
+document.addEventListener('click',(e)=>{
+  const close=e.target.closest('.inline-close');
+  if(close){ collapseInlineDetail(); return; }
+
+  const p=e.target.closest('.inline-period-tabs button');
+  if(p && state.detailEl){
+    state.detailEl.querySelectorAll('.inline-period-tabs button').forEach(x=>x.classList.remove('active'));
+    p.classList.add('active');
+    state.chartDays=Number(p.dataset.days);
     drawSelectedChart();
-    if(state.backtestOpen && state.selected?.backtest?.forecast?.available) {
-      drawForecastChart($('#forecastChart'), state.selected.backtest.forecast, state.selected.currency);
+    return;
+  }
+
+  const bt=e.target.closest('.inline-backtest-btn');
+  if(bt && state.selected && state.detailEl){
+    state.backtestOpen=!state.backtestOpen;
+    const panel=state.detailEl.querySelector('.inline-backtest-panel');
+    panel.hidden=!state.backtestOpen;
+    bt.classList.toggle('active',state.backtestOpen);
+    bt.textContent=state.backtestOpen?'백테스트 닫기':'백테스트';
+    if(state.backtestOpen) renderBacktest(state.selected);
+  }
+});
+
+window.addEventListener('resize',()=>{
+  if(state.detailEl && state.selected){
+    drawSelectedChart();
+    if(state.backtestOpen && state.selected?.backtest?.forecast?.available){
+      drawForecastChart(state.detailEl.querySelector('.forecast-chart'), state.selected.backtest.forecast, state.selected.currency);
     }
   }
 });

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#080a0f" />
   <meta name="color-scheme" content="dark" />
-  <meta name="morning-invest-ui-build" content="20260817-ui1" />
+  <meta name="morning-invest-ui-build" content="20260817-v8" />
   <title>Morning Invest</title>
-  <link rel="stylesheet" href="./styles.css?v=20260817-ui1" />
+  <link rel="stylesheet" href="./styles.css?v=20260817-v8" />
 </head>
 <body>
   <div class="shell">
@@ -76,87 +76,8 @@
     <footer>Market screening · Not investment advice</footer>
   </div>
 
-  <div id="modal" class="backdrop" aria-hidden="true">
-    <article class="modal" role="dialog" aria-modal="true" aria-labelledby="modalName">
-      <header class="modal-head">
-        <div>
-          <span id="modalTicker" class="eyebrow"></span>
-          <h2 id="modalName"></h2>
-        </div>
-        <button id="closeModal" class="icon-btn" aria-label="닫기">×</button>
-      </header>
+  <template id="detailTemplate"></template>
 
-      <section class="detail-hero">
-        <div class="detail-score"><strong id="modalScore">—</strong><span>/ 2.70</span></div>
-        <div class="detail-price"><strong id="modalPrice">—</strong><span id="modalChange">—</span></div>
-      </section>
-
-      <section id="scoreGrid" class="score-grid"></section>
-      <section id="metricGrid" class="metric-grid"></section>
-
-      <section class="detail-actions">
-        <button id="backtestBtn" class="backtest-btn">백테스트</button>
-      </section>
-
-      <section id="backtestPanel" class="backtest-panel" hidden>
-        <div class="backtest-head">
-          <div>
-            <span class="eyebrow">BACKTEST</span>
-            <h3>과거 신호 성과</h3>
-          </div>
-          <span id="backtestRule" class="backtest-rule">—</span>
-        </div>
-        <div id="backtestSummary" class="backtest-summary"></div>
-
-        <section id="forecastPanel" class="forecast-panel" hidden>
-          <div class="forecast-head">
-            <div>
-              <span class="eyebrow">1 MONTH OUTLOOK</span>
-              <h3>백테스트 기반 예상</h3>
-            </div>
-            <span id="forecastQuality" class="forecast-quality">—</span>
-          </div>
-          <div id="forecastSummary" class="forecast-summary"></div>
-          <div id="forecastChart" class="forecast-chart"></div>
-          <div class="forecast-legend">
-            <span class="forecast-mean">Expected</span>
-            <span class="forecast-range">25–75% range</span>
-          </div>
-        </section>
-
-        <div class="backtest-table-wrap">
-          <table class="backtest-table">
-            <thead>
-              <tr>
-                <th>신호일</th>
-                <th>점수</th>
-                <th>5D</th>
-                <th>10D</th>
-                <th>20D</th>
-                <th>MFE20</th>
-                <th>MAE20</th>
-              </tr>
-            </thead>
-            <tbody id="backtestBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="chart-card">
-        <div class="chart-head">
-          <b>Daily</b>
-          <div id="periodTabs" class="period-tabs">
-            <button data-days="20">1M</button>
-            <button data-days="60">3M</button>
-            <button class="active" data-days="120">6M</button>
-          </div>
-        </div>
-        <div id="chart" class="chart"></div>
-        <div class="legend"><span class="price-line">Price</span><span class="mid-line">BB Mid</span><span class="band-line">Band</span></div>
-      </section>
-    </article>
-  </div>
-
-  <script src="./app.js?v=20260817-ui1"></script>
+  <script src="./app.js?v=20260817-v8"></script>
 </body>
 </html>

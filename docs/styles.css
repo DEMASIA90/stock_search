@@ -171,3 +171,35 @@ tbody tr.bt-good:hover,tbody tr.bt-strong:hover{background-color:#151d1b}
 #desktopTable .table-scroll {
   position:relative;
 }
+
+
+/* Morning Invest v8 — inline accordion detail */
+.backdrop{display:none!important}
+tbody tr.expanded{background:#121b19;box-shadow:inset 3px 0 0 rgba(120,242,182,.58)}
+.mobile-card.expanded{border-color:rgba(120,242,182,.48);border-radius:15px 15px 6px 6px}
+.inline-detail-row{height:auto!important;cursor:default!important;background:transparent!important}
+.inline-detail-row:hover{background:transparent!important}
+.inline-detail-row>td{padding:0 0 14px!important;text-align:left!important}
+.inline-detail-wrap{padding:0 10px 4px}
+.mobile-detail-wrap{padding:0 0 10px}
+.inline-detail-card{border:1px solid rgba(120,242,182,.20);border-top:0;border-radius:0 0 18px 18px;background:linear-gradient(180deg,#0c1116,#090c10);padding:18px 18px 20px;animation:detailOpen .18s ease-out}
+@keyframes detailOpen{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
+.inline-detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.inline-detail-head h2{margin:4px 0 0;font-size:22px;letter-spacing:-.04em}
+.inline-detail-card .detail-hero{margin:16px 0 10px}
+.detail-chart-first{margin-top:8px}
+.chart-controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+.inline-backtest-btn{padding:6px 10px}
+.detail-section-title{margin:18px 0 8px;color:#8190a4;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.inline-detail-card .score-grid{margin-top:0}
+.inline-detail-card .metric-grid{grid-template-columns:repeat(5,1fr)}
+.inline-detail-card .backtest-panel{margin-top:10px}
+.inline-detail-card .detail-loading{min-height:58px}
+@media(max-width:760px){
+  .inline-detail-card{padding:15px 12px 18px}
+  .inline-detail-head h2{font-size:19px}
+  .chart-controls{width:100%;justify-content:space-between}
+  .inline-detail-card .metric-grid{grid-template-columns:repeat(2,1fr)}
+  .inline-detail-card .chart{height:285px}
+  .mobile-detail-wrap .inline-detail-card{border-radius:0 0 15px 15px}
+}
