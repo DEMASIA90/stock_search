@@ -27,7 +27,7 @@ DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
-# Morning Invest strategy v8.6
+# Morning Invest strategy v9.0 — dual mode
 # ----------------------------
 # Fetch by explicit date range instead of relying on Yahoo's period parsing.
 HISTORY_CALENDAR_DAYS = 1150
@@ -63,15 +63,29 @@ WEEKLY_HA_BULL_SCORE = 0.50
 MONTHLY_HA_BULL_SCORE = 0.50
 MA60_SCORE = 0.50
 BOLLINGER_MAX_SCORE = 2.00
-RAW_MAX_SCORE = 5.0
-DISPLAY_SCORE_MULTIPLIER = 100.0 / RAW_MAX_SCORE
+
+# "싼게 좋아" raw max = 5.0.
+CHEAP_RAW_MAX_SCORE = 5.0
+CHEAP_DISPLAY_MULTIPLIER = 100.0 / CHEAP_RAW_MAX_SCORE
+
+# "오르는게 좋아" score model.
+RISING_BREAKOUT_LOOKBACK_DAYS = 60
+RISING_BREAKOUT_MAX_SCORE = 2.00
+RISING_BREAKOUT_DAY5_SCORE = 1.00
+RISING_DAILY_HA_SCORE = 0.50
+RISING_WEEKLY_HA_SCORE = 0.25
+RISING_MONTHLY_HA_SCORE = 0.25
+RISING_VOLUME_PROFILE_SCORE = 0.50
+RISING_POST_BREAKOUT_MAX_SCORE = 1.00
+RISING_VOLUME_PROFILE_DAYS = 60
+RISING_RAW_MAX_SCORE = 4.50
+RISING_DISPLAY_MULTIPLIER = 100.0 / RISING_RAW_MAX_SCORE
 DISPLAY_MAX_SCORE = 100.0
 
-# Backtest: current strategy recreated point-in-time on each historical daily close.
+# Backtest: each mode is recreated point-in-time on each historical daily close.
 # Signal is actionable only from the next trading day's open.
 BACKTEST_LOOKBACK_DAYS = 252
 BACKTEST_MIN_DISPLAY_SCORE = 50.0
-BACKTEST_MIN_SCORE = RAW_MAX_SCORE * BACKTEST_MIN_DISPLAY_SCORE / 100.0  # 2.50 / 5.0
 BACKTEST_COOLDOWN_DAYS = 10
 BACKTEST_RECENT_TRADES = 12
 
@@ -156,6 +170,12 @@ def _numeric_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             return pd.DataFrame()
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    # Volume is not used by the cheap/bottom mode. It is retained only for
+    # the rising-mode 60-session volume-profile approximation.
+    if "Volume" in out.columns:
+        out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    else:
+        out["Volume"] = 0.0
     out = out.dropna(subset=["Open", "High", "Low", "Close"])
     out = out[(out["Close"] > 0) & (out["High"] > 0) & (out["Low"] > 0)]
     return out
@@ -313,6 +333,141 @@ def score_prior_upper_swing(percent_b: pd.Series) -> tuple[float, int | None]:
             return _swing_score_from_age(age), age
     return 0.0, None
 
+
+
+def _rising_breakout_score_from_age(age: int | None) -> float:
+    """Recency score for the latest bullish close/MA60 crossover.
+
+    Today or 1 session ago = 2.00.
+    2/3/4/5 sessions ago = 1.75/1.50/1.25/1.00.
+    Older crossover can keep the mode eligible for the 60-session follow-through
+    model, but earns zero recency points.
+    """
+    if age is None or age < 0:
+        return 0.0
+    if age <= 1:
+        return RISING_BREAKOUT_MAX_SCORE
+    if age <= 5:
+        return round(
+            RISING_BREAKOUT_MAX_SCORE
+            - (RISING_BREAKOUT_MAX_SCORE - RISING_BREAKOUT_DAY5_SCORE) * ((age - 1) / 4.0),
+            6,
+        )
+    return 0.0
+
+
+def _latest_ma60_bull_cross(ind: pd.DataFrame) -> tuple[bool, int | None, int | None]:
+    """Find latest close crossing from <=MA60 to >MA60 within 60 sessions.
+
+    Rising mode is currently eligible only when the latest close is still above
+    MA60 and such a bullish crossover exists within the last 60 sessions.
+    """
+    if len(ind) < 61:
+        return False, None, None
+    close = pd.to_numeric(ind["Close"], errors="coerce").to_numpy(dtype=float)
+    ma60 = pd.to_numeric(ind["MA60"], errors="coerce").to_numpy(dtype=float)
+    last = len(ind) - 1
+    if not (np.isfinite(close[last]) and np.isfinite(ma60[last]) and close[last] > ma60[last]):
+        return False, None, None
+    start = max(1, last - RISING_BREAKOUT_LOOKBACK_DAYS)
+    for i in range(last, start - 1, -1):
+        if not all(np.isfinite(v) for v in (close[i], ma60[i], close[i-1], ma60[i-1])):
+            continue
+        if close[i] > ma60[i] and close[i-1] <= ma60[i-1]:
+            return True, last - i, i
+    return False, None, None
+
+
+def _volume_profile_60(frame: pd.DataFrame, current_price: float) -> tuple[float, float, float, float | None]:
+    """Approximate 60-session volume-at-price dominance using daily bars.
+
+    Each daily bar's volume is assigned to its typical price (H+L+C)/3. The
+    cumulative volume below the current price is compared with volume above it.
+    This is a daily-bar proxy for a true intraday volume profile.
+    """
+    if len(frame) < RISING_VOLUME_PROFILE_DAYS or not np.isfinite(current_price):
+        return 0.0, 0.0, 0.0, None
+    w = frame.iloc[-RISING_VOLUME_PROFILE_DAYS:]
+    vol = pd.to_numeric(w["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
+    tp = ((w["High"] + w["Low"] + w["Close"]) / 3.0).to_numpy(dtype=float)
+    valid = np.isfinite(tp) & np.isfinite(vol) & (vol > 0)
+    if not valid.any():
+        return 0.0, 0.0, 0.0, None
+    tp = tp[valid]
+    vol = vol[valid]
+    below = float(vol[tp < current_price].sum())
+    above = float(vol[tp > current_price].sum())
+    equal = float(vol[np.isclose(tp, current_price, rtol=1e-10, atol=1e-12)].sum())
+    below += equal * 0.5
+    above += equal * 0.5
+    total = below + above
+    below_share = below / total if total > 0 else None
+    score = RISING_VOLUME_PROFILE_SCORE if total > 0 and below > above else 0.0
+    return score, below, above, below_share
+
+
+def score_rising_strategy(
+    frame: pd.DataFrame,
+    ind: pd.DataFrame,
+    daily_ha: pd.DataFrame,
+    weekly_ha_bull: bool,
+    monthly_ha_bull: bool,
+) -> tuple[float, dict, dict, bool]:
+    """Current "오르는게 좋아" score, raw max 4.5."""
+    eligible, cross_age, cross_idx = _latest_ma60_bull_cross(ind)
+    close = finite(ind["Close"].iloc[-1])
+
+    # 1) Bullish MA60 crossover recency.
+    r1 = _rising_breakout_score_from_age(cross_age) if eligible else 0.0
+
+    # 2) Current HA bullishness: D=.50, active W=.25, active M=.25.
+    daily_bull = bool(daily_ha["HA_Bull"].iloc[-1]) if not daily_ha.empty else False
+    r2_daily = RISING_DAILY_HA_SCORE if daily_bull else 0.0
+    r2_weekly = RISING_WEEKLY_HA_SCORE if weekly_ha_bull else 0.0
+    r2_monthly = RISING_MONTHLY_HA_SCORE if monthly_ha_bull else 0.0
+    r2 = r2_daily + r2_weekly + r2_monthly
+
+    # 3) 60-session volume profile below current price > above current price.
+    r3, profile_below, profile_above, profile_below_share = _volume_profile_60(frame, close)
+
+    # 4) Best high since latest bullish MA60 crossover, capped at 60 sessions.
+    breakout_close = np.nan
+    post_breakout_gain = np.nan
+    r4 = 0.0
+    if eligible and cross_idx is not None:
+        breakout_close = finite(ind["Close"].iloc[cross_idx])
+        end_idx = min(len(ind) - 1, cross_idx + RISING_BREAKOUT_LOOKBACK_DAYS)
+        highest = finite(ind["High"].iloc[cross_idx:end_idx + 1].max())
+        if np.isfinite(breakout_close) and breakout_close > 0 and np.isfinite(highest):
+            post_breakout_gain = max(0.0, highest / breakout_close - 1.0)
+            # 25% best rise => 0.25 point; >=100% => capped 1.00 point.
+            r4 = min(RISING_POST_BREAKOUT_MAX_SCORE, post_breakout_gain)
+
+    # Rule 1 is mandatory: no recent bullish MA60 crossover => mode score is zero.
+    raw = round(r1 + r2 + r3 + r4, 4) if eligible else 0.0
+    scores = {
+        "r1_ma60_breakout": round(r1, 4),
+        "r2_ha_bull": round(r2, 4),
+        "r3_volume_profile": round(r3, 4),
+        "r4_post_breakout_gain": round(r4, 4),
+    }
+    metrics = {
+        "eligible": eligible,
+        "breakout_age": cross_age,
+        "breakout_close": clean(breakout_close),
+        "daily_ha_bull": daily_bull,
+        "weekly_ha_bull": weekly_ha_bull,
+        "monthly_ha_bull": monthly_ha_bull,
+        "ha_daily_score": round(r2_daily, 4),
+        "ha_weekly_score": round(r2_weekly, 4),
+        "ha_monthly_score": round(r2_monthly, 4),
+        "volume_profile_below": clean(profile_below, 0),
+        "volume_profile_above": clean(profile_above, 0),
+        "volume_profile_below_share": clean(profile_below_share, 4),
+        "post_breakout_max_gain": clean(post_breakout_gain, 5),
+        "ma60": clean(ind["MA60"].iloc[-1]),
+    }
+    return raw, scores, metrics, eligible
 
 def fetch_usdkrw() -> float:
     try:
@@ -536,8 +691,7 @@ def analyze(
     if not np.isfinite(percent_b):
         return None, "percent_b_unavailable"
 
-    # 0. Large-cap filter: equities must be >= KRW 10T.
-    # US ETFs are fully exempt: no AUM/market-cap request and all pass this step.
+    # Common hard filter. US ETFs remain market-size exempt.
     if stock.category == "US_ETF":
         market_size_native, market_size_krw, market_size_basis = np.nan, np.nan, "exempt"
     else:
@@ -548,34 +702,79 @@ def analyze(
         if market_size_krw < MIN_MARKET_SIZE_KRW:
             return None, "market_size_lt_10t"
 
-    # 1. Bollinger lower-half location, linearly scored from center(0) to lower band(2).
-    s1, squeeze = score_percent_b(percent_b, bandwidth)
-
-    # 2. Previous upper-band swing within 200 trading sessions; recent touches score more.
-    s2, upper_swing_age = score_prior_upper_swing(ind["PercentB"])
-
-    # 3. Daily HA reversal. 20 consecutive bearish HA days before the
-    # bearish->bullish transition receive the full 1.0 point.
+    # Shared HA states; active weekly/monthly bars include current incomplete period.
     daily_ha = heikin_ashi(frame)
+    _, weekly_ha_bull = active_ha_bull_score(frame, "W-FRI", WEEKLY_HA_BULL_SCORE)
+    _, monthly_ha_bull = active_ha_bull_score(frame, "ME", MONTHLY_HA_BULL_SCORE)
+
+    # ------------------------------------------------------------------
+    # Mode A: "싼게 좋아" — existing v8.7 bottom strategy.
+    # ------------------------------------------------------------------
+    s1, squeeze = score_percent_b(percent_b, bandwidth)
+    s2, upper_swing_age = score_prior_upper_swing(ind["PercentB"])
     s3, d_ha_age, d_ha_bear_streak = ha_reversal_score(
         daily_ha,
         max_age=DAILY_HA_MAX_AGE,
         unit=DAILY_HA_UNIT,
         streak_cap=DAILY_HA_STREAK_CAP,
     )
-
-    # 4/5. Current unfinished weekly/monthly HA bars. Bullish = 0.50 each.
-    s4, weekly_ha_bull = active_ha_bull_score(frame, "W-FRI", WEEKLY_HA_BULL_SCORE)
-    s5, monthly_ha_bull = active_ha_bull_score(frame, "ME", MONTHLY_HA_BULL_SCORE)
-
-    # 6. 60-day moving-average slope. Positive one-session slope = 0.50.
+    s4 = WEEKLY_HA_BULL_SCORE if weekly_ha_bull else 0.0
+    s5 = MONTHLY_HA_BULL_SCORE if monthly_ha_bull else 0.0
     ma60 = finite(ind["MA60"].iloc[-1])
     ma60_prev = finite(ind["MA60"].iloc[-2]) if len(ind) >= 2 else np.nan
     ma60_slope = ma60 - ma60_prev if np.isfinite(ma60) and np.isfinite(ma60_prev) else np.nan
     ma60_slope_pct = (ma60 / ma60_prev - 1.0) if np.isfinite(ma60) and np.isfinite(ma60_prev) and ma60_prev != 0 else np.nan
     s6 = MA60_SCORE if np.isfinite(ma60_slope) and ma60_slope > 0 else 0.0
+    cheap_total = round(s1 + s2 + s3 + s4 + s5 + s6, 4)
 
-    total = round(s1 + s2 + s3 + s4 + s5 + s6, 4)
+    cheap_scores = {
+        "s1_percent_b": round(s1, 4),
+        "s2_upper_swing": round(s2, 4),
+        "s3_daily_ha": round(s3, 4),
+        "s4_weekly_ha": round(s4, 4),
+        "s5_monthly_ha": round(s5, 4),
+        "s6_ma60_slope": round(s6, 4),
+    }
+    cheap_metrics = {
+        "percent_b": clean(percent_b, 4),
+        "bandwidth": clean(bandwidth, 4),
+        "squeeze": squeeze,
+        "bb_lower": clean(row["BB_Lower"]),
+        "bb_mid": clean(row["BB_Mid"]),
+        "bb_upper": clean(row["BB_Upper"]),
+        "upper_swing_age": upper_swing_age,
+        "daily_ha_age": d_ha_age,
+        "daily_ha_prior_bear": d_ha_bear_streak,
+        "weekly_ha_bull": weekly_ha_bull,
+        "monthly_ha_bull": monthly_ha_bull,
+        "ma60": clean(ma60),
+        "ma60_slope": clean(ma60_slope, 6),
+        "ma60_slope_pct": clean(ma60_slope_pct, 6),
+        "market_size_native": clean(market_size_native, 0),
+        "market_size_krw": clean(market_size_krw, 0),
+        "market_size_basis": market_size_basis,
+    }
+
+    # ------------------------------------------------------------------
+    # Mode B: "오르는게 좋아".
+    # ------------------------------------------------------------------
+    rising_total, rising_scores, rising_metrics, rising_eligible = score_rising_strategy(
+        frame, ind, daily_ha, weekly_ha_bull, monthly_ha_bull
+    )
+    rising_metrics.update({
+        "market_size_native": clean(market_size_native, 0),
+        "market_size_krw": clean(market_size_krw, 0),
+        "market_size_basis": market_size_basis,
+    })
+
+    # Build point-in-time histories once, then run each mode's backtest.
+    hist_sets = build_historical_score_sets(frame, stock.category, thresholds)
+    cheap_bt = backtest_stock_from_hist(
+        frame, hist_sets["cheap"], cheap_total, CHEAP_RAW_MAX_SCORE, mode="cheap"
+    )
+    rising_bt = backtest_stock_from_hist(
+        frame, hist_sets["rising"], rising_total, RISING_RAW_MAX_SCORE, mode="rising"
+    )
 
     last_date = pd.Timestamp(row.name).date().isoformat()
     prev_close = finite(valid["Close"].iloc[-2]) if len(valid) >= 2 else np.nan
@@ -591,37 +790,25 @@ def analyze(
         "date": last_date,
         "close": clean(close),
         "day_change_pct": clean(day_change, 2),
-        "score": total,
-        "display_score": round(total * DISPLAY_SCORE_MULTIPLIER, 1),
-        "scores": {
-            "s1_percent_b": round(s1, 4),
-            "s2_upper_swing": round(s2, 4),
-            "s3_daily_ha": round(s3, 4),
-            "s4_weekly_ha": round(s4, 4),
-            "s5_monthly_ha": round(s5, 4),
-            "s6_ma60_slope": round(s6, 4),
-        },
-        "metrics": {
-            "percent_b": clean(percent_b, 4),
-            "bandwidth": clean(bandwidth, 4),
-            "squeeze": squeeze,
-            "bb_lower": clean(row["BB_Lower"]),
-            "bb_mid": clean(row["BB_Mid"]),
-            "bb_upper": clean(row["BB_Upper"]),
-            "upper_swing_age": upper_swing_age,
-            "daily_ha_age": d_ha_age,
-            "daily_ha_prior_bear": d_ha_bear_streak,
-            "weekly_ha_bull": weekly_ha_bull,
-            "monthly_ha_bull": monthly_ha_bull,
-            "ma60": clean(ma60),
-            "ma60_slope": clean(ma60_slope, 6),
-            "ma60_slope_pct": clean(ma60_slope_pct, 6),
-            "market_size_native": clean(market_size_native, 0),
-            "market_size_krw": clean(market_size_krw, 0),
-            "market_size_basis": market_size_basis,
+
+        # Cheap mode remains top-level for backward compatibility.
+        "score": cheap_total,
+        "display_score": round(cheap_total * CHEAP_DISPLAY_MULTIPLIER, 1),
+        "scores": cheap_scores,
+        "metrics": cheap_metrics,
+        "backtest": cheap_bt,
+
+        # Rising mode is a parallel strategy payload.
+        "rising": {
+            "eligible": bool(rising_eligible),
+            "rank": None,
+            "score": rising_total,
+            "display_score": round(rising_total * RISING_DISPLAY_MULTIPLIER, 1),
+            "scores": rising_scores,
+            "metrics": rising_metrics,
+            "backtest": rising_bt,
         },
         "chart": _make_chart(ind),
-        "backtest": backtest_stock(frame, stock.category, thresholds, total),
     }
     return item, "passed"
 
@@ -705,26 +892,108 @@ def _active_period_ha_bull_series(frame: pd.DataFrame, freq: str) -> pd.Series:
 
     return result
 
-def build_historical_scores(
+def _rising_breakout_series(ind: pd.DataFrame) -> pd.DataFrame:
+    """Historical point-in-time MA60 bullish crossover state and follow-through."""
+    result = pd.DataFrame(
+        {"eligible": False, "age": np.nan, "r1": 0.0, "r4": 0.0, "gain": np.nan},
+        index=ind.index,
+    )
+    close = pd.to_numeric(ind["Close"], errors="coerce").to_numpy(dtype=float)
+    high = pd.to_numeric(ind["High"], errors="coerce").to_numpy(dtype=float)
+    ma60 = pd.to_numeric(ind["MA60"], errors="coerce").to_numpy(dtype=float)
+    last_cross = None
+    breakout_close = np.nan
+    max_high = np.nan
+
+    for i in range(len(ind)):
+        if i >= 1 and all(np.isfinite(v) for v in (close[i], ma60[i], close[i-1], ma60[i-1])):
+            if close[i] > ma60[i] and close[i-1] <= ma60[i-1]:
+                last_cross = i
+                breakout_close = close[i]
+                max_high = high[i] if np.isfinite(high[i]) else close[i]
+            elif last_cross is not None and np.isfinite(high[i]):
+                max_high = max(max_high, high[i]) if np.isfinite(max_high) else high[i]
+
+        if last_cross is None:
+            continue
+        age = i - last_cross
+        currently_above = np.isfinite(close[i]) and np.isfinite(ma60[i]) and close[i] > ma60[i]
+        eligible = age <= RISING_BREAKOUT_LOOKBACK_DAYS and currently_above
+        result.at[ind.index[i], "age"] = age
+        result.at[ind.index[i], "eligible"] = eligible
+        if not eligible:
+            continue
+        result.at[ind.index[i], "r1"] = _rising_breakout_score_from_age(age)
+        if np.isfinite(breakout_close) and breakout_close > 0 and np.isfinite(max_high):
+            gain = max(0.0, max_high / breakout_close - 1.0)
+            result.at[ind.index[i], "gain"] = gain
+            result.at[ind.index[i], "r4"] = min(RISING_POST_BREAKOUT_MAX_SCORE, gain)
+
+    return result
+
+
+def _volume_profile_dominance_series(frame: pd.DataFrame) -> pd.DataFrame:
+    """Vectorized 60-session daily-bar volume profile for historical backtests."""
+    result = pd.DataFrame(
+        {"score": 0.0, "below": np.nan, "above": np.nan, "below_share": np.nan},
+        index=frame.index,
+    )
+    n = len(frame)
+    w = RISING_VOLUME_PROFILE_DAYS
+    if n < w:
+        return result
+
+    close = pd.to_numeric(frame["Close"], errors="coerce").to_numpy(dtype=float)
+    high = pd.to_numeric(frame["High"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(frame["Low"], errors="coerce").to_numpy(dtype=float)
+    vol = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
+    tp = (high + low + close) / 3.0
+
+    tpw = np.lib.stride_tricks.sliding_window_view(tp, w)
+    vw = np.lib.stride_tricks.sliding_window_view(vol, w)
+    current = close[w-1:]
+    valid = np.isfinite(tpw) & np.isfinite(vw) & (vw > 0)
+    safe_v = np.where(valid, vw, 0.0)
+    below = np.where(tpw < current[:, None], safe_v, 0.0).sum(axis=1)
+    above = np.where(tpw > current[:, None], safe_v, 0.0).sum(axis=1)
+    equal = np.where(np.isclose(tpw, current[:, None], rtol=1e-10, atol=1e-12), safe_v, 0.0).sum(axis=1)
+    below = below + equal * 0.5
+    above = above + equal * 0.5
+    total = below + above
+    share = np.divide(below, total, out=np.full_like(below, np.nan), where=total > 0)
+    score = np.where((total > 0) & (below > above), RISING_VOLUME_PROFILE_SCORE, 0.0)
+
+    idx = result.index[w-1:]
+    result.loc[idx, "below"] = below
+    result.loc[idx, "above"] = above
+    result.loc[idx, "below_share"] = share
+    result.loc[idx, "score"] = score
+    return result
+
+
+def build_historical_score_sets(
     frame: pd.DataFrame,
     category: str,
     thresholds: dict,
-) -> pd.DataFrame:
-    """Recreate the strategy at every historical close with no future data."""
+) -> dict[str, pd.DataFrame]:
+    """Recreate both strategies at every historical close with no future data."""
     ind = add_daily_indicators(frame)
-    hist = pd.DataFrame(index=ind.index)
+    daily_ha = heikin_ashi(frame)
+    weekly_bull = _active_period_ha_bull_series(frame, "W-FRI")
+    monthly_bull = _active_period_ha_bull_series(frame, "M")
+    enough_history = pd.Series(np.arange(len(ind)) >= (MIN_TRADING_DAYS - 1), index=ind.index)
+    common_eligible = enough_history & (ind["Close"] >= thresholds["min_price"])
 
-    # 1) Bollinger lower-half score: center(0) -> lower band(2), linear.
+    # ---------------- cheap / bottom ----------------
+    cheap = pd.DataFrame(index=ind.index)
     pb = pd.to_numeric(ind["PercentB"], errors="coerce")
     s1 = pd.Series(0.0, index=ind.index)
     valid_pb = pb.notna()
     s1.loc[valid_pb & (pb <= 0.0)] = BOLLINGER_MAX_SCORE
     middle = valid_pb & (pb > 0.0) & (pb < 0.5)
     s1.loc[middle] = BOLLINGER_MAX_SCORE * (0.5 - pb.loc[middle]) / 0.5
-    hist["s1"] = s1
+    cheap["s1"] = s1
 
-    # 2) most-recent prior upper-band observation within 200 sessions.
-    # Point-in-time reconstruction: today's %B is only eligible for future days.
     s2_values = np.zeros(len(ind), dtype=float)
     last_upper_pos: int | None = None
     pb_values = pb.to_numpy(dtype=float)
@@ -735,37 +1004,39 @@ def build_historical_scores(
                 s2_values[i] = _swing_score_from_age(age)
         if np.isfinite(value) and value >= 0.95:
             last_upper_pos = i
-    hist["s2"] = pd.Series(s2_values, index=ind.index)
+    cheap["s2"] = pd.Series(s2_values, index=ind.index)
 
-    # 3) Daily HA reversal only. 20 bearish days before reversal = 1.0.
-    daily_ha = heikin_ashi(frame)
     d_hist = _ha_reversal_score_series(
         daily_ha,
         max_age=DAILY_HA_MAX_AGE,
         unit=DAILY_HA_UNIT,
         streak_cap=DAILY_HA_STREAK_CAP,
     )
-    hist["s3"] = d_hist["score"]
-
-    # 4/5) Point-in-time current weekly/monthly HA bullish state.
-    hist["s4"] = _active_period_ha_bull_series(frame, "W-FRI").astype(float) * WEEKLY_HA_BULL_SCORE
-    hist["s5"] = _active_period_ha_bull_series(frame, "M").astype(float) * MONTHLY_HA_BULL_SCORE
-
-    # 6) Positive 60-day MA slope.
+    cheap["s3"] = d_hist["score"]
+    cheap["s4"] = weekly_bull.astype(float) * WEEKLY_HA_BULL_SCORE
+    cheap["s5"] = monthly_bull.astype(float) * MONTHLY_HA_BULL_SCORE
     ma60_slope = pd.to_numeric(ind["MA60_Slope"], errors="coerce")
-    hist["s6"] = (ma60_slope > 0).astype(float) * MA60_SCORE
+    cheap["s6"] = (ma60_slope > 0).astype(float) * MA60_SCORE
+    cheap["score"] = cheap[["s1","s2","s3","s4","s5","s6"]].sum(axis=1)
+    cheap["eligible"] = common_eligible & cheap["score"].notna()
 
-    # Total raw score max = 5.0: 2.0 + 0.5 + 1.0 + 0.5 + 0.5 + 0.5.
-    hist["score"] = hist["s1"] + hist["s2"] + hist["s3"] + hist["s4"] + hist["s5"] + hist["s6"]
-
-    # 0-step point-in-time market-data filters.
-    enough_history = pd.Series(np.arange(len(ind)) >= (MIN_TRADING_DAYS - 1), index=ind.index)
-    hist["eligible"] = (
-        enough_history
-        & (ind["Close"] >= thresholds["min_price"])
-        & hist["score"].notna()
+    # ---------------- rising / momentum ----------------
+    rising = pd.DataFrame(index=ind.index)
+    breakout = _rising_breakout_series(ind)
+    rising["r1"] = breakout["r1"]
+    rising["r2"] = (
+        daily_ha["HA_Bull"].astype(float) * RISING_DAILY_HA_SCORE
+        + weekly_bull.astype(float) * RISING_WEEKLY_HA_SCORE
+        + monthly_bull.astype(float) * RISING_MONTHLY_HA_SCORE
     )
-    return hist
+    vp = _volume_profile_dominance_series(frame)
+    rising["r3"] = vp["score"]
+    rising["r4"] = breakout["r4"]
+    rising["score"] = rising[["r1","r2","r3","r4"]].sum(axis=1)
+    # Rule 1 is mandatory for backtest eligibility.
+    rising["eligible"] = common_eligible & breakout["eligible"].astype(bool) & rising["score"].notna()
+
+    return {"cheap": cheap, "rising": rising}
 
 
 def _mean(values):
@@ -878,32 +1149,27 @@ def _build_forecast(trades: list[dict], current_score: float, current_price: flo
         "high_price": [clean(v) for v in high_prices],
     }
 
-def backtest_stock(
+def backtest_stock_from_hist(
     frame: pd.DataFrame,
-    category: str,
-    thresholds: dict,
+    hist: pd.DataFrame,
     current_score: float,
+    raw_max_score: float,
+    mode: str,
 ) -> dict:
-    """Single-stock event backtest for the current Morning Invest strategy.
-
-    - Signal is calculated using data available at that day's close.
-    - Entry is the next trading day's open.
-    - 5/10/20D outcomes use subsequent closes.
-    - A 10-trading-day cooldown prevents repeated counting of the same setup.
-    - Historical regulatory/watch-list status is not reconstructed here.
-    """
+    """Single-stock event backtest for one strategy mode."""
     if len(frame) < MIN_TRADING_DAYS + 25:
         return {
             "available": False,
             "reason": "insufficient_history",
             "signals": 0,
             "trades": [],
+            "mode": mode,
+            "raw_max_score": raw_max_score,
+            "min_signal_display_score": BACKTEST_MIN_DISPLAY_SCORE,
         }
 
-    hist = build_historical_scores(frame, category, thresholds)
+    min_signal_score = raw_max_score * BACKTEST_MIN_DISPLAY_SCORE / 100.0
     n = len(frame)
-    # Search at most the most recent ~1 trading year. The last 20 sessions are
-    # excluded because a complete 20D outcome is not known yet.
     start = max(MIN_TRADING_DAYS - 1, n - BACKTEST_LOOKBACK_DAYS)
     end = n - 21
 
@@ -912,8 +1178,7 @@ def backtest_stock(
     for i in range(start, max(start, end)):
         if not bool(hist["eligible"].iloc[i]):
             continue
-        # Backtest only historical Morning Invest signals scoring >=50/100 (raw >=2.50).
-        if finite(hist["score"].iloc[i], -np.inf) < BACKTEST_MIN_SCORE:
+        if finite(hist["score"].iloc[i], -np.inf) < min_signal_score:
             continue
         if i - last_signal < BACKTEST_COOLDOWN_DAYS:
             continue
@@ -926,12 +1191,10 @@ def backtest_stock(
         ret5 = finite(frame["Close"].iloc[i + 5] / entry - 1.0)
         ret10 = finite(frame["Close"].iloc[i + 10] / entry - 1.0)
         ret20 = finite(frame["Close"].iloc[i + 20] / entry - 1.0)
-
         future = frame.iloc[entry_i : i + 21]
         mfe20 = finite(future["High"].max() / entry - 1.0)
         mae20 = finite(future["Low"].min() / entry - 1.0)
 
-        # D+1..D+20 close-return path relative to the next-session open.
         path20 = []
         for step in range(20):
             pos = entry_i + step
@@ -939,20 +1202,18 @@ def backtest_stock(
                 break
             path20.append(clean(frame["Close"].iloc[pos] / entry - 1.0, 6))
 
-        trades.append(
-            {
-                "signal_date": pd.Timestamp(frame.index[i]).date().isoformat(),
-                "entry_date": pd.Timestamp(frame.index[entry_i]).date().isoformat(),
-                "score": clean(hist["score"].iloc[i], 3),
-                "entry": clean(entry),
-                "ret_5d": clean(ret5, 5),
-                "ret_10d": clean(ret10, 5),
-                "ret_20d": clean(ret20, 5),
-                "mfe_20d": clean(mfe20, 5),
-                "mae_20d": clean(mae20, 5),
-                "_path20": path20,
-            }
-        )
+        trades.append({
+            "signal_date": pd.Timestamp(frame.index[i]).date().isoformat(),
+            "entry_date": pd.Timestamp(frame.index[entry_i]).date().isoformat(),
+            "score": clean(hist["score"].iloc[i], 3),
+            "entry": clean(entry),
+            "ret_5d": clean(ret5, 5),
+            "ret_10d": clean(ret10, 5),
+            "ret_20d": clean(ret20, 5),
+            "mfe_20d": clean(mfe20, 5),
+            "mae_20d": clean(mae20, 5),
+            "_path20": path20,
+        })
         last_signal = i
 
     r5 = [t["ret_5d"] for t in trades if t["ret_5d"] is not None]
@@ -971,14 +1232,17 @@ def backtest_stock(
     current_price = finite(frame["Close"].iloc[-1])
     forecast = _build_forecast(trades, current_score, current_price, quality_label)
 
-    public_trades = []
-    for trade in trades[-BACKTEST_RECENT_TRADES:][::-1]:
-        public_trades.append({k: v for k, v in trade.items() if not k.startswith("_")})
+    public_trades = [
+        {k: v for k, v in trade.items() if not k.startswith("_")}
+        for trade in trades[-BACKTEST_RECENT_TRADES:][::-1]
+    ]
 
     return {
         "available": True,
+        "mode": mode,
+        "raw_max_score": raw_max_score,
         "lookback_days": BACKTEST_LOOKBACK_DAYS,
-        "min_signal_score": BACKTEST_MIN_SCORE,
+        "min_signal_score": min_signal_score,
         "min_signal_display_score": BACKTEST_MIN_DISPLAY_SCORE,
         "eval_days": max(0, end - start),
         "cooldown_days": BACKTEST_COOLDOWN_DAYS,
@@ -1002,7 +1266,8 @@ def backtest_stock(
         "trades": public_trades,
         "limitations": [
             "historical_regulatory_status_not_reconstructed",
-            "historical_market_cap_not_reconstructed"
+            "historical_market_cap_not_reconstructed",
+            *( ["volume_profile_uses_daily_typical_price_proxy"] if mode == "rising" else [] ),
         ],
     }
 
@@ -1060,10 +1325,22 @@ def _detail_filename(item: dict) -> str:
     return f"{symbol}-{digest}.json"
 
 
+def _compact_backtest(bt: dict) -> dict:
+    forecast = (bt or {}).get("forecast") or {}
+    return {
+        "available": bool((bt or {}).get("available")),
+        "signals": (bt or {}).get("signals"),
+        "avg_20d": (bt or {}).get("avg_20d"),
+        "win_20d": (bt or {}).get("win_20d"),
+        "quality_score": (bt or {}).get("quality_score"),
+        "quality_label": (bt or {}).get("quality_label", "NORMAL"),
+        "forecast_available": bool(forecast.get("available")),
+    }
+
+
 def _summary_item(item: dict, detail_path: str) -> dict:
-    """Small row payload used by the initial market screen."""
-    bt = item.get("backtest") or {}
-    forecast = bt.get("forecast") or {}
+    """Small row payload used by the initial market screen; both modes included."""
+    rising = item.get("rising") or {}
     return {
         "ticker": item["ticker"],
         "symbol": item["symbol"],
@@ -1074,20 +1351,29 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "date": item["date"],
         "close": item["close"],
         "day_change_pct": item["day_change_pct"],
+
+        # Cheap mode (legacy top-level schema).
         "rank": item["rank"],
         "score": item["score"],
-        "display_score": item.get("display_score", round(float(item["score"]) * DISPLAY_SCORE_MULTIPLIER, 1)),
+        "display_score": item.get("display_score"),
         "scores": item["scores"],
         "market_size_krw": (item.get("metrics") or {}).get("market_size_krw"),
         "market_size_basis": (item.get("metrics") or {}).get("market_size_basis"),
-        "backtest": {
-            "available": bool(bt.get("available")),
-            "signals": bt.get("signals"),
-            "avg_20d": bt.get("avg_20d"),
-            "win_20d": bt.get("win_20d"),
-            "quality_score": bt.get("quality_score"),
-            "quality_label": bt.get("quality_label", "NORMAL"),
-            "forecast_available": bool(forecast.get("available")),
+        "backtest": _compact_backtest(item.get("backtest") or {}),
+
+        # Rising mode.
+        "rising": {
+            "eligible": bool(rising.get("eligible")),
+            "rank": rising.get("rank"),
+            "score": rising.get("score", 0.0),
+            "display_score": rising.get("display_score", 0.0),
+            "scores": rising.get("scores") or {},
+            "metrics": {
+                "breakout_age": (rising.get("metrics") or {}).get("breakout_age"),
+                "post_breakout_max_gain": (rising.get("metrics") or {}).get("post_breakout_max_gain"),
+                "volume_profile_below_share": (rising.get("metrics") or {}).get("volume_profile_below_share"),
+            },
+            "backtest": _compact_backtest(rising.get("backtest") or {}),
         },
         "detail_path": detail_path,
     }
@@ -1314,15 +1600,26 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                 f"required>={MARKET_SIZE_MIN_LOOKUP_COVERAGE:.0%}. Existing site data was not overwritten."
             )
 
-    # Keep every hard-eligible symbol in summary; there is no score or %B floor.
+    # Keep every hard-eligible symbol in summary so search can always find it.
+    # Each mode gets an independent ranking.
     items = sorted(results.values(), key=lambda x: (-x["score"], x["symbol"]))
     for rank, item in enumerate(items, 1):
         item["rank"] = rank
 
+    rising_items = sorted(
+        [x for x in items if bool((x.get("rising") or {}).get("eligible"))],
+        key=lambda x: (-float((x.get("rising") or {}).get("score", 0.0)), x["symbol"]),
+    )
+    for item in items:
+        (item.get("rising") or {})["rank"] = None
+    for rank, item in enumerate(rising_items, 1):
+        item["rising"]["rank"] = rank
+
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_V8_6_BB2_LINEAR_SWING200_DHA20_WHA_MHA_MA60_BT50_TOP100_ALLSEARCH",
+        "strategy": "MI_V9_DUAL_CHEAP_AND_RISING",
+        "modes": ["cheap", "rising"],
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1334,14 +1631,16 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
+        "rising_eligible_count": len(rising_items),
         "market_size_min_krw": None if category == "US_ETF" else MIN_MARKET_SIZE_KRW,
         "market_size_filter": "exempt" if category == "US_ETF" else "krw_10t_min",
         "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if size_attempted and np.isfinite(size_coverage) else None,
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
-        "max_score": RAW_MAX_SCORE,
-        "display_score_multiplier": DISPLAY_SCORE_MULTIPLIER,
+        "max_score": CHEAP_RAW_MAX_SCORE,
+        "display_score_multiplier": CHEAP_DISPLAY_MULTIPLIER,
         "max_display_score": DISPLAY_MAX_SCORE,
+        "mode_max_scores": {"cheap": CHEAP_RAW_MAX_SCORE, "rising": RISING_RAW_MAX_SCORE},
         "swing_model": {
             "upper_band_percent_b": 0.95,
             "lookback_sessions": SWING_LOOKBACK_DAYS,
@@ -1374,9 +1673,16 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             "positive_slope_score": MA60_SCORE,
             "slope_definition": "today_MA60_minus_previous_trading_day_MA60",
         },
+        "rising_model": {
+            "mandatory": "current_close_above_ma60_and_bullish_ma60_cross_within_60_sessions",
+            "ma60_cross_recency": {"today_or_1d": 2.0, "2d": 1.75, "3d": 1.5, "4d": 1.25, "5d": 1.0, "6_to_60d": 0.0},
+            "ha_bullish": {"daily": 0.5, "weekly_active": 0.25, "monthly_active": 0.25},
+            "volume_profile": {"sessions": 60, "below_gt_above_score": 0.5, "method": "daily_typical_price_weighted_by_volume"},
+            "post_breakout_gain": {"score_equals_gain_fraction": True, "cap": 1.0, "window_sessions": 60},
+            "max_score": RISING_RAW_MAX_SCORE,
+        },
         "backtest_model": {
             "history": "max_1_trading_year",
-            "min_signal_score": BACKTEST_MIN_SCORE,
             "min_signal_display_score": BACKTEST_MIN_DISPLAY_SCORE,
             "entry": "next_trading_day_open",
             "forward_sessions": [5, 10, 20],
