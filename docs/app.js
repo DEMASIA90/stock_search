@@ -11,6 +11,9 @@ const DATA_BASE = location.hostname.endsWith('github.io')
   ? 'https://morninginv.web.app'
   : '.';
 
+const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();
+const NEWS_CACHE_MS = 5 * 60 * 1000;
+
 function dataUrl(path, force=false) {
   const clean = String(path).replace(/^\.\//, '').replace(/^\//, '');
   const base = DATA_BASE === '.' ? '.' : DATA_BASE.replace(/\/$/, '');
@@ -44,6 +47,7 @@ const state = {
   chartDays: 120,
   backtestOpen: false,
   detailCache: new Map(),
+  newsCache: new Map(),
 };
 
 function escapeHtml(value) {
@@ -123,6 +127,130 @@ async function ensureDetail(stock, force=false) {
   const detail = await response.json();
   state.detailCache.set(key, detail);
   return detail;
+}
+
+function newsSearchQuery(stock) {
+  const name = String(stock?.name || '').trim();
+  const symbol = String(stock?.symbol || stock?.ticker || '').trim();
+  if (stock?.category === 'KR') return `${name} ${symbol} 주식`;
+  if (stock?.category === 'US_ETF') return `${name} ${symbol} ETF`;
+  return `${name} ${symbol} stock`;
+}
+
+function newsSearchUrl(stock) {
+  const q = encodeURIComponent(newsSearchQuery(stock));
+  return stock?.category === 'KR'
+    ? `https://news.google.com/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`
+    : `https://news.google.com/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
+}
+
+function jsonp(url, params={}, timeoutMs=12000) {
+  return new Promise((resolve, reject) => {
+    const callback = `__badakNews_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement('script');
+    const query = new URLSearchParams({...params, callback});
+    const sep = url.includes('?') ? '&' : '?';
+    let done = false;
+
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      script.remove();
+      try { delete window[callback]; } catch (_) { window[callback] = undefined; }
+    };
+
+    window[callback] = (payload) => {
+      cleanup();
+      resolve(payload);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error('news proxy load failed'));
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('news proxy timeout'));
+    }, timeoutMs);
+
+    script.src = `${url}${sep}${query.toString()}`;
+    script.async = true;
+    document.head.appendChild(script);
+  });
+}
+
+function newsTimeText(value) {
+  if (!value) return '';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return '';
+  const sec = Math.max(0, (Date.now() - dt.getTime()) / 1000);
+  if (sec < 60) return '방금 전';
+  if (sec < 3600) return `${Math.floor(sec/60)}분 전`;
+  if (sec < 86400) return `${Math.floor(sec/3600)}시간 전`;
+  if (sec < 604800) return `${Math.floor(sec/86400)}일 전`;
+  return dt.toLocaleDateString('ko-KR', {month:'2-digit', day:'2-digit'});
+}
+
+function renderNewsList(root, stock, articles) {
+  if (!root?.isConnected) return;
+  const list = root.querySelector('.news-list');
+  if (!list) return;
+
+  if (!Array.isArray(articles) || !articles.length) {
+    list.innerHTML = `<div class="news-empty">최근 기사를 찾지 못했습니다.</div>`;
+    return;
+  }
+
+  list.innerHTML = articles.slice(0,5).map((a, i) => {
+    const source = escapeHtml(a.source || 'News');
+    const time = escapeHtml(newsTimeText(a.published_at));
+    const meta = [source, time].filter(Boolean).join(' · ');
+    return `<a class="news-item" href="${escapeHtml(a.link)}" target="_blank" rel="noopener noreferrer">
+      <span class="news-index">${String(i+1).padStart(2,'0')}</span>
+      <span class="news-copy"><strong>${escapeHtml(a.title)}</strong><small>${meta}</small></span>
+      <span class="news-open">↗</span>
+    </a>`;
+  }).join('');
+}
+
+async function loadLatestNews(stock, root) {
+  if (!root?.isConnected) return;
+  const allLink = root.querySelector('.news-all-link');
+  if (allLink) allLink.href = newsSearchUrl(stock);
+  const list = root.querySelector('.news-list');
+  if (!list) return;
+
+  if (!NEWS_PROXY_URL || NEWS_PROXY_URL.includes('PASTE_YOUR')) {
+    list.innerHTML = `<div class="news-setup">기사 기능 연결이 필요합니다. <a href="${newsSearchUrl(stock)}" target="_blank" rel="noopener noreferrer">Google News에서 보기 ↗</a></div>`;
+    return;
+  }
+
+  const key = `${stock.category}:${stock.ticker}`;
+  const cached = state.newsCache.get(key);
+  if (cached && Date.now() - cached.at < NEWS_CACHE_MS) {
+    renderNewsList(root, stock, cached.articles);
+    return;
+  }
+
+  list.innerHTML = `<div class="news-loading"><span class="news-spinner"></span> 최신 기사 불러오는 중…</div>`;
+
+  try {
+    const payload = await jsonp(NEWS_PROXY_URL, {
+      q: newsSearchQuery(stock),
+      region: stock.category === 'KR' ? 'KR' : 'US',
+      limit: '5',
+    });
+    if (!payload?.ok) throw new Error(payload?.error || 'news proxy error');
+    const articles = Array.isArray(payload.articles) ? payload.articles.slice(0,5) : [];
+    state.newsCache.set(key, {at: Date.now(), articles});
+    renderNewsList(root, stock, articles);
+  } catch (err) {
+    console.error('news', err);
+    if (!root?.isConnected) return;
+    list.innerHTML = `<div class="news-error">기사를 불러오지 못했습니다. <a href="${newsSearchUrl(stock)}" target="_blank" rel="noopener noreferrer">직접 검색 ↗</a></div>`;
+  }
 }
 
 function applyFilter() {
@@ -299,6 +427,14 @@ function inlineDetailShell(summary, mobile=false) {
       <div class="legend"><span class="price-line">Price</span><span class="mid-line">BB Mid</span><span class="band-line">Band</span><span>MA60</span></div>
     </section>
 
+    <section class="news-panel">
+      <div class="news-head">
+        <div><span class="eyebrow">LATEST NEWS</span><h3>최신 기사 헤드라인</h3></div>
+        <a class="news-all-link" href="#" target="_blank" rel="noopener noreferrer">전체 기사 ↗</a>
+      </div>
+      <div class="news-list"><div class="news-loading"><span class="news-spinner"></span> 최신 기사 불러오는 중…</div></div>
+    </section>
+
     <section class="backtest-panel inline-backtest-panel" hidden>
       <div class="backtest-head">
         <div><span class="eyebrow">BACKTEST</span><h3>총점 50점 이상 과거 신호 성과</h3></div>
@@ -344,6 +480,7 @@ async function openInlineStock(summary, target) {
 
   const detail = state.detailEl.querySelector('.inline-detail-card');
   detail.scrollIntoView({behavior:'smooth', block:'nearest'});
+  void loadLatestNews(summary, detail);
 
   try {
     const stock = await ensureDetail(summary);
