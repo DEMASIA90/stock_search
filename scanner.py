@@ -27,7 +27,7 @@ DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
-# Morning Invest strategy v8.5
+# Morning Invest strategy v8.6
 # ----------------------------
 # Fetch by explicit date range instead of relying on Yahoo's period parsing.
 HISTORY_CALENDAR_DAYS = 1150
@@ -50,7 +50,6 @@ BB_WINDOW = 20
 BB_SIGMA = 2.0
 MIN_TRADING_DAYS = 250
 MIN_PRICE_KRW = 1_000.0
-SQUEEZE_BANDWIDTH = 0.08
 
 # Score model.
 SWING_LOOKBACK_DAYS = 200
@@ -60,19 +59,19 @@ SWING_MIN_SCORE = 0.1
 DAILY_HA_MAX_AGE = 3
 DAILY_HA_STREAK_CAP = 20
 DAILY_HA_UNIT = 0.05  # 20 consecutive bearish HA days -> 1.0
-WEEKLY_PSAR_MAX_SCORE = 0.50
-WEEKLY_PSAR_DECAY_PER_WEEK = 0.10
-WEEKLY_PSAR_ZERO_AGE = 5  # 5 weeks or more since bull flip => 0
+WEEKLY_HA_BULL_SCORE = 0.50
+MONTHLY_HA_BULL_SCORE = 0.50
 MA60_SCORE = 0.50
-RAW_MAX_SCORE = 3.5
+BOLLINGER_MAX_SCORE = 2.00
+RAW_MAX_SCORE = 5.0
 DISPLAY_SCORE_MULTIPLIER = 100.0 / RAW_MAX_SCORE
 DISPLAY_MAX_SCORE = 100.0
 
 # Backtest: current strategy recreated point-in-time on each historical daily close.
 # Signal is actionable only from the next trading day's open.
 BACKTEST_LOOKBACK_DAYS = 252
-BACKTEST_MIN_DISPLAY_SCORE = 70.0
-BACKTEST_MIN_SCORE = RAW_MAX_SCORE * BACKTEST_MIN_DISPLAY_SCORE / 100.0  # 2.45 / 3.5
+BACKTEST_MIN_DISPLAY_SCORE = 50.0
+BACKTEST_MIN_SCORE = RAW_MAX_SCORE * BACKTEST_MIN_DISPLAY_SCORE / 100.0  # 2.50 / 5.0
 BACKTEST_COOLDOWN_DAYS = 10
 BACKTEST_RECENT_TRADES = 12
 
@@ -215,65 +214,6 @@ def heikin_ashi(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def parabolic_sar(frame: pd.DataFrame, af_start=0.02, af_step=0.02, af_max=0.20) -> tuple[pd.Series, pd.Series]:
-    """Classic Parabolic SAR and bull/bear state.
-
-    bull=True means the SAR point is below the price trend; bull=False means above.
-    """
-    high = frame["High"].to_numpy(dtype=float)
-    low = frame["Low"].to_numpy(dtype=float)
-    n = len(frame)
-    if n == 0:
-        empty = pd.Series(dtype=float, index=frame.index)
-        return empty, empty.astype(bool)
-
-    sar = np.full(n, np.nan, dtype=float)
-    bull_state = np.full(n, True, dtype=bool)
-
-    bull = True
-    if n >= 2:
-        bull = frame["Close"].iloc[1] >= frame["Close"].iloc[0]
-    af = af_start
-    ep = high[0] if bull else low[0]
-    sar[0] = low[0] if bull else high[0]
-    bull_state[0] = bull
-
-    for i in range(1, n):
-        candidate = sar[i - 1] + af * (ep - sar[i - 1])
-
-        if bull:
-            candidate = min(candidate, low[i - 1])
-            if i >= 2:
-                candidate = min(candidate, low[i - 2])
-            if low[i] < candidate:
-                bull = False
-                candidate = ep
-                ep = low[i]
-                af = af_start
-            else:
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + af_step, af_max)
-        else:
-            candidate = max(candidate, high[i - 1])
-            if i >= 2:
-                candidate = max(candidate, high[i - 2])
-            if high[i] > candidate:
-                bull = True
-                candidate = ep
-                ep = high[i]
-                af = af_start
-            else:
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + af_step, af_max)
-
-        sar[i] = candidate
-        bull_state[i] = bull
-
-    return pd.Series(sar, index=frame.index, name="PSAR"), pd.Series(bull_state, index=frame.index, name="PSAR_Bull")
-
-
 def _resample_ohlc(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
     return (
         frame.resample(rule)
@@ -286,6 +226,21 @@ def _resample_ohlc(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
 def active_weekly(frame: pd.DataFrame) -> pd.DataFrame:
     """Weekly OHLC including the current unfinished week from available daily bars."""
     return _resample_ohlc(frame, "W-FRI")
+
+
+def active_monthly(frame: pd.DataFrame) -> pd.DataFrame:
+    """Monthly OHLC including the current unfinished month from available daily bars."""
+    return _resample_ohlc(frame, "ME")
+
+
+def active_ha_bull_score(frame: pd.DataFrame, rule: str, score: float) -> tuple[float, bool]:
+    """Score the current unfinished weekly/monthly Heikin-Ashi bar when bullish."""
+    sampled = _resample_ohlc(frame, rule)
+    if sampled.empty:
+        return 0.0, False
+    ha = heikin_ashi(sampled)
+    bull = bool(ha["HA_Bull"].iloc[-1]) if not ha.empty else False
+    return (float(score) if bull else 0.0), bull
 
 
 
@@ -310,25 +265,23 @@ def ha_reversal_score(ha: pd.DataFrame, max_age: int, unit: float, streak_cap: i
 
 
 def score_percent_b(percent_b: float, bandwidth: float) -> tuple[float, bool]:
-    """Lower-band proximity score for the complete searchable universe.
+    """Linear Bollinger lower-half score, max 2.0.
 
-    %B<=0 receives the full 1.0. From lower to upper band the score decays
-    smoothly to zero. %B>=1 receives zero rather than rising again.
+    %B=0.50 (middle band) or above -> 0.0
+    %B=0.25 -> 1.0
+    %B=0.00 (lower band) or below -> 2.0
+
+    Bandwidth is retained as a diagnostic only; there is no squeeze penalty.
     """
     if not np.isfinite(percent_b):
+        return 0.0, False
+    if percent_b >= 0.5:
         score = 0.0
-    elif percent_b <= 0:
-        score = 1.0
-    elif percent_b >= 1:
-        score = 0.0
+    elif percent_b <= 0.0:
+        score = BOLLINGER_MAX_SCORE
     else:
-        score = (1.0 - percent_b) ** 2
-
-    squeeze = bool(np.isfinite(bandwidth) and bandwidth < SQUEEZE_BANDWIDTH)
-    if squeeze:
-        score *= 0.5
-    return round(score, 6), squeeze
-
+        score = BOLLINGER_MAX_SCORE * (0.5 - percent_b) / 0.5
+    return round(float(score), 6), False
 
 def _swing_score_from_age(age: int | None) -> float:
     """Score a prior upper-band touch by trading-session age.
@@ -359,48 +312,6 @@ def score_prior_upper_swing(percent_b: pd.Series) -> tuple[float, int | None]:
         if np.isfinite(values[i]) and values[i] >= 0.95:
             return _swing_score_from_age(age), age
     return 0.0, None
-
-
-def _weekly_psar_score_from_age(age: int | None) -> float:
-    """Weekly PSAR bull-flip score.
-
-    age=0: bear last week -> bull this week = 0.50
-    age=1: 0.40
-    age=2: 0.30
-    age=3: 0.20
-    age=4: 0.10
-    age>=5 or no active bull state: 0
-    """
-    if age is None or age < 0 or age >= WEEKLY_PSAR_ZERO_AGE:
-        return 0.0
-    return round(max(0.0, WEEKLY_PSAR_MAX_SCORE - WEEKLY_PSAR_DECAY_PER_WEEK * age), 6)
-
-
-def score_weekly_psar(frame: pd.DataFrame) -> tuple[float, bool, int | None, float]:
-    """Weekly PSAR using the current unfinished week.
-
-    A score exists only while the latest weekly PSAR is below price (bull state)
-    and a bear->bull transition occurred within the last 4 weekly bars.
-    """
-    weekly = active_weekly(frame)
-    if len(weekly) < 2:
-        return 0.0, False, None, np.nan
-
-    sar, bull = parabolic_sar(weekly, af_start=0.02, af_step=0.02, af_max=0.20)
-    states = bull.to_numpy(dtype=bool)
-    latest_below = bool(states[-1])
-    if not latest_below:
-        return 0.0, False, None, finite(sar.iloc[-1])
-
-    transition = None
-    for i in range(len(states) - 1, 0, -1):
-        if bool(states[i]) and not bool(states[i - 1]):
-            transition = i
-            break
-
-    age = None if transition is None else (len(states) - 1 - transition)
-    return _weekly_psar_score_from_age(age), True, age, finite(sar.iloc[-1])
-
 
 
 def fetch_usdkrw() -> float:
@@ -637,36 +548,34 @@ def analyze(
         if market_size_krw < MIN_MARKET_SIZE_KRW:
             return None, "market_size_lt_10t"
 
-    # 1. Daily %B score, with squeeze penalty.
+    # 1. Bollinger lower-half location, linearly scored from center(0) to lower band(2).
     s1, squeeze = score_percent_b(percent_b, bandwidth)
 
     # 2. Previous upper-band swing within 200 trading sessions; recent touches score more.
     s2, upper_swing_age = score_prior_upper_swing(ind["PercentB"])
 
-    # 3. Weekly PSAR, including the current unfinished week.
-    # Score only after an above->below (bear->bull) flip:
-    # current week 0.50, then 0.40/0.30/0.20/0.10, >=5 weeks 0.
-    s3, weekly_psar_below, weekly_psar_flip_age, weekly_psar_value = score_weekly_psar(frame)
-
-    # 4. Daily HA reversal only. 20 consecutive bearish HA days before the
-    # bearish->bullish transition receive the full 1.0 point. The existing
-    # freshness window is retained: the transition remains active for 3 sessions.
+    # 3. Daily HA reversal. 20 consecutive bearish HA days before the
+    # bearish->bullish transition receive the full 1.0 point.
     daily_ha = heikin_ashi(frame)
-    s4, d_ha_age, d_ha_bear_streak = ha_reversal_score(
+    s3, d_ha_age, d_ha_bear_streak = ha_reversal_score(
         daily_ha,
         max_age=DAILY_HA_MAX_AGE,
         unit=DAILY_HA_UNIT,
         streak_cap=DAILY_HA_STREAK_CAP,
     )
 
-    # 5. 60-day moving-average slope. Positive one-session slope = 0.50.
+    # 4/5. Current unfinished weekly/monthly HA bars. Bullish = 0.50 each.
+    s4, weekly_ha_bull = active_ha_bull_score(frame, "W-FRI", WEEKLY_HA_BULL_SCORE)
+    s5, monthly_ha_bull = active_ha_bull_score(frame, "ME", MONTHLY_HA_BULL_SCORE)
+
+    # 6. 60-day moving-average slope. Positive one-session slope = 0.50.
     ma60 = finite(ind["MA60"].iloc[-1])
     ma60_prev = finite(ind["MA60"].iloc[-2]) if len(ind) >= 2 else np.nan
     ma60_slope = ma60 - ma60_prev if np.isfinite(ma60) and np.isfinite(ma60_prev) else np.nan
     ma60_slope_pct = (ma60 / ma60_prev - 1.0) if np.isfinite(ma60) and np.isfinite(ma60_prev) and ma60_prev != 0 else np.nan
-    s5 = MA60_SCORE if np.isfinite(ma60_slope) and ma60_slope > 0 else 0.0
+    s6 = MA60_SCORE if np.isfinite(ma60_slope) and ma60_slope > 0 else 0.0
 
-    total = round(s1 + s2 + s3 + s4 + s5, 4)
+    total = round(s1 + s2 + s3 + s4 + s5 + s6, 4)
 
     last_date = pd.Timestamp(row.name).date().isoformat()
     prev_close = finite(valid["Close"].iloc[-2]) if len(valid) >= 2 else np.nan
@@ -687,9 +596,10 @@ def analyze(
         "scores": {
             "s1_percent_b": round(s1, 4),
             "s2_upper_swing": round(s2, 4),
-            "s3_weekly_psar": round(s3, 4),
-            "s4_daily_ha": round(s4, 4),
-            "s5_ma60_slope": round(s5, 4),
+            "s3_daily_ha": round(s3, 4),
+            "s4_weekly_ha": round(s4, 4),
+            "s5_monthly_ha": round(s5, 4),
+            "s6_ma60_slope": round(s6, 4),
         },
         "metrics": {
             "percent_b": clean(percent_b, 4),
@@ -699,11 +609,10 @@ def analyze(
             "bb_mid": clean(row["BB_Mid"]),
             "bb_upper": clean(row["BB_Upper"]),
             "upper_swing_age": upper_swing_age,
-            "weekly_psar_below": weekly_psar_below,
-            "weekly_psar_flip_age": weekly_psar_flip_age,
-            "weekly_psar_value": clean(weekly_psar_value),
             "daily_ha_age": d_ha_age,
             "daily_ha_prior_bear": d_ha_bear_streak,
+            "weekly_ha_bull": weekly_ha_bull,
+            "monthly_ha_bull": monthly_ha_bull,
             "ma60": clean(ma60),
             "ma60_slope": clean(ma60_slope, 6),
             "ma60_slope_pct": clean(ma60_slope_pct, 6),
@@ -756,152 +665,45 @@ def _ha_reversal_score_series(
     return result
 
 
-def _psar_step(state: dict, high: float, low: float) -> dict:
-    """Advance a seeded PSAR state by one OHLC bar."""
-    bull = bool(state["bull"])
-    sar_prev = float(state["sar"])
-    ep = float(state["ep"])
-    af = float(state["af"])
+def _active_period_ha_bull_series(frame: pd.DataFrame, freq: str) -> pd.Series:
+    """Point-in-time bullish state of the unfinished weekly/monthly HA bar.
 
-    candidate = sar_prev + af * (ep - sar_prev)
-
-    if bull:
-        candidate = min(candidate, float(state["prev_low_1"]))
-        if state["count"] >= 2:
-            candidate = min(candidate, float(state["prev_low_2"]))
-        if low < candidate:
-            bull = False
-            candidate = ep
-            ep = low
-            af = 0.02
-        elif high > ep:
-            ep = high
-            af = min(af + 0.02, 0.20)
-    else:
-        candidate = max(candidate, float(state["prev_high_1"]))
-        if state["count"] >= 2:
-            candidate = max(candidate, float(state["prev_high_2"]))
-        if high > candidate:
-            bull = True
-            candidate = ep
-            ep = high
-            af = 0.02
-        elif low < ep:
-            ep = low
-            af = min(af + 0.02, 0.20)
-
-    return {
-        "sar": candidate,
-        "bull": bull,
-        "ep": ep,
-        "af": af,
-        "prev_high_2": state["prev_high_1"],
-        "prev_low_2": state["prev_low_1"],
-        "prev_high_1": high,
-        "prev_low_1": low,
-        "count": state["count"] + 1,
-        "last_transition_idx": (
-            state["count"] if (bull and not bool(state["bull"]))
-            else state.get("last_transition_idx")
-        ),
-    }
-
-
-def _psar_seed(first: dict, second: dict) -> dict:
-    """Create the same initial state used by parabolic_sar() after bar #2."""
-    bull = float(second["Close"]) >= float(first["Close"])
-    state = {
-        "sar": float(first["Low"]) if bull else float(first["High"]),
-        "bull": bull,
-        "ep": float(first["High"]) if bull else float(first["Low"]),
-        "af": 0.02,
-        "prev_high_2": float(first["High"]),
-        "prev_low_2": float(first["Low"]),
-        "prev_high_1": float(first["High"]),
-        "prev_low_1": float(first["Low"]),
-        "count": 1,
-        "last_transition_idx": None,
-    }
-    seeded = _psar_step(state, float(second["High"]), float(second["Low"]))
-    # Initial direction is not treated as a bear->bull "flip". Only a real
-    # transition after the initialized state earns the weekly PSAR score.
-    seeded["last_transition_idx"] = None
-    return seeded
-
-
-def _weekly_psar_score_series(frame: pd.DataFrame) -> pd.DataFrame:
-    """Point-in-time weekly PSAR score on every daily close without look-ahead.
-
-    Each daily observation builds the current unfinished weekly OHLC only from
-    data available through that date. Completed weeks are committed once.
+    The current period's OHLC contains only daily data available through each
+    historical date, so the backtest does not use future week/month closes.
     """
-    result = pd.DataFrame(
-        {"score": 0.0, "below": False, "flip_age": np.nan},
-        index=frame.index,
-    )
+    result = pd.Series(False, index=frame.index, dtype=bool)
     if frame.empty:
         return result
 
-    # Friday-ending weekly periods; an in-progress week is represented by its
-    # available daily bars only.
-    periods = frame.index.to_period("W-FRI")
-    completed_bars: list[dict] = []
-    base_state: dict | None = None
-    week_index = -1
+    periods = frame.index.to_period(freq)
+    prev_ha_open = None
+    prev_ha_close = None
 
     for _, group in frame.groupby(periods, sort=True):
-        week_index += 1
-        week_open = finite(group["Open"].iloc[0])
-        running_high = -np.inf
-        running_low = np.inf
-        final_bar = None
+        open_ = finite(group["Open"].iloc[0])
+        run_high = -np.inf
+        run_low = np.inf
+        final_ha_open = None
+        final_ha_close = None
 
         for idx, row in group.iterrows():
-            running_high = max(running_high, finite(row["High"]))
-            running_low = min(running_low, finite(row["Low"]))
-            current_bar = {
-                "Open": week_open,
-                "High": running_high,
-                "Low": running_low,
-                "Close": finite(row["Close"]),
-            }
+            run_high = max(run_high, finite(row["High"]))
+            run_low = min(run_low, finite(row["Low"]))
+            close_ = finite(row["Close"])
+            ha_close = (open_ + run_high + run_low + close_) / 4.0
+            if prev_ha_open is None or prev_ha_close is None:
+                ha_open = (open_ + close_) / 2.0
+            else:
+                ha_open = (prev_ha_open + prev_ha_close) / 2.0
+            result.at[idx] = bool(ha_close > ha_open)
+            final_ha_open = ha_open
+            final_ha_close = ha_close
 
-            simulated = None
-            if len(completed_bars) == 0:
-                simulated = None
-            elif len(completed_bars) == 1 and base_state is None:
-                simulated = _psar_seed(completed_bars[0], current_bar)
-            elif base_state is not None:
-                simulated = _psar_step(base_state, current_bar["High"], current_bar["Low"])
-
-            if simulated is not None:
-                below = bool(simulated["bull"])
-                flip_age = None
-                if below:
-                    transition_idx = simulated.get("last_transition_idx")
-                    if transition_idx is not None:
-                        flip_age = week_index - int(transition_idx)
-
-                result.at[idx, "below"] = below
-                result.at[idx, "flip_age"] = np.nan if flip_age is None else flip_age
-                result.at[idx, "score"] = _weekly_psar_score_from_age(flip_age) if below else 0.0
-
-            final_bar = current_bar
-
-        if final_bar is None:
-            continue
-
-        if len(completed_bars) == 0:
-            completed_bars.append(final_bar)
-        elif len(completed_bars) == 1 and base_state is None:
-            base_state = _psar_seed(completed_bars[0], final_bar)
-            completed_bars.append(final_bar)
-        else:
-            base_state = _psar_step(base_state, final_bar["High"], final_bar["Low"])
-            completed_bars.append(final_bar)
+        if final_ha_open is not None:
+            prev_ha_open = float(final_ha_open)
+            prev_ha_close = float(final_ha_close)
 
     return result
-
 
 def build_historical_scores(
     frame: pd.DataFrame,
@@ -912,12 +714,13 @@ def build_historical_scores(
     ind = add_daily_indicators(frame)
     hist = pd.DataFrame(index=ind.index)
 
-    # 1) %B score + squeeze penalty
+    # 1) Bollinger lower-half score: center(0) -> lower band(2), linear.
     pb = pd.to_numeric(ind["PercentB"], errors="coerce")
-    bw = pd.to_numeric(ind["Bandwidth"], errors="coerce")
-    s1 = ((1.0 - pb) ** 2).clip(upper=1.0)
-    s1 = s1.where(pb > 0, 1.0)
-    s1 = s1.where(~(bw < SQUEEZE_BANDWIDTH), s1 * 0.5)
+    s1 = pd.Series(0.0, index=ind.index)
+    valid_pb = pb.notna()
+    s1.loc[valid_pb & (pb <= 0.0)] = BOLLINGER_MAX_SCORE
+    middle = valid_pb & (pb > 0.0) & (pb < 0.5)
+    s1.loc[middle] = BOLLINGER_MAX_SCORE * (0.5 - pb.loc[middle]) / 0.5
     hist["s1"] = s1
 
     # 2) most-recent prior upper-band observation within 200 sessions.
@@ -934,11 +737,7 @@ def build_historical_scores(
             last_upper_pos = i
     hist["s2"] = pd.Series(s2_values, index=ind.index)
 
-    # 3) Weekly PSAR bear->bull flip age, including the active unfinished week.
-    psar_hist = _weekly_psar_score_series(frame)
-    hist["s3"] = pd.to_numeric(psar_hist["score"], errors="coerce").fillna(0.0)
-
-    # 4) Daily HA reversal only. 20 bearish days before reversal = 1.0.
+    # 3) Daily HA reversal only. 20 bearish days before reversal = 1.0.
     daily_ha = heikin_ashi(frame)
     d_hist = _ha_reversal_score_series(
         daily_ha,
@@ -946,14 +745,18 @@ def build_historical_scores(
         unit=DAILY_HA_UNIT,
         streak_cap=DAILY_HA_STREAK_CAP,
     )
-    hist["s4"] = d_hist["score"]
+    hist["s3"] = d_hist["score"]
 
-    # 5) Positive 60-day MA slope.
+    # 4/5) Point-in-time current weekly/monthly HA bullish state.
+    hist["s4"] = _active_period_ha_bull_series(frame, "W-FRI").astype(float) * WEEKLY_HA_BULL_SCORE
+    hist["s5"] = _active_period_ha_bull_series(frame, "M").astype(float) * MONTHLY_HA_BULL_SCORE
+
+    # 6) Positive 60-day MA slope.
     ma60_slope = pd.to_numeric(ind["MA60_Slope"], errors="coerce")
-    hist["s5"] = (ma60_slope > 0).astype(float) * MA60_SCORE
+    hist["s6"] = (ma60_slope > 0).astype(float) * MA60_SCORE
 
-    # Total raw score max = 3.5: 1.0 + 0.5 + 0.5 + 1.0 + 0.5.
-    hist["score"] = hist["s1"] + hist["s2"] + hist["s3"] + hist["s4"] + hist["s5"]
+    # Total raw score max = 5.0: 2.0 + 0.5 + 1.0 + 0.5 + 0.5 + 0.5.
+    hist["score"] = hist["s1"] + hist["s2"] + hist["s3"] + hist["s4"] + hist["s5"] + hist["s6"]
 
     # 0-step point-in-time market-data filters.
     enough_history = pd.Series(np.arange(len(ind)) >= (MIN_TRADING_DAYS - 1), index=ind.index)
@@ -1109,7 +912,7 @@ def backtest_stock(
     for i in range(start, max(start, end)):
         if not bool(hist["eligible"].iloc[i]):
             continue
-        # Backtest only historical Morning Invest signals scoring >=70/100 (raw >=2.45).
+        # Backtest only historical Morning Invest signals scoring >=50/100 (raw >=2.50).
         if finite(hist["score"].iloc[i], -np.inf) < BACKTEST_MIN_SCORE:
             continue
         if i - last_signal < BACKTEST_COOLDOWN_DAYS:
@@ -1519,7 +1322,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_V8_5_BB_SWING200_WEEKLY_PSAR_FLIP_DECAY_DAILY_HA20_MA60_BT70_TOP20UI_ALLSEARCH",
+        "strategy": "MI_V8_6_BB2_LINEAR_SWING200_DHA20_WHA_MHA_MA60_BT50_TOP100_ALLSEARCH",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1546,23 +1349,26 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             "max_score": SWING_MAX_SCORE,
             "min_score_at_lookback": SWING_MIN_SCORE,
         },
+        "bollinger_model": {
+            "max_score": BOLLINGER_MAX_SCORE,
+            "zero_score_at_percent_b": 0.5,
+            "full_score_at_or_below_percent_b": 0.0,
+            "shape": "linear",
+            "squeeze_penalty": False,
+        },
         "daily_ha_model": {
             "max_score": 1.0,
             "bearish_streak_cap_days": DAILY_HA_STREAK_CAP,
             "score_per_bearish_day": DAILY_HA_UNIT,
             "reversal_freshness_sessions": DAILY_HA_MAX_AGE,
         },
-        "weekly_psar_model": {
+        "weekly_ha_model": {
             "current_week_included": True,
-            "flip_definition": "weekly_psar_above_to_below",
-            "score_by_weeks_since_flip": {
-                "0": 0.5,
-                "1": 0.4,
-                "2": 0.3,
-                "3": 0.2,
-                "4": 0.1,
-                "5_plus": 0.0
-            },
+            "bullish_score": WEEKLY_HA_BULL_SCORE,
+        },
+        "monthly_ha_model": {
+            "current_month_included": True,
+            "bullish_score": MONTHLY_HA_BULL_SCORE,
         },
         "ma60_model": {
             "positive_slope_score": MA60_SCORE,
