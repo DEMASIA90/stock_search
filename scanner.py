@@ -14,7 +14,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "9.1"
+MORNING_INVEST_COMPONENT_VERSION = "9.2"
 
 import numpy as np
 import pandas as pd
@@ -1613,7 +1613,20 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
                     )
                 time.sleep(random.uniform(*RETRY_BATCH_SLEEP))
 
+            previous_remaining = set(remaining)
             remaining = list(dict.fromkeys(next_remaining))
+
+            # If a full retry did not recover even one ticker, the remaining set
+            # is overwhelmingly likely to be delisted/unsupported rather than a
+            # transient batch failure.  Do not hammer Yahoo with the same symbols
+            # two more times; the market coverage gate below remains the safety net.
+            if remaining and set(remaining) == previous_remaining:
+                print(
+                    f"[{category}] retry made no progress ({len(remaining):,} unchanged); "
+                    "stopping repeated retries for this permanent-missing set"
+                )
+                break
+
             if remaining and attempt < retry_attempts:
                 backoff = min(30.0, 5.0 * (2 ** (attempt - 1)))
                 print(
@@ -1672,7 +1685,7 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_V9_1_DUAL_QUICK_FULL_KR_ETF",
+        "strategy": "MI_V9_2_DUAL_QUICK_FULL_KR_ETF_HOTFIX",
         "modes": ["cheap", "rising"],
         "category": category,
         "category_label": CATEGORY_LABEL[category],

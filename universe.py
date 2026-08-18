@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-MORNING_INVEST_COMPONENT_VERSION = "9.1"
+MORNING_INVEST_COMPONENT_VERSION = "9.2"
 
 import pandas as pd
 import requests
@@ -32,6 +32,8 @@ NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.tx
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 NASDAQ_HALT_RSS = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
 KRX_JSON_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+KRX_ETF_LOADER_URL = "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201030104"
+NAVER_ETF_LIST_URL = "https://finance.naver.com/api/sise/etfItemList.nhn"
 
 HEADERS = {
     "User-Agent": (
@@ -376,72 +378,178 @@ def fetch_kr_restricted_symbols(stocks: list[Stock]) -> tuple[set[str], dict]:
 
 
 
-def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
-    """Fetch the current KRX ETF master list from KRX Data Marketplace.
+def _normalize_kr_etf_rows(rows: list[dict], source: str) -> list[Stock]:
+    stocks: list[Stock] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
 
-    KRX endpoint MDCSTAT04601 is the official ETF security master. Yahoo Finance
-    uses the .KS suffix for KRX ETFs (for example 069500.KS). A Hosting-restored
-    cache is used if KRX is temporarily unavailable.
+        code = re.sub(
+            r"\D",
+            "",
+            str(
+                row.get("ISU_SRT_CD")
+                or row.get("itemcode")
+                or row.get("symbol")
+                or ""
+            ),
+        ).zfill(6)
+        name = str(
+            row.get("ISU_ABBRV")
+            or row.get("ISU_NM")
+            or row.get("itemname")
+            or row.get("name")
+            or ""
+        ).strip()
+
+        if not re.fullmatch(r"\d{6}", code) or not name:
+            continue
+
+        listed_date = None
+        for key in ("LIST_DD", "LIST_DD_N", "LIST_DT"):
+            raw = row.get(key)
+            if raw:
+                parsed = pd.to_datetime(raw, errors="coerce")
+                if pd.notna(parsed):
+                    listed_date = parsed.date().isoformat()
+                    break
+
+        stocks.append(
+            Stock(
+                ticker=f"{code}.KS",
+                symbol=code,
+                name=name,
+                category="KR_ETF",
+                currency="KRW",
+                exchange="KRX ETF",
+                listed_date=listed_date,
+            )
+        )
+
+    result = sorted({x.ticker: x for x in stocks}.values(), key=lambda x: x.symbol)
+    if len(result) < 300:
+        raise RuntimeError(f"{source} KR ETF universe unexpectedly small: {len(result)}")
+    return result
+
+
+def _fetch_kr_etf_from_krx() -> list[Stock]:
+    """Fetch ETF master from KRX Data Marketplace with browser-like session state.
+
+    KRX periodically tightens validation on getJsonData.cmd.  We warm the loader
+    page first and try the current standard form fields rather than sending only
+    the bld value.
     """
+    session = requests.Session()
+    loader_headers = {
+        **HEADERS,
+        "Referer": "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd",
+    }
+    try:
+        session.get(KRX_ETF_LOADER_URL, headers=loader_headers, timeout=25)
+    except Exception:
+        # The POST may still work even when the loader warm-up is unavailable.
+        pass
+
     headers = {
         **HEADERS,
         "Origin": "https://data.krx.co.kr",
-        "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201030104",
+        "Referer": KRX_ETF_LOADER_URL,
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
     }
+
+    variants = [
+        {
+            "bld": "dbms/MDC/STAT/standard/MDCSTAT04601",
+            "locale": "ko_KR",
+            "share": "1",
+            "money": "1",
+            "csvxls_isNo": "false",
+        },
+        {
+            "bld": "dbms/MDC/STAT/standard/MDCSTAT04601",
+            "locale": "ko_KR",
+        },
+    ]
+
+    errors = []
+    for form in variants:
+        try:
+            response = session.post(KRX_JSON_URL, data=form, headers=headers, timeout=40)
+            if response.status_code != 200:
+                body = (response.text or "").replace("\n", " ")[:180]
+                errors.append(f"HTTP {response.status_code}: {body}")
+                continue
+
+            payload = response.json()
+            rows = payload.get("output") or payload.get("OutBlock_1") or []
+            if not isinstance(rows, list):
+                errors.append("JSON response has no output list")
+                continue
+            return _normalize_kr_etf_rows(rows, "KRX")
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    raise RuntimeError("KRX ETF master request failed: " + " | ".join(errors))
+
+
+def _fetch_kr_etf_from_naver() -> list[Stock]:
+    """Operational fallback when KRX blocks automated JSON requests.
+
+    This is used only to discover current Korean ETF codes/names.  Price history
+    and every technical score still come from the normal Yahoo market-data path.
+    """
+    response = requests.get(
+        NAVER_ETF_LIST_URL,
+        headers={**HEADERS, "Referer": "https://finance.naver.com/sise/etf.naver"},
+        timeout=35,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = ((payload.get("result") or {}).get("etfItemList") or [])
+    if not isinstance(rows, list):
+        raise RuntimeError("NAVER ETF response has no etfItemList")
+    return _normalize_kr_etf_rows(rows, "NAVER")
+
+
+def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
+    """Fetch current Korean ETF universe with fail-safe fallbacks.
+
+    Order:
+      1) KRX Data Marketplace (primary)
+      2) Naver Finance ETF list (operational fallback)
+      3) last hydrated/local cache
+
+    The first v9.1 release could not use its cache on the first run, so a KRX
+    HTTP 400 made KR_ETF fatal.  v9.2 keeps the category bootstrappable.
+    """
+    errors = []
+
     try:
-        response = requests.post(
-            KRX_JSON_URL,
-            data={"bld": "dbms/MDC/STAT/standard/MDCSTAT04601"},
-            headers=headers,
-            timeout=40,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        rows = payload.get("output") or payload.get("OutBlock_1") or []
-        if not isinstance(rows, list):
-            raise RuntimeError("KRX ETF master has no output list")
-
-        stocks: list[Stock] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            code = re.sub(r"\D", "", str(row.get("ISU_SRT_CD") or "")).zfill(6)
-            name = str(row.get("ISU_ABBRV") or row.get("ISU_NM") or "").strip()
-            if not re.fullmatch(r"\d{6}", code) or not name:
-                continue
-
-            listed_date = None
-            for key in ("LIST_DD", "LIST_DD_N", "LIST_DT"):
-                raw = row.get(key)
-                if raw:
-                    parsed = pd.to_datetime(raw, errors="coerce")
-                    if pd.notna(parsed):
-                        listed_date = parsed.date().isoformat()
-                        break
-
-            stocks.append(
-                Stock(
-                    ticker=f"{code}.KS",
-                    symbol=code,
-                    name=name,
-                    category="KR_ETF",
-                    currency="KRW",
-                    exchange="KRX ETF",
-                    listed_date=listed_date,
-                )
-            )
-
-        result = sorted({x.ticker: x for x in stocks}.values(), key=lambda x: x.symbol)
-        if len(result) < 300:
-            raise RuntimeError(f"KRX ETF universe unexpectedly small: {len(result)}")
+        result = _fetch_kr_etf_from_krx()
         _save_cache(KR_ETF_CACHE, result)
+        print(f"KR ETF universe: KRX ({len(result):,})")
         return result, "KRX_DATA_MDCSTAT04601"
     except Exception as exc:
-        cached = _load_cache(KR_ETF_CACHE)
-        if cached:
-            print(f"KRX ETF master failed; using cache: {exc}")
-            return cached, "CACHE"
-        raise
+        errors.append(f"KRX={type(exc).__name__}: {exc}")
+        print(f"KRX ETF master unavailable: {exc}")
+
+    try:
+        result = _fetch_kr_etf_from_naver()
+        _save_cache(KR_ETF_CACHE, result)
+        print(f"KR ETF universe: NAVER fallback ({len(result):,})")
+        return result, "NAVER_ETF_LIST_FALLBACK"
+    except Exception as exc:
+        errors.append(f"NAVER={type(exc).__name__}: {exc}")
+        print(f"Naver ETF fallback unavailable: {exc}")
+
+    cached = _load_cache(KR_ETF_CACHE)
+    if cached:
+        print(f"KR ETF universe: hydrated cache ({len(cached):,})")
+        return cached, "CACHE"
+
+    raise RuntimeError("KR ETF universe unavailable; " + " | ".join(errors))
+
 
 def _read_pipe(url: str) -> pd.DataFrame:
     response = requests.get(url, headers=HEADERS, timeout=35)
