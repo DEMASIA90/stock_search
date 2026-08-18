@@ -3,6 +3,7 @@ const $$ = (q) => [...document.querySelectorAll(q)];
 
 const CATEGORY = {
   KR: { short: '국장', dir: 'kr' },
+  KR_ETF: { short: '국장 ETF', dir: 'kr-etf' },
   US: { short: '미장', dir: 'us' },
   US_ETF: { short: '미장 ETF', dir: 'us-etf' },
 };
@@ -58,7 +59,7 @@ const BACKTEST_MIN_DISPLAY_SCORE = 50.0;
 const state = {
   category: 'KR',
   mode: 'cheap',
-  data: { KR: null, US: null, US_ETF: null },
+  data: { KR: null, KR_ETF: null, US: null, US_ETF: null },
   filtered: [],
   rendered: 0,
   batch: 80,
@@ -135,7 +136,7 @@ function heatClass(raw, maxRaw=modeConfig().maxRaw) {
   return '';
 }
 function sizeText(stock) {
-  if (stock?.category === 'US_ETF') return '';
+  if (['KR_ETF','US_ETF'].includes(stock?.category)) return '';
   return ` · 시총 ${marketSize(stock?.market_size_krw ?? stock?.metrics?.market_size_krw)}`;
 }
 function changeClass(v) { return Number(v) > 0 ? 'up' : Number(v) < 0 ? 'down' : ''; }
@@ -172,6 +173,7 @@ async function ensureDetail(stock, force=false) {
 function newsSearchQuery(stock) {
   const name = String(stock?.name || '').trim();
   const symbol = String(stock?.symbol || stock?.ticker || '').trim();
+  if (stock?.category === 'KR_ETF') return `${name} ${symbol} ETF`;
   if (stock?.category === 'KR') return `${name} ${symbol} 주식`;
   if (stock?.category === 'US_ETF') return `${name} ${symbol} ETF`;
   return `${name} ${symbol} stock`;
@@ -179,7 +181,7 @@ function newsSearchQuery(stock) {
 
 function newsSearchUrl(stock) {
   const q = encodeURIComponent(newsSearchQuery(stock));
-  return stock?.category === 'KR'
+  return ['KR','KR_ETF'].includes(stock?.category)
     ? `https://news.google.com/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`
     : `https://news.google.com/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
 }
@@ -279,7 +281,7 @@ async function loadLatestNews(stock, root) {
   try {
     const payload = await jsonp(NEWS_PROXY_URL, {
       q: newsSearchQuery(stock),
-      region: stock.category === 'KR' ? 'KR' : 'US',
+      region: ['KR','KR_ETF'].includes(stock.category) ? 'KR' : 'US',
       limit: '5',
     });
     if (!payload?.ok) throw new Error(payload?.error || 'news proxy error');
@@ -349,7 +351,9 @@ function renderMeta() {
   $('#updated').textContent = dt && !Number.isNaN(dt.getTime())
     ? dt.toLocaleString('ko-KR', { timeZone:'Asia/Seoul', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' })
     : '—';
-  $('#marketDate').textContent = data.market_date ? `${data.market_date} 기준` : '—';
+  const scanStatus = data.scan_mode === 'QUICK' ? '장중 QUICK' : '종가 확정';
+  $('#marketDate').textContent = data.market_date ? `${data.market_date} · ${scanStatus}` : scanStatus;
+  $('#marketDate').classList.toggle('intraday', data.scan_mode === 'QUICK');
   const modeCount = state.mode === 'rising' ? Number(data.rising_eligible_count || 0) : Number(data.passed_count || 0);
   $('#coverage').textContent = `${modeCount.toLocaleString()} 모드대상 · ${Number(data.universe_count || 0).toLocaleString()} 전체`;
 }
@@ -594,14 +598,14 @@ function renderInlineStockDetail(stock) {
   root.querySelector('.detail-score-grid').innerHTML = modeConfig().scoreColumns.map(([k,l]) => scoreTile(k,l,s)).join('');
 
   const age = (v, suffix) => v == null ? '—' : `${v}${suffix}`;
-  const commonSize = stock.category === 'US_ETF'
+  const commonSize = ['KR_ETF','US_ETF'].includes(stock.category)
     ? 'ETF 면제'
     : marketSize((stock.metrics || {}).market_size_krw ?? m.market_size_krw);
 
   if (state.mode === 'cheap') {
     const maSlope = m.ma60_slope_pct == null ? '—' : `${Number(m.ma60_slope_pct) > 0 ? '+' : ''}${(Number(m.ma60_slope_pct) * 100).toFixed(3)}%/일`;
     root.querySelector('.detail-metric-grid').innerHTML = `
-      <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${commonSize}</b></div>
+      <div><span>${['KR_ETF','US_ETF'].includes(stock.category) ? '시총 필터' : '시가총액'}</span><b>${commonSize}</b></div>
       <div><span>%B</span><b>${m.percent_b == null ? '—' : Number(m.percent_b).toFixed(3)}</b></div>
       <div><span>Band Width</span><b>${pct(m.bandwidth,1)}</b></div>
       <div><span>Upper Swing</span><b>${age(m.upper_swing_age,'D')}</b></div>
@@ -615,7 +619,7 @@ function renderInlineStockDetail(stock) {
     const profile = m.volume_profile_below_share == null ? '데이터 없음' : `${(Number(m.volume_profile_below_share)*100).toFixed(1)}% 아래`;
     const gain = m.post_breakout_max_gain == null ? '—' : `${(Number(m.post_breakout_max_gain)*100).toFixed(1)}%`;
     root.querySelector('.detail-metric-grid').innerHTML = `
-      <div><span>${stock.category === 'US_ETF' ? '시총 필터' : '시가총액'}</span><b>${commonSize}</b></div>
+      <div><span>${['KR_ETF','US_ETF'].includes(stock.category) ? '시총 필터' : '시가총액'}</span><b>${commonSize}</b></div>
       <div><span>60일선 돌파 조건</span><b>${mv.eligible ? '충족' : '미충족'}</b></div>
       <div><span>최근 60일선 돌파</span><b>${breakout}</b></div>
       <div><span>돌파일 종가</span><b>${m.breakout_close == null ? '—' : money(m.breakout_close, stock.currency)}</b></div>
@@ -747,7 +751,8 @@ function renderBacktest(stock) {
   }
 
   const maxRaw = Number(bt.raw_max_score || modeConfig().maxRaw);
-  rule.textContent = `1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? maxRaw*0.5, maxRaw)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
+  const btPrefix = bt.preserved_from_full ? '마지막 종가 FULL 기준 · ' : '';
+  rule.textContent = `${btPrefix}1Y · 총점 ≥ ${displayScore(bt.min_signal_score ?? maxRaw*0.5, maxRaw)} · Next Open · ${bt.cooldown_days || 10}D cooldown`;
   summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
     backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),

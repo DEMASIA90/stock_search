@@ -94,7 +94,7 @@ footer{padding:24px 3px 0;color:#5f6a7b;font-size:10px}
 .chart{height:330px;overflow:hidden}.chart svg{display:block;width:100%;height:100%}
 .legend{display:flex;gap:14px;color:var(--muted);font-size:9px;padding:8px 1px 0}.legend span:before{content:"";display:inline-block;width:7px;height:2px;margin-right:5px;vertical-align:middle}.price-line:before{background:var(--accent)}.mid-line:before{background:var(--amber)}.band-line:before{background:var(--blue)}
 @media(max-width:760px){
-  .shell{padding:0 14px 34px}.topbar{height:66px}.market-tabs{margin-top:17px;width:100%;display:grid;grid-template-columns:repeat(3,1fr)}.market-tab{padding:9px 7px}.summary{padding:32px 2px 17px}.summary h1{font-size:32px}.summary-meta b{font-size:11px}.table-card{display:none}.mobile-list{display:flex}.score-grid{grid-template-columns:repeat(2,1fr)}.metric-grid{grid-template-columns:repeat(2,1fr)}.modal{padding:18px 14px 26px}.chart{height:285px}.detail-score strong{font-size:34px}.topbar{top:0}
+  .shell{padding:0 14px 34px}.topbar{height:66px}.market-tabs{margin-top:17px;width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.market-tab{padding:9px 7px}.summary{padding:32px 2px 17px}.summary h1{font-size:32px}.summary-meta b{font-size:11px}.table-card{display:none}.mobile-list{display:flex}.score-grid{grid-template-columns:repeat(2,1fr)}.metric-grid{grid-template-columns:repeat(2,1fr)}.modal{padding:18px 14px 26px}.chart{height:285px}.detail-score strong{font-size:34px}.topbar{top:0}
 }
 @media(max-width:390px){.mobile-grid{grid-template-columns:repeat(2,1fr)}.summary h1{font-size:30px}}
 
@@ -303,4 +303,20 @@ tbody tr.heat-80{background-image:linear-gradient(90deg,rgba(255,73,80,.090),tra
      They remain visible inside the expanded detail panel. */
   .mobile-card>.mobile-grid{display:none!important}
   .mobile-title .mode-miss-badge{display:flex;width:max-content;margin:5px 0 0}
+}
+
+
+/* Morning Invest v9.1 — spy title + intraday status */
+.scanner-mark{background:radial-gradient(circle at 32% 28%,#fff7bd 0 8%,#9be7ff 23%,#305576 62%,#111821 100%);transform:rotate(-3deg)}
+.scanner-mark i{background:#ffd166;color:#241800}
+#marketDate.intraday{color:#ffd166;border-color:rgba(255,209,102,.28);background:rgba(255,209,102,.06)}
+@media(max-width:760px){
+  .scanner-brand .brand-copy b{font-size:14px;max-width:255px}
+  .market-tabs{grid-template-columns:repeat(4,1fr)}
+  .market-tab{font-size:9px;padding:9px 3px}
+}
+@media(max-width:760px){
+  .topbar{height:82px}
+  .scanner-brand .brand-copy b{font-size:13px;max-width:245px;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.18}
+  .scanner-brand .brand-copy small{font-size:7px;white-space:nowrap;margin-top:4px}
 }
