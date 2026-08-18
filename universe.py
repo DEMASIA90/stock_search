@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-MORNING_INVEST_COMPONENT_VERSION = "7.5"
+MORNING_INVEST_COMPONENT_VERSION = "9.1"
 
 import pandas as pd
 import requests
@@ -20,6 +20,7 @@ DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 KR_CACHE = DATA_DIR / "universe_kr.json"
+KR_ETF_CACHE = DATA_DIR / "universe_kr_etf.json"
 US_CACHE = DATA_DIR / "universe_us.json"
 US_ETF_CACHE = DATA_DIR / "universe_us_etf.json"
 
@@ -30,6 +31,7 @@ KIND_WARNING_URL = "https://kind.krx.co.kr/investwarn/investattentwarnrisky.do"
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 NASDAQ_HALT_RSS = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
+KRX_JSON_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
 
 HEADERS = {
     "User-Agent": (
@@ -55,7 +57,7 @@ class Stock:
     ticker: str
     symbol: str
     name: str
-    category: str  # KR / US / US_ETF
+    category: str  # KR / KR_ETF / US / US_ETF
     currency: str
     exchange: str
     listed_date: str | None = None
@@ -373,6 +375,74 @@ def fetch_kr_restricted_symbols(stocks: list[Stock]) -> tuple[set[str], dict]:
     }
 
 
+
+def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
+    """Fetch the current KRX ETF master list from KRX Data Marketplace.
+
+    KRX endpoint MDCSTAT04601 is the official ETF security master. Yahoo Finance
+    uses the .KS suffix for KRX ETFs (for example 069500.KS). A Hosting-restored
+    cache is used if KRX is temporarily unavailable.
+    """
+    headers = {
+        **HEADERS,
+        "Origin": "https://data.krx.co.kr",
+        "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201030104",
+    }
+    try:
+        response = requests.post(
+            KRX_JSON_URL,
+            data={"bld": "dbms/MDC/STAT/standard/MDCSTAT04601"},
+            headers=headers,
+            timeout=40,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("output") or payload.get("OutBlock_1") or []
+        if not isinstance(rows, list):
+            raise RuntimeError("KRX ETF master has no output list")
+
+        stocks: list[Stock] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = re.sub(r"\D", "", str(row.get("ISU_SRT_CD") or "")).zfill(6)
+            name = str(row.get("ISU_ABBRV") or row.get("ISU_NM") or "").strip()
+            if not re.fullmatch(r"\d{6}", code) or not name:
+                continue
+
+            listed_date = None
+            for key in ("LIST_DD", "LIST_DD_N", "LIST_DT"):
+                raw = row.get(key)
+                if raw:
+                    parsed = pd.to_datetime(raw, errors="coerce")
+                    if pd.notna(parsed):
+                        listed_date = parsed.date().isoformat()
+                        break
+
+            stocks.append(
+                Stock(
+                    ticker=f"{code}.KS",
+                    symbol=code,
+                    name=name,
+                    category="KR_ETF",
+                    currency="KRW",
+                    exchange="KRX ETF",
+                    listed_date=listed_date,
+                )
+            )
+
+        result = sorted({x.ticker: x for x in stocks}.values(), key=lambda x: x.symbol)
+        if len(result) < 300:
+            raise RuntimeError(f"KRX ETF universe unexpectedly small: {len(result)}")
+        _save_cache(KR_ETF_CACHE, result)
+        return result, "KRX_DATA_MDCSTAT04601"
+    except Exception as exc:
+        cached = _load_cache(KR_ETF_CACHE)
+        if cached:
+            print(f"KRX ETF master failed; using cache: {exc}")
+            return cached, "CACHE"
+        raise
+
 def _read_pipe(url: str) -> pd.DataFrame:
     response = requests.get(url, headers=HEADERS, timeout=35)
     response.raise_for_status()
@@ -489,6 +559,8 @@ def get_universe(category: str) -> tuple[list[Stock], str]:
     category = category.upper()
     if category == "KR":
         return fetch_kr_universe()
+    if category == "KR_ETF":
+        return fetch_kr_etf_universe()
     if category in {"US", "US_ETF"}:
         stocks, etfs, source = fetch_us_universes()
         return (stocks if category == "US" else etfs), source

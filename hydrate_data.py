@@ -10,35 +10,41 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "7.5"
+MORNING_INVEST_COMPONENT_VERSION = "9.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
 
 CATEGORY_DIR = {
     "KR": "kr",
+    "KR_ETF": "kr-etf",
     "US": "us",
     "US_ETF": "us-etf",
 }
 
 LEGACY_FILE = {
     "KR": "kr.json",
+    "KR_ETF": "kr_etf.json",
     "US": "us.json",
     "US_ETF": "us_etf.json",
 }
 
 ROOT_UNIVERSE_CACHE = {
     "KR": "universe_kr.json",
+    "KR_ETF": "universe_kr_etf.json",
     "US": "universe_us.json",
     "US_ETF": "universe_us_etf.json",
 }
 
+ALL_CATEGORIES = ["KR", "KR_ETF", "US", "US_ETF"]
 RESTORE_BY_MARKET = {
-    "ALL": ["KR", "US", "US_ETF"],
-    "KR": ["KR", "US", "US_ETF"],
-    "US": ["KR", "US", "US_ETF"],
-    "US_ETF": ["KR", "US", "US_ETF"],
-    "US_GROUP": ["KR", "US", "US_ETF"],
+    "ALL": ALL_CATEGORIES,
+    "KR": ALL_CATEGORIES,
+    "KR_ETF": ALL_CATEGORIES,
+    "KR_GROUP": ALL_CATEGORIES,
+    "US": ALL_CATEGORIES,
+    "US_ETF": ALL_CATEGORIES,
+    "US_GROUP": ALL_CATEGORIES,
 }
 
 

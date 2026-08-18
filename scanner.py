@@ -14,7 +14,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "7.5"
+MORNING_INVEST_COMPONENT_VERSION = "9.1"
 
 import numpy as np
 import pandas as pd
@@ -27,10 +27,11 @@ DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
-# Morning Invest strategy v9.0 — dual mode
+# Morning Invest strategy v9.1 — dual mode + intraday quick scan + KR ETF
 # ----------------------------
 # Fetch by explicit date range instead of relying on Yahoo's period parsing.
-HISTORY_CALENDAR_DAYS = 1150
+FULL_HISTORY_CALENDAR_DAYS = 1150
+QUICK_HISTORY_CALENDAR_DAYS = 430
 BATCH_SIZE = 24
 RETRY_BATCH_SIZE = 4
 DOWNLOAD_THREADS = 4
@@ -42,6 +43,7 @@ CHART_POINTS = 120
 # Never publish a materially incomplete market snapshot.
 MIN_COVERAGE = {
     "KR": 0.95,
+    "KR_ETF": 0.95,
     "US": 0.95,
     "US_ETF": 0.95,
 }
@@ -115,29 +117,35 @@ MARKET_SIZE_MIN_LOOKUP_COVERAGE = 0.90
 
 CATEGORY_DIR = {
     "KR": "kr",
+    "KR_ETF": "kr-etf",
     "US": "us",
     "US_ETF": "us-etf",
 }
 UNIVERSE_CACHE_FILE = {
     "KR": "universe_kr.json",
+    "KR_ETF": "universe_kr_etf.json",
     "US": "universe_us.json",
     "US_ETF": "universe_us_etf.json",
 }
 CATEGORY_LABEL = {
     "KR": "국장",
+    "KR_ETF": "국장 ETF",
     "US": "미장",
     "US_ETF": "미장 ETF",
 }
 CATEGORY_TZ = {
     "KR": "Asia/Seoul",
+    "KR_ETF": "Asia/Seoul",
     "US": "America/New_York",
     "US_ETF": "America/New_York",
 }
 CATEGORY_CLOSE = {
     "KR": dtime(15, 40),
+    "KR_ETF": dtime(15, 40),
     "US": dtime(16, 15),
     "US_ETF": dtime(16, 15),
 }
+ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
 
 
 def finite(value, default=np.nan) -> float:
@@ -182,9 +190,13 @@ def _numeric_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def completed_daily(frame: pd.DataFrame, category: str) -> pd.DataFrame:
-    """Drop today's daily bar when the regular session is not yet safely closed."""
-    if frame.empty:
+def completed_daily(frame: pd.DataFrame, category: str, include_active_day: bool = False) -> pd.DataFrame:
+    """Return daily bars appropriate for FULL or QUICK scans.
+
+    FULL scans use only completed sessions. QUICK scans intentionally keep the
+    current unfinished daily bar so rankings can move during the session.
+    """
+    if frame.empty or include_active_day:
         return frame
     now = datetime.now(ZoneInfo(CATEGORY_TZ[category]))
     out = frame
@@ -505,7 +517,7 @@ def fetch_usdkrw() -> float:
 
 
 def thresholds_for(category: str, usdkrw: float | None) -> dict:
-    if category == "KR":
+    if category in {"KR", "KR_ETF"}:
         return {
             "min_price": MIN_PRICE_KRW,
             "currency": "KRW",
@@ -568,7 +580,7 @@ def _fetch_stock_size_basis(stock: Stock) -> dict | None:
     ETFs are deliberately exempt from the KRW 10T market-size filter and must
     never trigger per-ticker AUM/market-cap lookups here.
     """
-    if stock.category == "US_ETF":
+    if stock.category in ETF_CATEGORIES:
         return None
 
     ticker = yf.Ticker(stock.ticker)
@@ -617,7 +629,7 @@ def resolve_market_size(
 
     US ETFs are exempt and return an explicit non-network sentinel.
     """
-    if stock.category == "US_ETF":
+    if stock.category in ETF_CATEGORIES:
         return np.nan, np.nan, "exempt"
 
     entry = size_cache.get(stock.ticker)
@@ -667,11 +679,12 @@ def analyze(
     thresholds: dict,
     restricted_symbols: set[str],
     size_cache: dict,
+    scan_mode: str = "FULL",
 ) -> tuple[dict | None, str]:
     if stock.symbol in restricted_symbols or stock.ticker in restricted_symbols:
         return None, "restricted_status"
 
-    frame = completed_daily(_numeric_ohlc(raw_frame), stock.category)
+    frame = completed_daily(_numeric_ohlc(raw_frame), stock.category, include_active_day=(scan_mode == "QUICK"))
     if frame.empty:
         return None, "no_price"
     if len(frame) < MIN_TRADING_DAYS:
@@ -692,7 +705,7 @@ def analyze(
         return None, "percent_b_unavailable"
 
     # Common hard filter. US ETFs remain market-size exempt.
-    if stock.category == "US_ETF":
+    if stock.category in ETF_CATEGORIES:
         market_size_native, market_size_krw, market_size_basis = np.nan, np.nan, "exempt"
     else:
         size_info = resolve_market_size(stock, close, thresholds, size_cache)
@@ -767,14 +780,19 @@ def analyze(
         "market_size_basis": market_size_basis,
     })
 
-    # Build point-in-time histories once, then run each mode's backtest.
-    hist_sets = build_historical_score_sets(frame, stock.category, thresholds)
-    cheap_bt = backtest_stock_from_hist(
-        frame, hist_sets["cheap"], cheap_total, CHEAP_RAW_MAX_SCORE, mode="cheap"
-    )
-    rising_bt = backtest_stock_from_hist(
-        frame, hist_sets["rising"], rising_total, RISING_RAW_MAX_SCORE, mode="rising"
-    )
+    # FULL refresh recalculates historical backtests. QUICK refresh updates only
+    # current scores and preserves the last FULL backtest from Hosting.
+    if scan_mode == "FULL":
+        hist_sets = build_historical_score_sets(frame, stock.category, thresholds)
+        cheap_bt = backtest_stock_from_hist(
+            frame, hist_sets["cheap"], cheap_total, CHEAP_RAW_MAX_SCORE, mode="cheap"
+        )
+        rising_bt = backtest_stock_from_hist(
+            frame, hist_sets["rising"], rising_total, RISING_RAW_MAX_SCORE, mode="rising"
+        )
+    else:
+        cheap_bt = {}
+        rising_bt = {}
 
     last_date = pd.Timestamp(row.name).date().isoformat()
     prev_close = finite(valid["Close"].iloc[-2]) if len(valid) >= 2 else np.nan
@@ -1287,9 +1305,10 @@ def frame_for(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return raw.copy()
 
 
-def download_batch(tickers: list[str], timeout=40) -> pd.DataFrame:
+def download_batch(tickers: list[str], scan_mode: str = "FULL", timeout=40) -> pd.DataFrame:
     end = datetime.now(timezone.utc).date() + timedelta(days=1)
-    start = end - timedelta(days=HISTORY_CALENDAR_DAYS)
+    history_days = FULL_HISTORY_CALENDAR_DAYS if scan_mode == "FULL" else QUICK_HISTORY_CALENDAR_DAYS
+    start = end - timedelta(days=history_days)
     return yf.download(
         tickers=tickers,
         start=start.isoformat(),
@@ -1313,6 +1332,8 @@ def chunks(seq, size):
 def _load_restrictions(category: str, universe: list[Stock]):
     if category == "KR":
         return fetch_kr_restricted_symbols(universe)
+    if category == "KR_ETF":
+        return set(), {"source": "KRX_ETF_MASTER", "restricted_count": 0}
     halted, meta = fetch_us_halted_symbols()
     return halted, meta
 
@@ -1335,6 +1356,7 @@ def _compact_backtest(bt: dict) -> dict:
         "quality_score": (bt or {}).get("quality_score"),
         "quality_label": (bt or {}).get("quality_label", "NORMAL"),
         "forecast_available": bool(forecast.get("available")),
+        "preserved_from_full": bool((bt or {}).get("preserved_from_full")),
     }
 
 
@@ -1379,19 +1401,50 @@ def _summary_item(item: dict, detail_path: str) -> dict:
     }
 
 
-def _write_category_site(category: str, payload_meta: dict, items: list[dict], size_cache: dict) -> tuple[Path, int]:
-    """Write a lightweight summary plus one detail JSON per passing symbol.
-
-    The generated directory is a deployment artifact only. It is intentionally
-    not stored in Git history.
-    """
+def _write_category_site(
+    category: str,
+    payload_meta: dict,
+    items: list[dict],
+    size_cache: dict,
+    scan_mode: str = "FULL",
+) -> tuple[Path, int]:
+    """Write summary/details while preserving FULL backtests on QUICK refreshes."""
     category_dir = DATA_DIR / CATEGORY_DIR[category]
+
+    previous_detail_payloads: dict[str, dict] = {}
+    if scan_mode == "QUICK":
+        previous_stocks = category_dir / "stocks"
+        if previous_stocks.is_dir():
+            for detail in previous_stocks.glob("*.json"):
+                try:
+                    payload = json.loads(detail.read_text(encoding="utf-8"))
+                    ticker = str(payload.get("ticker") or "")
+                    if ticker:
+                        previous_detail_payloads[ticker] = payload
+                except Exception:
+                    pass
+        print(f"[{category}] QUICK: preserved backtests for {len(previous_detail_payloads):,} prior details")
+
     shutil.rmtree(category_dir, ignore_errors=True)
     stocks_dir = category_dir / "stocks"
     stocks_dir.mkdir(parents=True, exist_ok=True)
 
     summary_items = []
     for item in items:
+        if scan_mode == "QUICK":
+            previous = previous_detail_payloads.get(str(item.get("ticker"))) or {}
+            if previous.get("backtest"):
+                item["backtest"] = dict(previous["backtest"])
+                item["backtest"]["preserved_from_full"] = True
+                # Forecast prices depend on the current score/price, so do not
+                # present yesterday's forecast as if it were refreshed intraday.
+                item["backtest"]["forecast"] = {"available": False, "reason": "quick_scan_not_recomputed"}
+            previous_rising = previous.get("rising") or {}
+            if previous_rising.get("backtest"):
+                item.setdefault("rising", {})["backtest"] = dict(previous_rising["backtest"])
+                item["rising"]["backtest"]["preserved_from_full"] = True
+                item["rising"]["backtest"]["forecast"] = {"available": False, "reason": "quick_scan_not_recomputed"}
+
         filename = _detail_filename(item)
         relative_detail = f"data/{CATEGORY_DIR[category]}/stocks/{filename}"
         summary_items.append(_summary_item(item, relative_detail))
@@ -1443,17 +1496,17 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict], s
 
     return category_dir, len(items)
 
-def scan_category(category: str, usdkrw: float | None = None) -> None:
+def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "FULL") -> None:
     universe, universe_source = get_universe(category)
     thresholds = thresholds_for(category, usdkrw)
     restricted, restriction_meta = _load_restrictions(category, universe)
     size_cache = _load_size_cache(category)
 
     print("=" * 72)
-    print(f"Morning Invest | {category} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"Morning Invest | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     size_rule = (
         "market size filter=OFF (ETF exempt)"
-        if category == "US_ETF"
+        if category in ETF_CATEGORIES
         else f"market size>=KRW {MIN_MARKET_SIZE_KRW/1e12:.0f}T"
     )
     print(
@@ -1484,7 +1537,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     for batch_no, batch in enumerate(batches, 1):
         tickers = [s.ticker for s in batch]
         try:
-            raw = download_batch(tickers)
+            raw = download_batch(tickers, scan_mode=scan_mode)
         except Exception as exc:
             print(f"[{category}] batch {batch_no}/{total_batches} failed: {exc}")
             missing.extend(tickers)
@@ -1496,7 +1549,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                 frame = frame_for(raw, stock.ticker)
                 if frame is not None and not frame.empty:
                     priced_tickers.add(stock.ticker)
-                item, reason = analyze(stock, frame, thresholds, restricted, size_cache)
+                item, reason = analyze(stock, frame, thresholds, restricted, size_cache, scan_mode=scan_mode)
                 rejection[reason] += 1
                 if item is not None:
                     results[stock.ticker] = item
@@ -1520,16 +1573,17 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         print(f"[{category}] retrying {len(retry):,} symbols with bounded backoff")
 
         remaining = retry
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
+        retry_attempts = 1 if scan_mode == "QUICK" else RETRY_ATTEMPTS
+        for attempt in range(1, retry_attempts + 1):
             if not remaining:
                 break
 
-            print(f"[{category}] retry attempt {attempt}/{RETRY_ATTEMPTS}: {len(remaining):,} symbols")
+            print(f"[{category}] retry attempt {attempt}/{retry_attempts}: {len(remaining):,} symbols")
             next_remaining = []
 
             for retry_no, batch in enumerate(chunks(remaining, RETRY_BATCH_SIZE), 1):
                 try:
-                    raw = download_batch(batch, timeout=55)
+                    raw = download_batch(batch, scan_mode=scan_mode, timeout=55)
                 except Exception as exc:
                     next_remaining.extend(batch)
                     print(
@@ -1544,7 +1598,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                         frame = frame_for(raw, ticker)
                         if frame is not None and not frame.empty:
                             priced_tickers.add(ticker)
-                            item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted, size_cache)
+                            item, reason = analyze(by_ticker[ticker], frame, thresholds, restricted, size_cache, scan_mode=scan_mode)
                             if item is not None:
                                 results[ticker] = item
                         else:
@@ -1560,7 +1614,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
                 time.sleep(random.uniform(*RETRY_BATCH_SLEEP))
 
             remaining = list(dict.fromkeys(next_remaining))
-            if remaining and attempt < RETRY_ATTEMPTS:
+            if remaining and attempt < retry_attempts:
                 backoff = min(30.0, 5.0 * (2 ** (attempt - 1)))
                 print(
                     f"[{category}] {len(remaining):,} symbols still missing; "
@@ -1585,7 +1639,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             f"required>={required_coverage:.0%}. Existing site data was not overwritten."
         )
 
-    if category == "US_ETF":
+    if category in ETF_CATEGORIES:
         size_attempted = 0
         size_success = 0
         size_coverage = np.nan
@@ -1618,11 +1672,14 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Morning Invest",
-        "strategy": "MI_V9_DUAL_CHEAP_AND_RISING",
+        "strategy": "MI_V9_1_DUAL_QUICK_FULL_KR_ETF",
         "modes": ["cheap", "rising"],
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "scan_mode": scan_mode,
+        "data_status": "intraday_live" if scan_mode == "QUICK" else "close_confirmed",
+        "backtest_refreshed": scan_mode == "FULL",
         "market_date": market_date,
         "universe_source": universe_source,
         "restriction_snapshot": restriction_meta,
@@ -1632,8 +1689,8 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
         "rising_eligible_count": len(rising_items),
-        "market_size_min_krw": None if category == "US_ETF" else MIN_MARKET_SIZE_KRW,
-        "market_size_filter": "exempt" if category == "US_ETF" else "krw_10t_min",
+        "market_size_min_krw": None if category in ETF_CATEGORIES else MIN_MARKET_SIZE_KRW,
+        "market_size_filter": "exempt" if category in ETF_CATEGORIES else "krw_10t_min",
         "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if size_attempted and np.isfinite(size_coverage) else None,
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
@@ -1690,7 +1747,7 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
             "historical_regulatory_status": "not_reconstructed"
         },
     }
-    out_dir, detail_count = _write_category_site(category, payload_meta, items, size_cache)
+    out_dir, detail_count = _write_category_site(category, payload_meta, items, size_cache, scan_mode=scan_mode)
     bundle_mb = (out_dir / "bundle.zip").stat().st_size / (1024 * 1024)
     summary_kb = (out_dir / "summary.json").stat().st_size / 1024
     print(
@@ -1700,29 +1757,37 @@ def scan_category(category: str, usdkrw: float | None = None) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Morning Invest daily technical screener")
+    parser = argparse.ArgumentParser(description="Morning Invest technical screener")
     parser.add_argument(
         "--market",
-        choices=["KR", "US", "US_ETF", "US_GROUP", "ALL"],
+        choices=["KR", "KR_ETF", "KR_GROUP", "US", "US_ETF", "US_GROUP", "ALL"],
         default="ALL",
+    )
+    parser.add_argument(
+        "--scan-mode",
+        choices=["FULL", "QUICK"],
+        default="FULL",
+        help="FULL recalculates backtests; QUICK includes the active daily bar and preserves prior backtests.",
     )
     args = parser.parse_args()
 
     if args.market == "ALL":
-        categories = ["KR", "US", "US_ETF"]
+        categories = ["KR", "KR_ETF", "US", "US_ETF"]
+    elif args.market == "KR_GROUP":
+        categories = ["KR", "KR_ETF"]
     elif args.market == "US_GROUP":
         categories = ["US", "US_ETF"]
     else:
         categories = [args.market]
 
-    usdkrw = fetch_usdkrw() if any(c != "KR" for c in categories) else None
+    usdkrw = fetch_usdkrw() if any(c in {"US", "US_ETF"} for c in categories) else None
     if usdkrw:
         print(f"USD/KRW: {usdkrw:.4f}")
 
     failures = []
     for category in categories:
         try:
-            scan_category(category, usdkrw=usdkrw)
+            scan_category(category, usdkrw=usdkrw, scan_mode=args.scan_mode)
         except Exception as exc:
             failures.append((category, str(exc)))
             print(f"ERROR {category}: {type(exc).__name__}: {exc}")
