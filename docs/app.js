@@ -9,8 +9,8 @@ const CATEGORY = {
 };
 
 const MODE = {
-  cheap: { label: '싼게 좋아', emoji: '🧺', maxRaw: 5.0 },
-  rising: { label: '오르는게 좋아', emoji: '🚀', maxRaw: 4.5 },
+  cheap: { label: '싼게 좋아 · 눌림목', emoji: '🧺', maxRaw: 100 },
+  rising: { label: '오르는게 좋아 · 돌파', emoji: '🚀', maxRaw: 100 },
 };
 
 const DATA_BASE = location.hostname.endsWith('github.io')
@@ -54,25 +54,25 @@ function modeView(stock, mode) {
     return stock.rising || { eligible:false, rank:null, score:0, backtest:{} };
   }
   return {
-    eligible: true,
+    eligible: stock.eligible !== false,
     rank: stock.rank,
     score: stock.score,
-    display_score: stock.display_score,
+    raw_score: stock.raw_score,
+    M: stock.M,
     backtest: stock.backtest || {},
   };
 }
 
-function displayScore(raw, mode) {
+function displayScore(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return '—';
-  const maxRaw = MODE[mode]?.maxRaw || 1;
-  return Math.min(100, Math.max(0, n / maxRaw * 100)).toFixed(1);
+  return Math.min(100, Math.max(0, n)).toFixed(1);
 }
 
-function scoreNumber(raw, mode) {
+function scoreNumber(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return 0;
-  return Math.min(100, Math.max(0, n / (MODE[mode]?.maxRaw || 1) * 100));
+  return Math.min(100, Math.max(0, n));
 }
 
 function heatClass(raw, mode) {
@@ -159,9 +159,10 @@ function filterLists() {
     ? items.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.exchange}`.toLowerCase().includes(q))
     : items;
 
-  state.lists.cheap = [...matches]
+  const cheap = matches.filter((s) => modeView(s, 'cheap').eligible !== false);
+  state.lists.cheap = [...cheap]
     .sort(modeSort('cheap'))
-    .slice(0, q ? matches.length : DEFAULT_TOP_N);
+    .slice(0, q ? cheap.length : DEFAULT_TOP_N);
 
   const rising = matches.filter((s) => modeView(s, 'rising').eligible !== false);
   state.lists.rising = [...rising]
@@ -171,7 +172,7 @@ function filterLists() {
 
 function stockCard(stock, mode) {
   const mv = modeView(stock, mode);
-  const score = displayScore(mv.score, mode);
+  const score = displayScore(mv.score);
   const market = CATEGORY[stock.category]?.market || stock.category || '—';
   const ticker = stock.symbol || stock.ticker || '—';
   const size = marketSize(stock.market_size_krw ?? stock.metrics?.market_size_krw);
@@ -180,7 +181,7 @@ function stockCard(stock, mode) {
   return `<article class="compact-stock-card ${heatClass(mv.score, mode)}" data-card-key="${escapeHtml(key)}">
     <div class="compact-card-head">
       <strong class="compact-stock-name">${escapeHtml(stock.name)}</strong>
-      <span class="compact-score ${heatClass(mv.score, mode)}">${score}</span>
+      <button type="button" class="compact-score score-detail-btn ${heatClass(mv.score, mode)}" data-score-detail="1" data-mode="${mode}" data-ticker="${escapeHtml(stock.ticker)}" aria-label="상세 점수 보기">${score}</button>
     </div>
 
     <div class="compact-stock-fields">
@@ -215,12 +216,12 @@ function renderLists() {
   $('#risingCount').textContent = `${rising.length.toLocaleString()}개`;
   $('#resultCount').textContent = state.query.trim()
     ? `싼게 ${cheap.length.toLocaleString()} · 오르는게 ${rising.length.toLocaleString()}`
-    : '각 TOP100';
+    : '각 최대 100개';
 }
 
 function renderMeta() {
   const data = currentData();
-  $('#categoryTitle').textContent = `${CATEGORY[state.category].short} TOP100`;
+  $('#categoryTitle').textContent = `${CATEGORY[state.category].short} V3 후보`;
   if (!data) {
     $('#updated').textContent = '—';
     $('#marketDate').textContent = '—';
@@ -233,10 +234,10 @@ function renderMeta() {
     ? dt.toLocaleString('ko-KR', { timeZone:'Asia/Seoul', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' })
     : '—';
 
-  const scanStatus = data.scan_mode === 'QUICK' ? '장중 QUICK' : '종가 확정';
+  const scanStatus = data.scan_mode === 'QUICK' ? '종가 확정 · QUICK(백테스트 유지)' : '종가 확정';
   $('#marketDate').textContent = data.market_date ? `${data.market_date} · ${scanStatus}` : scanStatus;
-  $('#marketDate').classList.toggle('intraday', data.scan_mode === 'QUICK');
-  $('#coverage').textContent = `전체 ${Number(data.universe_count || 0).toLocaleString()}종목`;
+  $('#marketDate').classList.remove('intraday');
+  $('#coverage').textContent = `U필터 ${Number(data.u_filter_passed_count || 0).toLocaleString()} · M ${data.market_regime_M ?? '—'}`;
 }
 
 function closeActionPanel() {
@@ -274,7 +275,7 @@ function actionPanelShell(action, stock, mode) {
     <div class="backtest-summary"></div>
     <div class="backtest-table-wrap" hidden>
       <table class="backtest-table">
-        <thead><tr><th>신호일</th><th>점수</th><th>5D</th><th>10D</th><th>20D</th><th>MFE20</th><th>MAE20</th></tr></thead>
+        <thead><tr><th>신호일</th><th>점수</th><th>5D초과</th><th>10D초과</th><th>20D초과</th><th>MFE20</th><th>MAE20</th></tr></thead>
         <tbody class="backtest-body"></tbody>
       </table>
     </div>
@@ -335,10 +336,9 @@ function chartRows(stock) {
   return d.map((date, i) => ({
     date,
     close: c.c?.[i],
-    mid: c.m?.[i],
-    upper: c.u?.[i],
-    lower: c.l?.[i],
-    ma60: c.a60?.[i],
+    ma20: c.ma20?.[i],
+    ma50: c.ma50?.[i],
+    ma120: c.ma120?.[i],
   }));
 }
 
@@ -349,7 +349,7 @@ function drawMiniChart(root, stock) {
 }
 
 function drawChart(el, data, currency) {
-  data = data.filter((d) => [d.close, d.mid, d.upper, d.lower].every(Number.isFinite));
+  data = data.filter((d) => Number.isFinite(d.close));
   if (!data.length) {
     el.innerHTML = '<div class="mini-loading">차트 데이터 없음</div>';
     return;
@@ -358,34 +358,27 @@ function drawChart(el, data, currency) {
   const W = Math.max(320, el.clientWidth || 520);
   const H = Math.max(220, el.clientHeight || 260);
   const pad = { l:8, r:56, t:14, b:18 };
-  const vals = data.flatMap((d) => [d.close, d.upper, d.lower]).filter(Number.isFinite);
+  const vals = data.flatMap((d) => [d.close, d.ma20, d.ma50, d.ma120]).filter(Number.isFinite);
   const min = Math.min(...vals), max = Math.max(...vals);
   const span = Math.max(max - min, Math.abs(max) * .02, 1);
   const lo = min - span * .08, hi = max + span * .08;
   const X = (i) => pad.l + i / Math.max(1, data.length - 1) * (W - pad.l - pad.r);
   const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
   const path = (key) => data.map((d, i) => Number.isFinite(d[key]) ? `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(d[key]).toFixed(1)}` : '').filter(Boolean).join(' ');
-  const poly = data.map((d, i) => `${X(i)},${Y(d.upper)}`).join(' ') + ' ' +
-    [...data].reverse().map((d, ri) => { const i = data.length - 1 - ri; return `${X(i)},${Y(d.lower)}`; }).join(' ');
 
   let grid = '';
   for (let i = 0; i < 4; i++) {
     const y = pad.t + i * (H - pad.t - pad.b) / 3;
     const v = hi - i * (hi - lo) / 3;
-    const label = currency === 'KRW'
-      ? Math.round(v).toLocaleString('ko-KR')
-      : `$${v.toFixed(v >= 100 ? 0 : 1)}`;
+    const label = currency === 'KRW' ? Math.round(v).toLocaleString('ko-KR') : `$${v.toFixed(v >= 100 ? 0 : 1)}`;
     grid += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" stroke="#202631"/><text x="${W-pad.r+5}" y="${y+4}" fill="#718096" font-size="8">${label}</text>`;
   }
 
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <defs><linearGradient id="miniBandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7faaff" stop-opacity=".14"/><stop offset="1" stop-color="#7faaff" stop-opacity=".02"/></linearGradient></defs>
     ${grid}
-    <polygon points="${poly}" fill="url(#miniBandFill)"/>
-    <path d="${path('upper')}" fill="none" stroke="#5579b8" stroke-width="1"/>
-    <path d="${path('lower')}" fill="none" stroke="#5579b8" stroke-width="1"/>
-    <path d="${path('mid')}" fill="none" stroke="#efc46a" stroke-width="1.1"/>
-    <path d="${path('ma60')}" fill="none" stroke="#b899ff" stroke-width="1.3"/>
+    <path d="${path('ma120')}" fill="none" stroke="#667085" stroke-width="1.1"/>
+    <path d="${path('ma50')}" fill="none" stroke="#b899ff" stroke-width="1.2"/>
+    <path d="${path('ma20')}" fill="none" stroke="#efc46a" stroke-width="1.2"/>
     <path d="${path('close')}" fill="none" stroke="#78f2b6" stroke-width="2"/>
   </svg>`;
 }
@@ -395,8 +388,8 @@ function backtestMetric(label, value, sub='') {
 }
 
 function renderMiniBacktest(root, stock, mode) {
-  const mv = modeView(stock, mode);
-  const bt = mv.backtest || {};
+  const detailMode = mode === 'rising' ? (stock.rising || {}) : stock;
+  const bt = detailMode.backtest || {};
   const loading = root.querySelector('.backtest-loading');
   const summary = root.querySelector('.backtest-summary');
   const tableWrap = root.querySelector('.backtest-table-wrap');
@@ -404,17 +397,17 @@ function renderMiniBacktest(root, stock, mode) {
   if (loading) loading.remove();
 
   if (!bt.available) {
-    summary.innerHTML = backtestMetric('Signals', '0', '데이터 부족');
+    summary.innerHTML = backtestMetric('Signals', '0', '완료된 백테스트 신호 없음');
     tableWrap.hidden = true;
     return;
   }
 
   summary.innerHTML = [
     backtestMetric('Signals', Number(bt.signals || 0).toLocaleString()),
-    backtestMetric('5D Avg', ratioPct(bt.avg_5d), `Win ${winPct(bt.win_5d)}`),
-    backtestMetric('10D Avg', ratioPct(bt.avg_10d), `Win ${winPct(bt.win_10d)}`),
-    backtestMetric('20D Avg', ratioPct(bt.avg_20d), `Win ${winPct(bt.win_20d)}`),
-    backtestMetric('20D Median', ratioPct(bt.median_20d)),
+    backtestMetric('5D 초과', ratioPct(bt.avg_ex_5d), `승률 ${winPct(bt.win_5d)}`),
+    backtestMetric('10D 초과', ratioPct(bt.avg_ex_10d), `승률 ${winPct(bt.win_10d)}`),
+    backtestMetric('20D 초과', ratioPct(bt.avg_ex_20d), `승률 ${winPct(bt.win_20d)}`),
+    backtestMetric('20D 절대', ratioPct(bt.avg_20d)),
     backtestMetric('MFE / MAE', `${ratioPct(bt.avg_mfe_20d)} / ${ratioPct(bt.avg_mae_20d)}`),
   ].join('');
 
@@ -422,15 +415,83 @@ function renderMiniBacktest(root, stock, mode) {
   body.innerHTML = trades.length
     ? trades.map((t) => `<tr>
         <td>${escapeHtml(t.signal_date || '—')}</td>
-        <td>${t.score == null ? '—' : displayScore(t.score, mode)}</td>
-        <td class="${changeClass((t.ret_5d || 0) * 100)}">${ratioPct(t.ret_5d)}</td>
-        <td class="${changeClass((t.ret_10d || 0) * 100)}">${ratioPct(t.ret_10d)}</td>
-        <td class="${changeClass((t.ret_20d || 0) * 100)}">${ratioPct(t.ret_20d)}</td>
-        <td class="up">${ratioPct(t.mfe_20d)}</td>
-        <td class="down">${ratioPct(t.mae_20d)}</td>
+        <td>${t.score == null ? '—' : displayScore(t.score)}</td>
+        <td class="${changeClass((t.ExRet5 || 0) * 100)}">${ratioPct(t.ExRet5)}</td>
+        <td class="${changeClass((t.ExRet10 || 0) * 100)}">${ratioPct(t.ExRet10)}</td>
+        <td class="${changeClass((t.ExRet20 || 0) * 100)}">${ratioPct(t.ExRet20)}</td>
+        <td class="up">${ratioPct(t.MFE20)}</td>
+        <td class="down">${ratioPct(t.MAE20)}</td>
       </tr>`).join('')
     : '<tr><td colspan="7" class="bt-empty">최근 독립 신호 없음</td></tr>';
   tableWrap.hidden = false;
+}
+
+const SCORE_LABELS = {
+  cheap: {
+    S1: ['되돌림 깊이', 24], S2: ['거래량 마름', 18], S3: ['당일 거래량 회복', 10],
+    S4: ['반전 캔들 강도', 8], S5: ['추세 강도', 12], S6: ['눌림 기간', 8], S7: ['상대강도', 20],
+  },
+  rising: {
+    S1: ['근접 매물대', 25], S2: ['거래량 확장', 20], S3: ['변동성 수축 VCP', 20],
+    S4: ['OBV 축적', 15], S5: ['상대강도', 15], S6: ['돌파 캔들 강도', 5],
+  },
+};
+
+function metricText(v) {
+  if (v == null) return '—';
+  if (typeof v === 'boolean') return v ? 'PASS' : 'FAIL';
+  if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, {maximumFractionDigits:4});
+  return escapeHtml(v);
+}
+
+function closeScoreModal() {
+  document.querySelector('.score-modal-backdrop')?.remove();
+}
+
+function renderScoreModal(detail, mode) {
+  closeScoreModal();
+  const sv = mode === 'rising' ? (detail.rising || {}) : detail;
+  const labels = SCORE_LABELS[mode] || {};
+  const rows = Object.entries(labels).map(([key, [label, weight]]) => {
+    const component = Number(sv.scores?.[key]);
+    const contribution = Number(sv.contributions?.[key]);
+    return `<tr><td><b>${key}</b> ${label}</td><td>${weight}%</td><td>${Number.isFinite(component) ? component.toFixed(1) : '—'}</td><td>${Number.isFinite(contribution) ? contribution.toFixed(2) : '—'}</td></tr>`;
+  }).join('');
+  const gateRows = Object.entries(sv.gates || {}).map(([k, v]) => `<div class="score-gate ${v ? 'pass' : 'fail'}"><span>${escapeHtml(k)}</span><b>${v ? 'PASS' : 'FAIL'}</b></div>`).join('');
+  const metrics = sv.metrics || {};
+  const metricKeys = mode === 'rising'
+    ? ['BreakoutLevel20','m_vol','m_tv','ATRP_percentile','BBWidth_percentile','SupplyRatio','OBV_Div','RS_percentile','CloseLocation','MA50_over_MA120','StopPrice','EstimatedRisk','StrategyPercentile']
+    : ['H_sw','L_base','SwingRise','r','PullbackDays','DryVol','RecoveryVol','CloseLocation','MA50_slope','RS_percentile','RS_swing','StopPrice','EstimatedRisk','StrategyPercentile'];
+  const metricRows = metricKeys.map((k) => `<div><span>${escapeHtml(k)}</span><b>${metricText(metrics[k])}</b></div>`).join('');
+
+  const wrap = document.createElement('div');
+  wrap.className = 'score-modal-backdrop';
+  wrap.innerHTML = `<section class="score-modal" role="dialog" aria-modal="true">
+    <header><div><small>${escapeHtml(MODE[mode]?.label || '')}</small><h2>${escapeHtml(detail.name)} · ${displayScore(sv.score)}점</h2></div><button type="button" class="score-modal-close">×</button></header>
+    <div class="score-total-strip"><div><span>RawScore</span><b>${sv.raw_score == null ? '—' : Number(sv.raw_score).toFixed(1)}</b></div><div><span>시장배율 M</span><b>${sv.M ?? '—'}</b></div><div><span>최종 Score</span><b>${displayScore(sv.score)}</b></div></div>
+    <h3>상세 채점</h3>
+    <div class="score-table-wrap"><table class="score-table"><thead><tr><th>항목</th><th>가중치</th><th>항목점수</th><th>기여점수</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <h3>Gate</h3><div class="score-gates">${gateRows || '<span>—</span>'}</div>
+    <h3>진단값</h3><div class="score-metrics">${metricRows}</div>
+  </section>`;
+  wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('.score-modal-close')) closeScoreModal(); });
+  document.body.appendChild(wrap);
+}
+
+async function openScoreDetail(button) {
+  const mode = button.dataset.mode;
+  const ticker = button.dataset.ticker;
+  const stock = (currentData()?.items || []).find((s) => s.ticker === ticker);
+  if (!stock) return;
+  button.disabled = true;
+  try {
+    const detail = await ensureDetail(stock);
+    renderScoreModal(detail, mode);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function newsSearchQuery(stock) {
@@ -591,6 +652,12 @@ $('#searchInput').addEventListener('input', (e) => {
 $('#reloadBtn').addEventListener('click', () => void switchCategory(state.category, true));
 
 document.addEventListener('click', (e) => {
+  const scoreDetail = e.target.closest('[data-score-detail]');
+  if (scoreDetail) {
+    void openScoreDetail(scoreDetail);
+    return;
+  }
+
   const action = e.target.closest('[data-stock-action]');
   if (action) {
     void openAction(action);
@@ -618,3 +685,5 @@ window.addEventListener('resize', () => {
 });
 
 void switchCategory('KR');
+
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeScoreModal(); });
