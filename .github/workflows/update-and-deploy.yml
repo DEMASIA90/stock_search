@@ -18,7 +18,7 @@ on:
           - US_GROUP
           - UI_ONLY
       scan_mode:
-        description: FULL recalculates backtests; QUICK updates current scores only
+        description: FULL recalculates V3 backtests; QUICK reuses backtests but still uses confirmed daily bars
         required: true
         default: FULL
         type: choice
@@ -27,25 +27,9 @@ on:
           - QUICK
 
   schedule:
-    # Korea intraday QUICK scans (current unfinished daily bar included)
-    - cron: "30 10 * * 1-5"
-      timezone: "Asia/Seoul"
-    - cron: "00 13 * * 1-5"
-      timezone: "Asia/Seoul"
-    - cron: "50 14 * * 1-5"
-      timezone: "Asia/Seoul"
-    # Korea post-close FULL scan + backtest refresh
+    # V3 uses only the last confirmed daily bar. No intraday strategy rescans.
     - cron: "10 16 * * 1-5"
       timezone: "Asia/Seoul"
-
-    # US intraday QUICK scans. New York timezone automatically follows DST.
-    - cron: "00 11 * * 1-5"
-      timezone: "America/New_York"
-    - cron: "30 13 * * 1-5"
-      timezone: "America/New_York"
-    - cron: "30 15 * * 1-5"
-      timezone: "America/New_York"
-    # US post-close FULL scan + backtest refresh
     - cron: "20 16 * * 1-5"
       timezone: "America/New_York"
 
@@ -80,20 +64,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking v9.2 source files..."
+          echo "Checking v10.0 V3 source files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.2"' scanner.py || {
-            echo "::error::scanner.py is not Morning Invest v9.2"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "10.0"' scanner.py || {
+            echo "::error::scanner.py is not Morning Invest v10.0"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.2"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not Morning Invest v9.2"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "10.0"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not Morning Invest v10.0"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.2"' universe.py || {
-            echo "::error::universe.py is not Morning Invest v9.2. Replace the repository-root file named exactly universe.py."
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "10.0"' universe.py || {
+            echo "::error::universe.py is not Morning Invest v10.0. Replace the repository-root file named exactly universe.py."
             exit 1
           }
 
@@ -107,10 +91,26 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v9.2"
-          echo "hydrate_data.py: v9.2"
-          echo "universe.py: v9.2"
+          echo "scanner.py: v10.0"
+          echo "hydrate_data.py: v10.0"
+          echo "universe.py: v10.0"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("etf_tickers.json")
+          if not p.is_file():
+              raise SystemExit("::error::etf_tickers.json is missing")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          kr = [str(x).strip().upper() for x in data.get("KR_ETF", []) if str(x).strip()]
+          us = [str(x).strip().upper() for x in data.get("US_ETF", []) if str(x).strip()]
+          if len(kr) != 300 or len(set(kr)) != 300:
+              raise SystemExit(f"::error::KR ETF whitelist must be exactly 300 unique tickers; got {len(kr)}/{len(set(kr))}")
+          if len(us) != 500 or len(set(us)) != 500:
+              raise SystemExit(f"::error::US ETF whitelist must be exactly 500 unique tickers; got {len(us)}/{len(set(us))}")
+          print(f"ETF whitelist: KR={len(kr)} / US={len(us)}")
+          PY
 
       - name: Resolve refresh market and scan mode
         id: market
@@ -118,12 +118,8 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             case "${{ github.event.schedule }}" in
-              "30 10 * * 1-5"|"00 13 * * 1-5"|"50 14 * * 1-5")
-                MARKET="KR_GROUP"; SCAN_MODE="QUICK" ;;
               "10 16 * * 1-5")
                 MARKET="KR_GROUP"; SCAN_MODE="FULL" ;;
-              "00 11 * * 1-5"|"30 13 * * 1-5"|"30 15 * * 1-5")
-                MARKET="US_GROUP"; SCAN_MODE="QUICK" ;;
               "20 16 * * 1-5")
                 MARKET="US_GROUP"; SCAN_MODE="FULL" ;;
               *)
@@ -188,7 +184,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running Morning Invest v9.2 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running Morning Invest v10.0 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -250,14 +246,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260818-v9_1",
+            "ui_build": "20260819-v10_0",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260818-v9_1"
+          echo "UI build: 20260819-v10_0"
           cat docs/build-info.json
 
       - name: Build lightweight GitHub Pages fallback
