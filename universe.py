@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-MORNING_INVEST_COMPONENT_VERSION = "10.0"
+MORNING_INVEST_COMPONENT_VERSION = "9.3R"
 
 import pandas as pd
 import requests
@@ -117,7 +117,7 @@ def _kr_market(market_type: str, suffix: str, exchange: str) -> list[Stock]:
         name = str(row.get(name_col, "")).strip()
         if not re.fullmatch(r"\d{6}", code) or not name or name.lower() == "nan":
             continue
-        if "스팩" in name or "리츠" in name or _is_kr_preferred(name):
+        if "스팩" in name or _is_kr_preferred(name):
             continue
 
         listed_date = None
@@ -514,31 +514,45 @@ def _fetch_kr_etf_from_naver() -> list[Stock]:
 
 
 def _load_etf_whitelist() -> dict[str, list[str]]:
+    """Load the exact ETF ticker lists supplied by the user.
+
+    The whitelist controls membership only. Upstream sources may be consulted
+    for display names/exchange metadata, but may never add symbols.
+    """
     if not ETF_TICKER_FILE.is_file():
         raise RuntimeError(f"ETF ticker whitelist missing: {ETF_TICKER_FILE}")
+
     payload = json.loads(ETF_TICKER_FILE.read_text(encoding="utf-8"))
     kr = [str(x).strip().upper() for x in payload.get("KR_ETF", []) if str(x).strip()]
     us = [str(x).strip().upper() for x in payload.get("US_ETF", []) if str(x).strip()]
+
     if len(kr) != 300 or len(set(kr)) != 300:
-        raise RuntimeError(f"KR ETF whitelist must contain exactly 300 unique tickers; got {len(kr)}/{len(set(kr))}")
+        raise RuntimeError(
+            f"KR ETF whitelist must contain exactly 300 unique tickers; "
+            f"got {len(kr)}/{len(set(kr))}"
+        )
     if len(us) != 500 or len(set(us)) != 500:
-        raise RuntimeError(f"US ETF whitelist must contain exactly 500 unique tickers; got {len(us)}/{len(set(us))}")
+        raise RuntimeError(
+            f"US ETF whitelist must contain exactly 500 unique tickers; "
+            f"got {len(us)}/{len(set(us))}"
+        )
     return {"KR_ETF": kr, "US_ETF": us}
 
 
 def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
-    """Build KR ETF universe strictly from the user-supplied 300 ticker whitelist.
+    """Build KR ETF universe strictly from the attached 300-ticker whitelist.
 
-    Naver is queried only for display names.  Failure to resolve a name never
-    expands or shrinks the whitelist; the ticker itself becomes the fallback name.
+    Naver is used only to resolve display names. A Naver/KRX outage must not
+    change the whitelist. Price/scoring logic remains the restored v9.3 logic.
     """
     whitelist = _load_etf_whitelist()["KR_ETF"]
     name_map: dict[str, str] = {}
 
-    # Prefer prior cache names so an upstream outage does not affect the list.
+    # Reuse cached names first.
     for row in _load_cache(KR_ETF_CACHE):
         name_map[str(row.symbol).upper()] = row.name
 
+    # Optional name lookup only; membership never comes from this response.
     try:
         response = requests.get(
             NAVER_ETF_LIST_URL,
@@ -553,7 +567,10 @@ def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
             if code and name:
                 name_map[code] = name
     except Exception as exc:
-        print(f"KR ETF name lookup unavailable; ticker names will be reused: {type(exc).__name__}: {exc}")
+        print(
+            "KR ETF name lookup unavailable; ticker symbols will be used as names: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     result = [
         Stock(
@@ -567,6 +584,7 @@ def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
         for code in whitelist
     ]
     _save_cache(KR_ETF_CACHE, result)
+    print(f"KR ETF universe: user whitelist ({len(result):,})")
     return result, "USER_ETF_WHITELIST_KR300"
 
 
@@ -585,9 +603,7 @@ def _is_us_common_equity(name: str, symbol: str) -> bool:
         return False
     blocked = re.compile(
         r"\b(warrant|warrants|right|rights|unit|units|preferred|preference|debenture|debentures|bond|bonds)\b"
-        r"|notes? due|depositary shares?.*preferred"
-        r"|\bREIT\b|real estate investment trust"
-        r"|\bacquisition corp(?:oration)?\b|\bblank check\b|\bSPAC\b",
+        r"|notes? due|depositary shares?.*preferred",
         re.IGNORECASE,
     )
     return blocked.search(name) is None
@@ -698,14 +714,26 @@ def get_universe(category: str) -> tuple[list[Stock], str]:
         whitelist = _load_etf_whitelist()["US_ETF"]
         by_symbol = {s.symbol.upper(): s for s in etfs}
         by_ticker = {s.ticker.upper(): s for s in etfs}
+
         selected: list[Stock] = []
         for symbol in whitelist:
             yahoo_ticker = symbol.replace(".", "-")
             stock = by_symbol.get(symbol) or by_ticker.get(yahoo_ticker)
             if stock is None:
-                stock = Stock(yahoo_ticker, symbol, symbol, "US_ETF", "USD", "US ETF")
+                # Keep the user's whitelist exact even if Nasdaq metadata lookup
+                # temporarily fails for an individual symbol.
+                stock = Stock(
+                    yahoo_ticker,
+                    symbol,
+                    symbol,
+                    "US_ETF",
+                    "USD",
+                    "US ETF",
+                )
             selected.append(stock)
-        _save_cache(US_ETF_CACHE, selected)
-        return selected, f"USER_ETF_WHITELIST_US500+{source}"
-    raise ValueError(f"Unsupported category: {category}")
 
+        _save_cache(US_ETF_CACHE, selected)
+        print(f"US ETF universe: user whitelist ({len(selected):,})")
+        return selected, f"USER_ETF_WHITELIST_US500+{source}"
+
+    raise ValueError(f"Unsupported category: {category}")
