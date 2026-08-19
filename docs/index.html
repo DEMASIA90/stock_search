@@ -5,16 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#080a0f" />
   <meta name="color-scheme" content="dark" />
-  <meta name="morning-invest-ui-build" content="20260818-v9_1" />
+  <meta name="morning-invest-ui-build" content="20260819-v9_3" />
   <title>버핏이랑 멍거도 몰래 보는 주식 탐색기 · Morning Invest</title>
-  <link rel="stylesheet" href="./styles.css?v=20260818-v9_1" />
+  <link rel="stylesheet" href="./styles.css?v=20260819-v9_3" />
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
       <a class="brand scanner-brand" href="./" aria-label="버핏이랑 멍거도 몰래 보는 주식 탐색기">
         <span class="scanner-mark" aria-hidden="true"><span>🕵️</span><i>$</i></span>
-        <div class="brand-copy"><b>버핏이랑 멍거도 몰래 보는 주식 탐색기</b><small><span id="updated">—</span> · 쉿, 둘한텐 비밀입니다</small></div>
+        <div class="brand-copy">
+          <b>버핏이랑 멍거도 몰래 보는 주식 탐색기</b>
+          <small><span id="updated">—</span> · 쉿, 둘한텐 비밀입니다</small>
+        </div>
       </a>
       <div class="topbar-tools">
         <div class="developer-sign"><small>developed by</small><b>Morning Invest</b></div>
@@ -30,17 +33,9 @@
         <button class="market-tab" data-category="US_ETF">미장 ETF</button>
       </nav>
 
-      <section class="mode-switch-wrap" aria-label="스캐너 모드 선택">
-        <div class="mode-switch" id="modeSwitch">
-          <button class="mode-btn active" data-mode="cheap"><span>🧺</span><b>싼게 좋아</b><small>눌림·바닥</small></button>
-          <button class="mode-btn" data-mode="rising"><span>🚀</span><b>오르는게 좋아</b><small>돌파·상승</small></button>
-        </div>
-      </section>
-
-      <section class="summary">
+      <section class="summary dual-summary">
         <div>
-          <h1 id="categoryTitle">국장 바닥 TOP100</h1>
-          <p class="summary-kicker" id="modeKicker">싸게 눌린 대형주를 뒤적뒤적 찾는 모드</p>
+          <h1 id="categoryTitle">국장 TOP100</h1>
         </div>
         <div class="summary-meta">
           <b id="marketDate">—</b>
@@ -48,37 +43,39 @@
         </div>
       </section>
 
-      <section class="search-row">
+      <section class="search-row compact-search-row">
         <div class="search-box">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.5-4.5m2-5A7 7 0 1 1 4.5 11.5a7 7 0 0 1 14 0Z"/></svg>
-          <input id="searchInput" type="search" autocomplete="off" placeholder="종목명 / 티커 검색" />
+          <input id="searchInput" type="search" autocomplete="off" placeholder="종목명 / TICKER 검색" />
           <kbd id="resultCount">—</kbd>
         </div>
       </section>
 
       <div id="status" class="status">데이터를 불러오는 중입니다.</div>
 
-      <section id="desktopTable" class="table-card" aria-label="검색 결과">
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr id="tableHeadRow"></tr>
-            </thead>
-            <tbody id="stockTableBody"></tbody>
-          </table>
-        </div>
-      </section>
+      <section id="dualBoard" class="dual-board" aria-label="두 모드 종목 목록">
+        <section class="mode-column cheap-column">
+          <header class="mode-column-head">
+            <div><span class="mode-column-icon">🧺</span><b>싼게 좋아</b></div>
+            <span id="cheapCount">—</span>
+          </header>
+          <div id="cheapList" class="mode-stock-list"></div>
+        </section>
 
-      <section id="mobileList" class="mobile-list"></section>
-      <div id="sentinel" class="sentinel" aria-hidden="true"></div>
+        <section class="mode-column rising-column">
+          <header class="mode-column-head">
+            <div><span class="mode-column-icon">🚀</span><b>오르는게 좋아</b></div>
+            <span id="risingCount">—</span>
+          </header>
+          <div id="risingList" class="mode-stock-list"></div>
+        </section>
+      </section>
     </main>
 
     <footer>Market screening · Not investment advice</footer>
   </div>
 
-  <template id="detailTemplate"></template>
-
-  <script src="./news-config.js?v=20260818-v9_1"></script>
-  <script src="./app.js?v=20260818-v9_1"></script>
+  <script src="./news-config.js?v=20260819-v9_3"></script>
+  <script src="./app.js?v=20260819-v9_3"></script>
 </body>
 </html>
