@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "11.0"
+MORNING_INVEST_COMPONENT_VERSION = "11.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -93,6 +93,7 @@ def summary_item(item: dict, detail_path: str) -> dict:
         "close": item.get("close"),
         "day_change_pct": item.get("day_change_pct"),
         "rank": item.get("rank"),
+        "base_score": item.get("base_score"),
         "score": item.get("score"),
         "scores": item.get("scores") or {},
         "backtest": {
@@ -102,6 +103,11 @@ def summary_item(item: dict, detail_path: str) -> dict:
             "win_20d": bt.get("win_20d"),
             "quality_score": bt.get("quality_score"),
             "quality_label": bt.get("quality_label", "NORMAL"),
+            "score_adjustment": bt.get("score_adjustment", 0.0),
+            "avg_60d": bt.get("avg_60d"),
+            "median_60d": bt.get("median_60d"),
+            "win_60d": bt.get("win_60d"),
+            "threshold": bt.get("threshold"),
             "forecast_available": bool(forecast.get("available")),
         },
         "detail_path": detail_path,

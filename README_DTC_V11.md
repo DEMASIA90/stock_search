@@ -1,87 +1,97 @@
-# DTC v11.0
+# DTC v11.2
 
 ## UI
 
 Header: `동탄 트레이딩 센터 (Dongtan Trading Center, DTC)`
 
-Subtitle: `모든 투자의 책임은 사실 다른 투자자에게 있습니다.`
+Main market buttons: `국장 / 국장ETF / 미장 / 미장ETF`.
 
-Browser tab: `Dongtan Trading Center (DTC)`
+- Normal list: score-ranked TOP20 only.
+- Search: searches the full eligible summary universe, including stocks outside TOP20.
+- Market-size filters: 10조 / 50조 / 100조 / 500조 / 1000조 이상, default 100조 이상.
+- Card chart: most recent ~3 trading months (63 sessions).
 
-Each stock card is permanently split into two panes:
+## Unified final score (0~100)
 
-- Left: name + ticker, score, sector, market size, current price/day change, one latest-news headline, 60-day backtest expectation.
-- Right: three-month price chart with Bollinger Bands and the 40/60/120/200D dominant volume-zone center lines.
-- Clicking the score opens the five-part score breakdown without cluttering the card.
+The score is built in two stages. Items 1~6 form an 85-point **base score**. Item 7 is a backtest adjustment from -10 to +15. Final display score is clipped to 0~100.
 
-## Unified score (100)
-
-### 1. Bollinger lower proximity: 0~20
+### 1. Bollinger lower-band proximity: 0~10
 
 20-day Bollinger Band, 2 standard deviations.
 
 `%B = (Close - Lower) / (Upper - Lower)`
 
-`BB score = 20 * (1 - clamp(%B, 0, 1))`
+`BB score = 10 * (1 - clamp(%B, 0, 1))`
 
-Therefore lower band/below = 20, middle band = 10, upper band/above = 0.
+- Upper band or above: 0
+- Middle band: 5
+- Lower band or below: 10
+- Between upper/lower: linear interpolation
 
-### 2~5. Dominant 7-zone volume profile: +20 each
+### 2~6. Dominant 7-zone volume profile
 
-Lookbacks: 40, 60, 120, 200 trading days.
+| Lookback | Score when current Close is inside dominant zone |
+|---:|---:|
+| 20 trading days | +5 |
+| 40 trading days | +10 |
+| 60 trading days | +15 |
+| 120 trading days | +20 |
+| 200 trading days | +25 |
 
 For every lookback:
 
-1. Find the lookback's minimum Low and maximum High.
-2. Divide that price range into exactly seven equal price zones.
+1. Find the lookback minimum Low and maximum High.
+2. Divide the price range into exactly seven equal price zones.
 3. Distribute each daily bar's Volume across every zone overlapped by `[Low, High]`, proportional to overlap length.
 4. The zone with the largest accumulated volume is the dominant volume zone.
-5. If the current Close is inside that dominant zone, add 20 points; otherwise add 0.
-6. The dominant zone's center price is saved and drawn on the chart.
+5. If the current Close is inside that dominant zone, add the lookback's assigned score. Otherwise add 0.
+6. The dominant zone center is saved and drawn on the chart.
 
-This follows the earlier DTC interpretation of a 7-zone supply/volume profile: the `해당 매물대` is the single largest-volume zone, not merely any one of the seven bins (which would always be true).
+`해당 매물대` means the single largest-volume zone among the seven bins.
 
-## Backtest shown on the card
+### 7. Backtest adjustment: -10~+15
 
-- Signal: score >= 60 at the close.
+To avoid circular scoring, the historical signal is generated from **items 1~6 only**.
+
+Existing execution model is retained:
+
+- Signal: base score >= 60 at the close.
 - Entry: next trading-day Open.
 - Exit: Close 60 trading days after entry.
 - Historical signal window: most recent 252 eligible trading days.
 - Cooldown: 10 trading days between signals for the same stock.
-- Card metric: average 60-day return across those historical signals.
-- FULL recalculates the backtest for the backtested TOP100; QUICK refreshes current score and preserves the last FULL backtest.
+- Backtest result used for scoring: average 60-trading-day return.
+
+Adjustment:
+
+| Average return | Score adjustment |
+|---:|---:|
+| < 0% | -10 |
+| 0% to <5% | 0 |
+| 5% to <10% | +10 |
+| >=10% | +15 |
+
+Therefore the theoretical maximum is `85 + 15 = 100`.
+
+## FULL / QUICK behavior
+
+- **FULL**: recalculates the backtest for every eligible stock because item 7 affects the final rank.
+- **QUICK**: refreshes the current 1~6 base score and reuses the latest compatible FULL backtest adjustment.
+- If no compatible FULL backtest exists yet, item 7 is neutral (0) until the next FULL run.
 
 ## Universe rules retained
 
-The old *scoring algorithms* are removed. Existing non-score universe safety rules remain:
-
 - KR restricted/halted/watch-list handling.
 - US trading-halt handling.
-- minimum history / minimum price checks.
+- Minimum history / minimum price checks.
 - KR/US equities retain the existing KRW 10T minimum market-size rule.
-- ETFs are exempt from the equity 10T rule.
+- ETFs are exempt from the scanner's hard 10T eligibility rule.
+- ETF whitelist remains `etf_tickers.json`: KR 300 and US 500 tickers.
 
-## ETF whitelist
+## Deployment
 
-`etf_tickers.json` remains the source of truth:
-
-- KR ETF: exactly 300 unique tickers from the attached workbook.
-- US ETF: exactly 500 unique tickers from the attached workbook.
-- No ETF outside those lists is added to the scanning universe.
-
-## First deployment
-
-Because the data schema and score model changed, run once with:
+Because the score schema changed, the first deployment should be run once with:
 
 `ALL + FULL`
 
 After that, scheduled QUICK/FULL refreshes can continue normally.
-
-
-## UI update 2026-08-20
-
-- Main market buttons are enlarged and labeled only 국장 / 국장ETF / 미장 / 미장ETF.
-- The normal list shows only TOP20 by score; search still covers the full eligible summary universe.
-- Market-size filters: 10T / 50T / 100T / 500T / 1000T KRW, default 100T.
-- ETF size uses total assets (AUM) when available, with market cap as fallback. ETFs remain exempt from the scanner's hard 10T eligibility rule.
-- Card charts display the most recent ~3 trading months (63 sessions).

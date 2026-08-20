@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-MORNING_INVEST_COMPONENT_VERSION = "11.0"
+MORNING_INVEST_COMPONENT_VERSION = "11.2"
 
 import pandas as pd
 import requests

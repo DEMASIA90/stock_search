@@ -135,10 +135,12 @@ function filterItems() {
 function backtestLine(stock) {
   const bt = stock?.backtest || {};
   if (!bt.available || bt.avg_60d == null) {
-    return '백테스팅 결과: <b>60일 후 평균 기대수익 —</b> <small>(60점 이상 매수 기준)</small>';
+    return '백테스팅 결과: <b>60일 후 평균 기대수익 —</b> <small>(1~6 기본점수 60점 이상 기준)</small>';
   }
   const klass = Number(bt.avg_60d) > 0 ? 'up' : Number(bt.avg_60d) < 0 ? 'down' : 'flat';
-  return `백테스팅 결과: <b>60일 후 평균 기대수익 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>(60점 이상 매수 기준)</small>`;
+  const adj = Number(bt.score_adjustment);
+  const adjText = Number.isFinite(adj) ? `${adj > 0 ? '+' : ''}${adj.toFixed(0)}점` : '0점';
+  return `백테스팅 결과: <b>60일 후 평균 기대수익 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>· 점수 ${adjText}</small>`;
 }
 
 function stockCard(stock) {
@@ -251,13 +253,13 @@ function drawChart(el, detail) {
     grid += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+6}" y="${y+4}" class="price-axis">${label}</text>`;
   }
 
-  const profileClasses = ['profile40','profile60','profile120','profile200'];
+  const profileClasses = ['profile20','profile40','profile60','profile120','profile200'];
   let profileSvg = '';
   profiles.forEach((p, idx) => {
     const center = Number(p.center);
     if (!Number.isFinite(center)) return;
     const y = Y(center);
-    const labelY = y + (idx - 1.5) * 7;
+    const labelY = y + (idx - (profiles.length - 1) / 2) * 7;
     profileSvg += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="profile-line ${profileClasses[idx] || ''}"/>
       <text x="${W-pad.r-4}" y="${labelY}" text-anchor="end" class="profile-label ${profileClasses[idx] || ''}">${escapeHtml(p.days)}D</text>`;
   });
@@ -398,18 +400,27 @@ async function openScoreDetail(stock) {
   if (modal.hidden) return;
   const s = detail.scores || stock.scores || {};
   const profiles = detail.metrics?.profiles || {};
+  const bt = detail.backtest || stock.backtest || {};
+  const btAvg = bt.avg_60d == null ? '' : `평균수익 ${ratioPct(bt.avg_60d)}`;
   const rows = [
-    ['볼린저 하단 근접', Number(s.bollinger || 0), detail.metrics?.percent_b == null ? '' : `%B ${Number(detail.metrics.percent_b).toFixed(3)}`],
-    ['40일 주매물대', Number(s.profile_40 || 0), profileText(profiles['40'])],
-    ['60일 주매물대', Number(s.profile_60 || 0), profileText(profiles['60'])],
-    ['120일 주매물대', Number(s.profile_120 || 0), profileText(profiles['120'])],
-    ['200일 주매물대', Number(s.profile_200 || 0), profileText(profiles['200'])],
+    ['볼린저 하단 근접', Number(s.bollinger || 0), 10, detail.metrics?.percent_b == null ? '' : `%B ${Number(detail.metrics.percent_b).toFixed(3)}`],
+    ['20일 주매물대', Number(s.profile_20 || 0), 5, profileText(profiles['20'])],
+    ['40일 주매물대', Number(s.profile_40 || 0), 10, profileText(profiles['40'])],
+    ['60일 주매물대', Number(s.profile_60 || 0), 15, profileText(profiles['60'])],
+    ['120일 주매물대', Number(s.profile_120 || 0), 20, profileText(profiles['120'])],
+    ['200일 주매물대', Number(s.profile_200 || 0), 25, profileText(profiles['200'])],
+    ['백테스트 보정', Number(s.backtest || bt.score_adjustment || 0), 15, btAvg],
   ];
   body.innerHTML = `<div class="score-total"><span>TOTAL SCORE</span><b>${scoreText(stock)}</b><small>/ 100</small></div>
-    <div class="score-rows">${rows.map(([label, value, sub]) => `<div class="score-row">
-      <div><b>${escapeHtml(label)}</b>${sub ? `<small>${escapeHtml(sub)}</small>` : ''}</div>
-      <strong class="${value >= 20 ? 'full' : ''}">${Number(value).toFixed(1)}<small>/20</small></strong>
-    </div>`).join('')}</div>`;
+    <div class="score-rows">${rows.map(([label, value, max, sub]) => {
+      const isBacktest = label === '백테스트 보정';
+      const valueText = isBacktest ? `${value > 0 ? '+' : ''}${Number(value).toFixed(1)}` : Number(value).toFixed(1);
+      const maxText = isBacktest ? '-10~+15' : `/${max}`;
+      return `<div class="score-row">
+        <div><b>${escapeHtml(label)}</b>${sub ? `<small>${escapeHtml(sub)}</small>` : ''}</div>
+        <strong class="${value >= max ? 'full' : ''}">${valueText}<small>${maxText}</small></strong>
+      </div>`;
+    }).join('')}</div>`;
 }
 
 function profileText(p) {
