@@ -59,7 +59,7 @@ PROFILE_LOOKBACKS = (40, 60, 120, 200)
 PROFILE_SCORE = 20.0
 BOLLINGER_MAX_SCORE = 20.0
 MAX_SCORE = 100.0
-CHART_POINTS = 252
+CHART_POINTS = 63  # ~3 trading months
 
 MIN_TRADING_DAYS = 250
 MIN_PRICE_KRW = 1_000.0
@@ -400,9 +400,31 @@ def _age_days(raw) -> float:
 
 
 def _fetch_stock_size_basis(stock: Stock) -> dict | None:
-    if stock.category in ETF_CATEGORIES:
-        return None
     ticker = yf.Ticker(stock.ticker)
+    if stock.category in ETF_CATEGORIES:
+        # ETF filters need a size value for the full searchable universe, not only
+        # the visible cards. Prefer total assets (AUM); fall back to market cap.
+        try:
+            info = ticker.get_info() or {}
+        except Exception:
+            info = {}
+        total_assets = finite(info.get("totalAssets"))
+        market_cap = finite(info.get("marketCap"))
+        value = total_assets if np.isfinite(total_assets) and total_assets > 0 else market_cap
+        basis = "total_assets" if np.isfinite(total_assets) and total_assets > 0 else "market_cap"
+        if np.isfinite(value) and value > 0:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            return {
+                "basis": basis,
+                "value": float(value),
+                "currency": stock.currency,
+                "fetched_at": now,
+                "sector": str(info.get("category") or "ETF").strip() or "ETF",
+                "meta_fetched_at": now,
+                "display_size_native": float(value),
+                "display_size_basis": basis,
+            }
+        return None
     try:
         shares = finite(ticker.fast_info["shares"])
     except Exception:
@@ -436,26 +458,42 @@ def _fetch_stock_size_basis(stock: Stock) -> dict | None:
 
 
 def resolve_market_size(stock: Stock, close: float, thresholds: dict, size_cache: dict):
-    if stock.category in ETF_CATEGORIES:
-        return np.nan, np.nan, "exempt"
-
     old = size_cache.get(stock.ticker) if isinstance(size_cache.get(stock.ticker), dict) else {}
     entry = old
+
+    # Migrate the previous ETF display-only cache in place. Older v11 snapshots
+    # may already have AUM/market-cap metadata even though they did not store it
+    # in the generic size basis fields.
+    if stock.category in ETF_CATEGORIES:
+        cached_display = finite(old.get("display_size_native"))
+        cached_basis = str(old.get("display_size_basis") or "")
+        if (
+            np.isfinite(cached_display) and cached_display > 0
+            and cached_basis in {"market_cap", "total_assets"}
+            and _age_days(old.get("meta_fetched_at")) <= DISPLAY_META_CACHE_DAYS
+        ):
+            entry = dict(old)
+            entry["basis"] = cached_basis
+            entry["value"] = float(cached_display)
+            entry["fetched_at"] = old.get("meta_fetched_at")
+            size_cache[stock.ticker] = entry
+
     if not entry or _age_days(entry.get("fetched_at")) > STOCK_SHARES_CACHE_DAYS:
         fetched = None
-        for attempt in range(1, MARKET_SIZE_RETRY_ATTEMPTS + 1):
+        attempts = 1 if stock.category in ETF_CATEGORIES else MARKET_SIZE_RETRY_ATTEMPTS
+        for attempt in range(1, attempts + 1):
             try:
                 fetched = _fetch_stock_size_basis(stock)
                 if fetched:
                     # Preserve display metadata fields that may have a different TTL.
                     for k in ("sector", "meta_fetched_at", "display_size_native", "display_size_basis"):
-                        if k in old:
+                        if k in old and k not in fetched:
                             fetched[k] = old[k]
                     size_cache[stock.ticker] = fetched
                     entry = fetched
                     break
             except Exception as exc:
-                if attempt == MARKET_SIZE_RETRY_ATTEMPTS:
+                if attempt == attempts:
                     print(f"[{stock.category}] size lookup failed {stock.ticker}: {type(exc).__name__}: {exc}")
                 time.sleep(1.2 * attempt)
 
@@ -570,10 +608,15 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     if not np.isfinite(finite(ind["PercentB"].iloc[pos])):
         return None, "indicator_history"
 
+    size_info = resolve_market_size(stock, close, thresholds, size_cache)
     if stock.category in ETF_CATEGORIES:
-        market_size_native, market_size_krw, market_size_basis = np.nan, np.nan, "exempt"
+        # ETFs remain exempt from the hard 10T universe rule, but their AUM/market
+        # size is collected so the UI's 10/50/100/500/1000T filters work.
+        if size_info is None:
+            market_size_native, market_size_krw, market_size_basis = np.nan, np.nan, "unavailable"
+        else:
+            market_size_native, market_size_krw, market_size_basis = size_info
     else:
-        size_info = resolve_market_size(stock, close, thresholds, size_cache)
         if size_info is None:
             return None, "market_size_unavailable"
         market_size_native, market_size_krw, market_size_basis = size_info
@@ -997,7 +1040,9 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
             if idx % 20 == 0 or idx == len(top_items):
                 print(f"[{category}] backtest {idx}/{len(top_items)}")
 
-    # Sector / ETF size enrichment is also limited to displayed cards and cached.
+    # Sector enrichment remains limited to the cards used for expensive backtest
+    # display metadata. ETF size itself is already collected for the full universe
+    # during analyze_prepared so market-cap/AUM filtering works beyond TOP20.
     print(f"[{category}] display metadata enrichment: top {len(top_items):,}")
     for idx, item in enumerate(top_items, 1):
         stock = by_ticker.get(item["ticker"])

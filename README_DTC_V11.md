@@ -11,7 +11,7 @@ Browser tab: `Dongtan Trading Center (DTC)`
 Each stock card is permanently split into two panes:
 
 - Left: name + ticker, score, sector, market size, current price/day change, one latest-news headline, 60-day backtest expectation.
-- Right: one-year price chart with Bollinger Bands and the 40/60/120/200D dominant volume-zone center lines.
+- Right: three-month price chart with Bollinger Bands and the 40/60/120/200D dominant volume-zone center lines.
 - Clicking the score opens the five-part score breakdown without cluttering the card.
 
 ## Unified score (100)
@@ -49,7 +49,7 @@ This follows the earlier DTC interpretation of a 7-zone supply/volume profile: t
 - Historical signal window: most recent 252 eligible trading days.
 - Cooldown: 10 trading days between signals for the same stock.
 - Card metric: average 60-day return across those historical signals.
-- FULL recalculates the backtest for the displayed TOP100; QUICK refreshes current score and preserves the last FULL backtest.
+- FULL recalculates the backtest for the backtested TOP100; QUICK refreshes current score and preserves the last FULL backtest.
 
 ## Universe rules retained
 
@@ -76,3 +76,12 @@ Because the data schema and score model changed, run once with:
 `ALL + FULL`
 
 After that, scheduled QUICK/FULL refreshes can continue normally.
+
+
+## UI update 2026-08-20
+
+- Main market buttons are enlarged and labeled only 국장 / 국장ETF / 미장 / 미장ETF.
+- The normal list shows only TOP20 by score; search still covers the full eligible summary universe.
+- Market-size filters: 10T / 50T / 100T / 500T / 1000T KRW, default 100T.
+- ETF size uses total assets (AUM) when available, with market cap as fallback. ETFs remain exempt from the scanner's hard 10T eligibility rule.
+- Card charts display the most recent ~3 trading months (63 sessions).

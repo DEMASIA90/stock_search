@@ -13,12 +13,15 @@ const DATA_BASE = location.hostname.endsWith('github.io')
   : '.';
 const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();
 const NEWS_CACHE_MS = 5 * 60 * 1000;
-const DEFAULT_TOP_N = 100;
+const DEFAULT_TOP_N = 20;
+const DEFAULT_MARKET_CAP_MIN = 100_000_000_000_000;
+const CHART_TRADING_DAYS = 63;
 
 const state = {
   category: 'KR',
   data: { KR:null, KR_ETF:null, US:null, US_ETF:null },
   query: '',
+  marketCapMin: DEFAULT_MARKET_CAP_MIN,
   filtered: [],
   detailCache: new Map(),
   newsCache: new Map(),
@@ -113,14 +116,20 @@ async function ensureDetail(stock, force=false) {
 function filterItems() {
   const items = currentData()?.items || [];
   const q = state.query.trim().toLowerCase();
+  const capMin = Number(state.marketCapMin) || DEFAULT_MARKET_CAP_MIN;
+  const capMatched = items.filter((s) => {
+    const cap = Number(s.market_size_krw);
+    return Number.isFinite(cap) && cap >= capMin;
+  });
   const matched = q
-    ? items.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.sector || ''}`.toLowerCase().includes(q))
-    : items.slice(0, DEFAULT_TOP_N);
+    ? capMatched.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.sector || ''}`.toLowerCase().includes(q))
+    : capMatched.slice(0, DEFAULT_TOP_N);
   state.filtered = [...matched].sort((a, b) => {
     const ar = Number(a.rank), br = Number(b.rank);
     if (Number.isFinite(ar) && Number.isFinite(br)) return ar - br;
     return scoreValue(b) - scoreValue(a);
   });
+  return { totalCapMatched: capMatched.length };
 }
 
 function backtestLine(stock) {
@@ -161,27 +170,26 @@ function stockCard(stock) {
 
     <section class="stock-chart-pane">
       <div class="inline-chart" data-chart-box>
-        <div class="chart-loading">1Y CHART</div>
+        <div class="chart-loading">3M CHART</div>
       </div>
     </section>
   </article>`;
 }
 
 function renderList() {
-  filterItems();
+  const { totalCapMatched } = filterItems();
   const list = $('#stockList');
   list.innerHTML = state.filtered.length
     ? state.filtered.map(stockCard).join('')
-    : '<div class="empty-state">검색 결과가 없습니다.</div>';
+    : '<div class="empty-state">선택한 시총 기준의 검색 결과가 없습니다.</div>';
   $('#resultCount').textContent = state.query
     ? `${state.filtered.length.toLocaleString()}개`
-    : `TOP ${state.filtered.length.toLocaleString()}`;
+    : `TOP ${Math.min(DEFAULT_TOP_N, totalCapMatched).toLocaleString()} / ${totalCapMatched.toLocaleString()}개`;
   activateLazyCards();
 }
 
 function renderMeta() {
   const data = currentData();
-  $('#categoryTitle').textContent = `${CATEGORY[state.category].short} TOP100`;
   if (!data) {
     $('#marketDate').textContent = '—';
     $('#coverage').textContent = '—';
@@ -206,7 +214,7 @@ function chartRows(detail) {
     mid: Number(c.m?.[i]),
     upper: Number(c.u?.[i]),
     lower: Number(c.l?.[i]),
-  })).filter((x) => Number.isFinite(x.close));
+  })).filter((x) => Number.isFinite(x.close)).slice(-CHART_TRADING_DAYS);
 }
 
 function drawChart(el, detail) {
@@ -257,7 +265,7 @@ function drawChart(el, detail) {
   const dates = [0, Math.floor((data.length - 1)/2), data.length - 1].map((i) => ({ i, label:data[i]?.date?.slice(5) || '' }));
   const dateSvg = dates.map((d) => `<text x="${X(d.i)}" y="${H-6}" text-anchor="${d.i===0?'start':d.i===data.length-1?'end':'middle'}" class="date-axis">${escapeHtml(d.label)}</text>`).join('');
 
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="1년 가격 차트">
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="3개월 가격 차트">
     ${grid}
     <polygon points="${poly}" class="bb-fill"/>
     <path d="${path('upper')}" class="bb-edge"/>
@@ -446,6 +454,16 @@ async function switchCategory(category, force=false) {
 $('#marketTabs').addEventListener('click', (e) => {
   const b = e.target.closest('.market-tab');
   if (b) void switchCategory(b.dataset.category);
+});
+
+$('#capFilterTabs').addEventListener('click', (e) => {
+  const b = e.target.closest('.cap-filter');
+  if (!b) return;
+  const cap = Number(b.dataset.cap);
+  if (!Number.isFinite(cap) || cap <= 0) return;
+  state.marketCapMin = cap;
+  $$('.cap-filter').forEach((button) => button.classList.toggle('active', button === b));
+  renderList();
 });
 
 let searchTimer;
