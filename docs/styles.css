@@ -111,3 +111,11 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+
+/* PWA install controls */
+.top-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.install-pwa-btn{height:40px;border:1px solid rgba(93,225,255,.38);border-radius:11px;background:linear-gradient(135deg,#173043,#10212e);color:#dff9ff;padding:0 15px;font-size:12px;font-weight:850;letter-spacing:-.1px;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(93,225,255,.06)}
+.install-pwa-btn:hover{border-color:rgba(93,225,255,.70);filter:brightness(1.08)}
+.install-pwa-btn[hidden]{display:none!important}
+@media (max-width:560px){.top-actions{gap:5px}.install-pwa-btn{height:36px;padding:0 10px;font-size:10.5px;border-radius:10px}}

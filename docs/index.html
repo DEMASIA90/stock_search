@@ -5,9 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#080b12" />
   <meta name="color-scheme" content="dark" />
-  <meta name="dtc-ui-build" content="20260820-v11_3" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="DTC" />
+  <meta name="dtc-ui-build" content="20260821-v11_4" />
   <title>Dongtan Trading Center (DTC)</title>
-  <link rel="stylesheet" href="./styles.css?v=20260820-v11_3" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="./styles.css?v=20260821-v11_4" />
 </head>
 <body>
   <div class="shell">
@@ -19,7 +26,10 @@
           <small>모든 투자의 책임은 사실 다른 투자자에게 있습니다.</small>
         </div>
       </a>
-      <button id="reloadBtn" class="icon-btn" type="button" aria-label="새로고침">↻</button>
+      <div class="top-actions">
+        <button id="installPwaBtn" class="install-pwa-btn" type="button" hidden>앱 설치</button>
+        <button id="reloadBtn" class="icon-btn" type="button" aria-label="새로고침">↻</button>
+      </div>
     </header>
 
     <main>
@@ -75,7 +85,8 @@
     </section>
   </div>
 
-  <script src="./news-config.js?v=20260820-v11_3"></script>
-  <script src="./app.js?v=20260820-v11_3"></script>
+  <script src="./news-config.js?v=20260821-v11_4"></script>
+  <script src="./app.js?v=20260821-v11_4"></script>
+  <script src="./pwa.js?v=20260821-v11_4"></script>
 </body>
 </html>
