@@ -250,14 +250,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260820-v11_2",
+            "ui_build": "20260820-v11_3",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260820-v11_2"
+          echo "UI build: 20260820-v11_3"
           cat docs/build-info.json
 
       - name: Build lightweight GitHub Pages fallback
