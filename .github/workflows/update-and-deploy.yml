@@ -18,7 +18,7 @@ on:
           - US_GROUP
           - UI_ONLY
       scan_mode:
-        description: FULL recalculates 60D backtests; QUICK updates current scores only
+        description: FULL recalculates all eligible 60D backtests; QUICK reuses the last FULL result
         required: true
         default: FULL
         type: choice
@@ -66,7 +66,7 @@ jobs:
   build:
     name: Build ephemeral market data
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     outputs:
       market: ${{ steps.market.outputs.market }}
       scan_mode: ${{ steps.market.outputs.scan_mode }}
@@ -80,20 +80,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v11.0 source files..."
+          echo "Checking DTC v11.2 source files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' scanner.py || {
-            echo "::error::scanner.py is not DTC v11.0"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' scanner.py || {
+            echo "::error::scanner.py is not DTC v11.2"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not DTC v11.0"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not DTC v11.2"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' universe.py || {
-            echo "::error::universe.py is not DTC v11.0. Replace the repository-root file named exactly universe.py."
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' universe.py || {
+            echo "::error::universe.py is not DTC v11.2. Replace the repository-root file named exactly universe.py."
             exit 1
           }
 
@@ -107,9 +107,9 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v11.0"
-          echo "hydrate_data.py: v11.0"
-          echo "universe.py: v11.0"
+          echo "scanner.py: v11.2"
+          echo "hydrate_data.py: v11.2"
+          echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
 
       - name: Resolve refresh market and scan mode
@@ -188,7 +188,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v11.0 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v11.2 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -250,14 +250,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260820-v11_1",
+            "ui_build": "20260820-v11_2",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260820-v11_1"
+          echo "UI build: 20260820-v11_2"
           cat docs/build-info.json
 
       - name: Build lightweight GitHub Pages fallback
