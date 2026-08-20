@@ -250,14 +250,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260820-v11_3",
+            "ui_build": "20260821-v11_4",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260820-v11_3"
+          echo "UI build: 20260821-v11_4"
           cat docs/build-info.json
 
       - name: Build lightweight GitHub Pages fallback
@@ -265,7 +265,8 @@ jobs:
         run: |
           rm -rf pages-lite
           mkdir -p pages-lite
-          cp docs/index.html docs/app.js docs/styles.css docs/news-config.js docs/build-info.json pages-lite/
+          cp docs/index.html docs/app.js docs/styles.css docs/news-config.js docs/pwa.js docs/sw.js docs/manifest.webmanifest docs/build-info.json pages-lite/
+          cp -R docs/icons pages-lite/icons
           touch pages-lite/.nojekyll
 
       - name: Configure GitHub Pages
