@@ -1,4 +1,6 @@
-# DTC v11.2
+# DTC v11.3
+
+> Scanner/backtest component version remains `11.2`; v11.3 adds the Android/Capacitor build layer and deployment fixes without changing the scoring algorithm.
 
 ## UI
 

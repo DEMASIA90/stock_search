@@ -8,7 +8,8 @@ const CATEGORY = {
   US_ETF: { short: '미장 ETF', dir: 'us-etf' },
 };
 
-const DATA_BASE = location.hostname.endsWith('github.io')
+const IS_ANDROID_APP = location.hostname === 'localhost' || location.protocol === 'capacitor:';
+const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP)
   ? 'https://morninginv.web.app'
   : '.';
 const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();

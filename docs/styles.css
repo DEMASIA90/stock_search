@@ -103,3 +103,11 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 @media (max-width:560px){
   .shell{padding-left:8px;padding-right:8px}.market-tab{flex-basis:112px;min-height:50px;padding:13px 18px;font-size:14px}.cap-filter{min-height:32px;padding:6px 10px;font-size:10px}.summary-meta{display:none}.search-row{margin-bottom:11px}.stock-list{gap:8px}.stock-card{grid-template-columns:minmax(0,60%) minmax(0,40%);min-height:192px}.stock-info-pane{padding:13px 10px 11px}.stock-headline-row h2{font-size:14.5px;max-width:calc(100% - 47px)}.score-pill{min-width:44px;height:34px;font-size:13px;padding:0 5px}.stock-meta-line{font-size:8.7px;margin-top:8px}.stock-meta-line i{display:none}.stock-meta-line span{width:100%}.news-one-line{font-size:9.2px}.backtest-one-line{font-size:8.8px}.inline-chart{height:174px}.profile-label{display:none}.modal{padding:10px}.score-detail-body{padding:13px}.modal-head{padding:15px}.score-total{padding:14px}.score-total b{font-size:30px}
 }
+
+/* Android / installed-webview safe areas */
+@supports (padding: max(0px)) {
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

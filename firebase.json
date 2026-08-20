@@ -8,11 +8,11 @@
     ],
     "headers": [
       {
-        "source": "/data/**",
+        "source": "/build-info.json",
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "no-cache, must-revalidate"
+            "value": "no-store, max-age=0"
           },
           {
             "key": "Access-Control-Allow-Origin",
@@ -21,47 +21,15 @@
         ]
       },
       {
-        "source": "/index.html",
+        "source": "/data/**",
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate"
-          }
-        ]
-      },
-      {
-        "source": "/app.js",
-        "headers": [
+            "value": "public, max-age=300"
+          },
           {
-            "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate"
-          }
-        ]
-      },
-      {
-        "source": "/styles.css",
-        "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate"
-          }
-        ]
-      },
-      {
-        "source": "/build-info.json",
-        "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate"
-          }
-        ]
-      },
-      {
-        "source": "/news-config.js",
-        "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate, max-age=0"
+            "key": "Access-Control-Allow-Origin",
+            "value": "*"
           }
         ]
       }
