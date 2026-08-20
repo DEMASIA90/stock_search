@@ -1,14 +1,14 @@
-# Morning Invest
+# Dongtan Trading Center (DTC)
 
-Current strategy: **v8.3**
+Static stock scanner deployed from GitHub Actions to Firebase Hosting.
 
-Raw score max: **3.5**. Web display score is normalized to **100.0 points**.
+## Current scanner
 
-- ① Bollinger %B: 1.0
-- ② 200-session upper-band Swing: 0.5
-- ③ Monthly PSAR: 0.5 (active current month included)
-- ④ Daily Heikin-Ashi reversal: 1.0 (20 bearish days before reversal = full score)
-- ⑤ Positive MA60 slope: 0.5
+- One unified 100-point score. There is no longer a `싼게 좋아` / `오르는게 좋아` mode.
+- Bollinger lower-band proximity: 0~20 points.
+- 40/60/120/200 trading-day 7-zone volume profiles: +20 points each when the current close is inside that lookback's dominant (highest-volume) zone.
+- One-year chart: price + Bollinger Bands + the four dominant volume-zone center lines.
+- Backtest: historical score >=60, next-session open entry, 60 trading-day close exit.
+- ETF universe is restricted to the user-supplied whitelist in `etf_tickers.json` (KR 300 / US 500).
 
-Backtest: maximum past 1 trading year, raw score >= 1.0, next-session open entry, 10-session cooldown.
-KR/US equities: KRW 10T+ market cap. US ETFs: market-size filter exempt.
+See `README_DTC_V11.md` for implementation details.

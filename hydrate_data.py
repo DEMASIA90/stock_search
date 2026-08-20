@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "9.3R"
+MORNING_INVEST_COMPONENT_VERSION = "11.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
