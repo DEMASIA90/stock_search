@@ -1,4 +1,4 @@
-name: Morning Invest · Build & Deploy
+name: Dongtan Trading Center · Build & Deploy
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ on:
           - US_GROUP
           - UI_ONLY
       scan_mode:
-        description: FULL recalculates backtests; QUICK updates current scores only
+        description: FULL recalculates 60D backtests; QUICK updates current scores only
         required: true
         default: FULL
         type: choice
@@ -80,20 +80,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking v9.3R source files..."
+          echo "Checking DTC v11.0 source files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.3R"' scanner.py || {
-            echo "::error::scanner.py is not Morning Invest v9.3R"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' scanner.py || {
+            echo "::error::scanner.py is not DTC v11.0"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.3R"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not Morning Invest v9.3R"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not DTC v11.0"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "9.3R"' universe.py || {
-            echo "::error::universe.py is not Morning Invest v9.3R. Replace the repository-root file named exactly universe.py."
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.0"' universe.py || {
+            echo "::error::universe.py is not DTC v11.0. Replace the repository-root file named exactly universe.py."
             exit 1
           }
 
@@ -107,9 +107,9 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v9.3R"
-          echo "hydrate_data.py: v9.3R"
-          echo "universe.py: v9.3R"
+          echo "scanner.py: v11.0"
+          echo "hydrate_data.py: v11.0"
+          echo "universe.py: v11.0"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
 
       - name: Resolve refresh market and scan mode
@@ -188,7 +188,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running Morning Invest v9.3R | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v11.0 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
