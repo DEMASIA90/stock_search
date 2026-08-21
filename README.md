@@ -1,7 +1,7 @@
 # DTC v11.8 · PWA + Android
 
 Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installable PWA, Android Capacitor wrapper, and chart-reconstruction Quiz mode.
-
+aa
 ## Scanner v11.8
 
 - Current setup score: **0~10** and ranking is by this current setup score only.
