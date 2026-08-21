@@ -829,52 +829,92 @@ function quizPrepareOption(raw, displayStart) {
   };
 }
 
-function quizBridgePattern(source, target, hiddenPart, volatilityScale=1) {
-  if (!source?.length || !target?.length || source.length !== target.length) return null;
-  if (source.some(v => !Number.isFinite(v) || v <= 0)) return null;
-  const logs = source.map(Math.log);
-  const srcVol=quizDailyVol(source);
-  const targetVol=quizDailyVol(target);
-  const scale=srcVol>1e-9 ? Math.max(.25,Math.min(1.8,targetVol/srcVol*volatilityScale)) : 1;
 
-  if(hiddenPart===0){
-    // First third: only the right edge is observable. Preserve a plausible real
-    // total move so the hidden starting level is not leaked by every option.
-    const anchor=Math.log(target[target.length-1]);
-    const srcAnchor=logs[logs.length-1];
-    return logs.map(v=>Math.exp(anchor+(v-srcAnchor)*scale));
-  }
-  if(hiddenPart===2){
-    // Last third: only the left edge is observable. Let the possible final price
-    // vary with the real donor pattern rather than leaking the true endpoint.
-    const anchor=Math.log(target[0]);
-    const srcAnchor=logs[0];
-    return logs.map(v=>Math.exp(anchor+(v-srcAnchor)*scale));
-  }
+function quizFastDistractorSeries(correctValues, targetEndMultiplier, variant) {
+  if (!correctValues?.length || correctValues.some(v => !Number.isFinite(v) || v <= 0)) return null;
+  const n = correctValues.length;
+  const start = Number(correctValues[0]);
+  const correctEnd = Number(correctValues[n - 1]);
+  if (!(start > 0) || !(correctEnd > 0)) return null;
+  const targetEnd = correctEnd * targetEndMultiplier;
+  if (!(targetEnd > 0)) return null;
 
-  // Middle third: both adjacent visible sections constrain the endpoints. Remove
-  // the donor trend and bridge its residual shape between the real endpoints.
-  const srcA=logs[0], srcB=logs[logs.length-1];
-  const targetA=Math.log(target[0]), targetB=Math.log(target[target.length-1]);
-  const residual=logs.map((v,i)=>v-(srcA+(srcB-srcA)*i/(logs.length-1)));
-  return residual.map((r,i)=>Math.exp(targetA+(targetB-targetA)*i/(logs.length-1)+r*scale));
+  // Anchor every option at exactly the same first close.  The endpoint is chosen
+  // separately, while the interior shape is a bounded market-like residual.
+  const logStart = Math.log(start);
+  const logEnd = Math.log(targetEnd);
+  const dailyVol = Math.max(0.008, Math.min(0.045, quizDailyVol(correctValues) || 0.018));
+  const amp = Math.max(0.045, Math.min(0.14, dailyVol * Math.sqrt(n) * 0.95));
+  const sig = quizResidualSignature(correctValues);
+  const out = [];
+  for (let i=0;i<n;i++) {
+    const x = i / Math.max(1, n - 1);
+    const trend = logStart + (logEnd - logStart) * x;
+    let shape = 0;
+    if (variant === 0) {
+      // selloff -> recovery
+      shape = -amp * Math.sin(Math.PI * x) + 0.30 * amp * Math.sin(3 * Math.PI * x);
+    } else if (variant === 1) {
+      // early rally -> fade
+      shape = 0.98 * amp * Math.sin(Math.PI * x) - 0.36 * amp * Math.sin(2 * Math.PI * x);
+    } else if (variant === 2) {
+      // two-leg whipsaw
+      shape = 0.80 * amp * Math.sin(2 * Math.PI * x) + 0.34 * amp * Math.sin(5 * Math.PI * x);
+    } else if (variant === 3) {
+      // late breakout: weak first half, acceleration into the finish
+      shape = -0.55 * amp * Math.sin(Math.PI * x) + 0.72 * amp * Math.sin(Math.PI * Math.pow(x, 1.8));
+    } else if (variant === 4) {
+      // late breakdown: strong first half, sharp fade late
+      shape = 0.62 * amp * Math.sin(Math.PI * x) - 0.78 * amp * Math.sin(Math.PI * Math.pow(1 - x, 1.7));
+    } else {
+      // range / W-shape
+      shape = -0.62 * amp * Math.sin(3 * Math.PI * x) + 0.28 * amp * Math.sin(6 * Math.PI * x);
+    }
+    const src = sig.length === n ? sig[(variant === 0 ? n - 1 - i : (i * (variant + 2)) % n)] : 0;
+    const taper = Math.sin(Math.PI * x); // exactly zero at both edges
+    const micro = Number.isFinite(src) ? src * dailyVol * 0.20 * taper : 0;
+    out.push(Math.exp(trend + shape + micro));
+  }
+  out[0] = start;
+  out[n - 1] = targetEnd;
+  return out;
 }
 
+function quizBuildFastOptions(correctSeries, correctRawCandles, displayStartValue) {
+  const displayStart = Number(displayStartValue);
+  if (!(displayStart > 0)) return null;
+  const correct = quizPrepareOption({ closes:correctSeries, candles:correctRawCandles }, displayStart);
+  if (!correct) return null;
 
-async function quizRealSegment(pool, length=QUIZ_HIDDEN_DAYS) {
-  for (let attempt=0; attempt<30; attempt++) {
-    const entry = quizPickEntry(pool);
-    if (!entry) continue;
-    let stock;
-    try { stock = await ensureQuizStock(entry); } catch (_) { continue; }
-    const n = stock?.c?.length || 0;
-    if (n < length + 1) continue;
-    const start = quizRandomInt(0, n-length);
-    const rows = quizRows(stock, start, length);
-    const closes = rows.map(r => r.close);
-    if (rows.length === length && closes.every(v => Number.isFinite(v) && v > 0)) return { rows, closes };
+  // Endpoints are intentionally separated by >=10%. For each endpoint, choose
+  // the shape template that is farthest from the real path and already-selected
+  // distractors. This is CPU-only and normally completes in a few milliseconds.
+  const multipliers = [0.76, 0.88, 1.14];
+  const distractors = [];
+  for (const mult of multipliers) {
+    let best = null;
+    let bestScore = -Infinity;
+    for (let variant=0; variant<6; variant++) {
+      const closes = quizFastDistractorSeries(correctSeries, mult, variant);
+      if (!closes) continue;
+      const candles = quizTransformCandles(correctRawCandles, closes);
+      const prepared = quizPrepareOption({ closes, candles }, displayStart);
+      if (!prepared) continue;
+      const comparisons = [correct, ...distractors];
+      const minShapeDistance = Math.min(...comparisons.map(x => quizShapeDistance(prepared.closes, x.closes)));
+      if (minShapeDistance > bestScore) {
+        bestScore = minShapeDistance;
+        best = prepared;
+      }
+    }
+    if (!best) return null;
+    distractors.push(best);
   }
-  return null;
+
+  const all = [correct, ...distractors];
+  const endsOK = all.every((opt, i) => all.every((other, j) => i === j || quizEndGapRatio(opt.closes, other.closes) >= 0.10));
+  if (!endsOK) return null;
+  return { correct, distractors };
 }
 
 function quizTransformCandles(sourceRows, transformedCloses) {
@@ -896,7 +936,9 @@ function quizTransformCandles(sourceRows, transformedCloses) {
 }
 
 async function buildQuizQuestion(pool) {
-  for (let attempt=0; attempt<120; attempt++) {
+  // Fast path: one stock JSON fetch per question.  No repeated donor-stock
+  // network search is required to manufacture the three distractors.
+  for (let attempt=0; attempt<24; attempt++) {
     const entry = quizPickEntry(pool);
     if (!entry) continue;
     let stock;
@@ -906,46 +948,30 @@ async function buildQuizQuestion(pool) {
     const start = quizRandomInt(19, n - QUIZ_WINDOW_DAYS);
     const rows = quizRows(stock, start);
     if (rows.length !== QUIZ_WINDOW_DAYS) continue;
-    const hiddenPart = quizRandomInt(0, 2);
-    const hiddenStart = hiddenPart * QUIZ_HIDDEN_DAYS;
-    const hiddenEnd = hiddenStart + QUIZ_HIDDEN_DAYS;
+
+    // Quiz is always "predict the next 30 trading days": show D1-D60 and hide D61-D90.
+    const hiddenPart = 2;
+    const hiddenStart = 60;
+    const hiddenEnd = 90;
     const correctSeries = rows.slice(hiddenStart, hiddenEnd).map(r => r.close);
     if (correctSeries.some(v => !Number.isFinite(v) || v <= 0)) continue;
-
-    const displayStart = Number(correctSeries[0]);
     const correctRawCandles = rows.slice(hiddenStart, hiddenEnd).map(r => ({open:r.open, high:r.high, low:r.low, close:r.close}));
-    const correctPrepared = quizPrepareOption({ closes:correctSeries, candles:correctRawCandles }, displayStart);
-    if (!correctPrepared) continue;
-
-    const distractors = [];
-    for (let dAttempt=0; dAttempt<260 && distractors.length<3; dAttempt++) {
-      const donor = await quizRealSegment(pool);
-      if (!donor) continue;
-      const bridged = quizBridgePattern(donor.closes, correctSeries, hiddenPart, 0.72 + Math.random()*0.45);
-      if (!bridged) continue;
-      const rawCandles = quizTransformCandles(donor.rows, bridged);
-      const prepared = quizPrepareOption({ closes:bridged, candles:rawCandles }, displayStart);
-      if (!prepared) continue;
-      if (!(quizShapeDistance(prepared.closes, correctPrepared.closes) > 0.9)) continue;
-      if (!(quizEndGapRatio(prepared.closes, correctPrepared.closes) >= 0.10)) continue;
-      if (distractors.some(x => quizSeriesSimilarity(x.closes, prepared.closes) < 1.05 || quizEndGapRatio(x.closes, prepared.closes) < 0.10)) continue;
-      distractors.push(prepared);
-    }
-    if (distractors.length < 3) continue;
+    const visibleAnchor = Number(rows[hiddenStart - 1]?.close);
+    const built = quizBuildFastOptions(correctSeries, correctRawCandles, visibleAnchor);
+    if (!built) continue;
 
     const correctIndex = quizRandomInt(0, 3);
     const options = [];
     let di = 0;
-    for (let i=0;i<4;i++) options.push(i === correctIndex ? correctPrepared : distractors[di++]);
-    const pairwiseEndsOK = options.every((opt, i) => options.every((other, j) => i === j || quizEndGapRatio(opt.closes, other.closes) >= 0.10));
-    const pairwiseShapesOK = options.every((opt, i) => options.every((other, j) => i === j || quizShapeDistance(opt.closes, other.closes) > 0.85));
-    if (!pairwiseEndsOK || !pairwiseShapesOK) continue;
+    for (let i=0;i<4;i++) options.push(i === correctIndex ? built.correct : built.distractors[di++]);
+
     return {
       entry,
       stock,
       rows,
       bb:quizBollinger(stock, start),
-      profile:quizVolumeProfile(rows),
+      // Volume profile is intentionally calculated ONLY from the visible D1-D60.
+      profile:quizVolumeProfile(rows.slice(0, hiddenStart)),
       start,
       hiddenPart,
       hiddenStart,
@@ -1007,10 +1033,10 @@ function renderQuizMainChart(question, answered=false) {
   const W=1000,H=430,pad={l:18,r:72,t:22,b:32};
   const vals = rows.flatMap((r,i)=>[r.low,r.high,bb[i]?.lower,bb[i]?.upper]).filter(Number.isFinite);
   let lo=Math.min(...vals), hi=Math.max(...vals);
-  if (preview?.rawCandles?.length) {
-    preview.rawCandles.forEach((r) => { vals.push(r.low, r.high); });
-    lo = Math.min(lo, ...preview.rawCandles.map((r) => r.low));
-    hi = Math.max(hi, ...preview.rawCandles.map((r) => r.high));
+  if (preview?.candles?.length) {
+    preview.candles.forEach((r) => { vals.push(r.low, r.high); });
+    lo = Math.min(lo, ...preview.candles.map((r) => r.low));
+    hi = Math.max(hi, ...preview.candles.map((r) => r.high));
   }
   if (!(hi>lo)) { lo*=.99; hi*=1.01; }
   const extra=(hi-lo)*.055; lo-=extra; hi+=extra;
@@ -1034,13 +1060,14 @@ function renderQuizMainChart(question, answered=false) {
   let profileSvg='';
   if(profile){
     const maxWidth=plotW*.23;
-    const current=rows[rows.length-1].close;
-    const currentBin=Math.max(0,Math.min(9,Math.floor((current-profile.pmin)/(profile.pmax-profile.pmin)*10)));
+    const visibleCurrent=rows[Math.max(0, hiddenStart - 1)]?.close;
+    const currentBin=Math.max(0,Math.min(9,Math.floor((visibleCurrent-profile.pmin)/(profile.pmax-profile.pmin)*10)));
     for(let b=0;b<10;b++){
       const y1=Y(profile.edges[b+1]), y2=Y(profile.edges[b]);
       const barH=Math.max(1,Math.abs(y2-y1)-1);
       const bw=maxWidth*(profile.values[b]/profile.max);
-      profileSvg+=`<rect x="${W-pad.r-bw}" y="${Math.min(y1,y2)+.5}" width="${bw}" height="${barH}" class="quiz-profile-bar${b===currentBin?' current':''}"/>`;
+      // Left-side volume profile: it stays entirely inside the visible 2/3 zone.
+      profileSvg+=`<rect x="${pad.l}" y="${Math.min(y1,y2)+.5}" width="${bw}" height="${barH}" class="quiz-profile-bar${b===currentBin?' current':''}"/>`;
     }
   }
 
@@ -1066,10 +1093,10 @@ function renderQuizMainChart(question, answered=false) {
   });
 
   let previewSvg='';
-  if (preview?.rawCandles?.length) {
-    const rawCloses = preview.rawCloses || [];
+  if (preview?.candles?.length) {
+    const previewCloses = preview.closes || [];
     previewSvg += `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-preview-zone"/>`;
-    preview.rawCandles.forEach((r, localIndex) => {
+    preview.candles.forEach((r, localIndex) => {
       if (![r.open,r.high,r.low,r.close].every(Number.isFinite)) return;
       const i = hiddenStart + localIndex;
       const x = X(i), yo = Y(r.open), yc = Y(r.close), yh = Y(r.high), yl = Y(r.low);
@@ -1078,7 +1105,7 @@ function renderQuizMainChart(question, answered=false) {
       const top = Math.min(yo, yc), bh = Math.max(1.4, Math.abs(yc - yo));
       previewSvg += `<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-preview-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="quiz-preview-body ${klass}" rx=".5"/>`;
     });
-    const previewPath = rawCloses.length ? quizPath(rawCloses, (idx) => X(hiddenStart + idx), Y) : '';
+    const previewPath = previewCloses.length ? quizPath(previewCloses, (idx) => X(hiddenStart + idx), Y) : '';
     if (previewPath) previewSvg += `<path d="${previewPath}" class="quiz-preview-line"/>`;
   }
 
@@ -1097,7 +1124,7 @@ function renderQuizMainChart(question, answered=false) {
     ${grid}
     <path d="${bbPath('upper')}" class="quiz-bb-line"/><path d="${bbPath('lower')}" class="quiz-bb-line"/><path d="${bbPath('mid')}" class="quiz-bb-mid"/>
     ${candles}${hiddenOverlay}${previewSvg}${profileSvg}${dates}
-  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>90D 10-ZONE VOLUME PROFILE</span></div>`;
+  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>VISIBLE 60D · 10-ZONE PROFILE</span></div>`;
 }
 
 function renderQuizQuestion() {
@@ -1109,15 +1136,12 @@ function renderQuizQuestion() {
   $('#quizIdentity').textContent=state.quiz.answered
     ? `${q.stock.name} (${q.stock.symbol || q.stock.ticker}) · ${q.rows[0].date} ~ ${q.rows[q.rows.length-1].date}`
     : '종목 · 기간 비공개';
-  const labels=['앞 1/3','중간 1/3','뒤 1/3'];
-  $('#quizSegmentLabel').textContent=`${labels[q.hiddenPart]} · 30거래일 가림`;
+  $('#quizSegmentLabel').textContent='마지막 1/3 · 다음 30거래일 가림';
   const instruction=$('#quizInstructionSub');
   if(instruction){
     instruction.textContent=state.quiz.answered
-      ? '제출 후 실제 정답 캔들과 정답 여부를 공개합니다.'
-      : (q.hiddenPart===1
-        ? '보기를 누르면 가려진 구간에 해당 패턴이 먼저 채워집니다. 이후 정답 제출을 눌러 확인하세요.'
-        : '보기를 누르면 빈 구간에 후보 패턴을 미리 넣어볼 수 있습니다. 이후 정답 제출을 눌러 확인하세요.');
+      ? '제출 후 실제 다음 30거래일 캔들과 정답 여부를 공개합니다.'
+      : '앞 60거래일을 보고 다음 30거래일을 예측하세요. 보기를 누르면 후보가 빈 구간에 먼저 채워집니다.';
   }
   renderQuizMainChart(q,state.quiz.answered);
   $('#quizChoices').innerHTML=q.options.map((option,i)=>renderQuizOption(option,i,q.correctIndex,q.selectedIndex,state.quiz.answered)).join('');
@@ -1148,7 +1172,7 @@ async function newQuizQuestion(forcePool=false) {
   const btn=$('#newQuizBtn');
   if(btn){btn.disabled=true;btn.textContent='문제 생성 중';}
   $('#quizStatus').hidden=false;
-  $('#quizStatus').textContent='100조 이상 종목의 과거 차트를 불러오는 중입니다.';
+  $('#quizStatus').textContent='100조 이상 종목의 90거래일 차트를 불러오는 중입니다.';
   $('#quizGame').hidden=true;
   try{
     const pool=await ensureQuizPool(forcePool);

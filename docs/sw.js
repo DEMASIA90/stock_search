@@ -1,14 +1,14 @@
-const CACHE_NAME = 'dtc-pwa-v11-10-shell';
+const CACHE_NAME = 'dtc-pwa-v11-11-shell';
 const SHELL_FILES = [
   './',
   './index.html',
-  './styles.css?v=20260821-v11_10',
-  './runtime-config.js?v=20260821-v11_10',
-  './app.js?v=20260821-v11_10',
-  './news-config.js?v=20260821-v11_10',
-  './pwa.js?v=20260821-v11_10',
+  './styles.css?v=20260821-v11_11',
+  './runtime-config.js?v=20260821-v11_11',
+  './app.js?v=20260821-v11_11',
+  './news-config.js?v=20260821-v11_11',
+  './pwa.js?v=20260821-v11_11',
   './manifest.webmanifest',
-  './logo-dtc.svg?v=20260821-v11_10',
+  './logo-dtc.svg?v=20260821-v11_11',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-512-maskable.png'
