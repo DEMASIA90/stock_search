@@ -15,18 +15,48 @@ const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP)
 const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();
 const NEWS_CACHE_MS = 5 * 60 * 1000;
 const DEFAULT_TOP_N = 20;
-const DEFAULT_MARKET_CAP_MIN = 100_000_000_000_000;
+const DEFAULT_EQUITY_SIZE_MIN = 100_000_000_000_000;
+const DEFAULT_ETF_SIZE_MIN = 0;
+const CAP_FILTER_PRESETS = {
+  equity: [
+    [10_000_000_000_000, '10조 이상'],
+    [50_000_000_000_000, '50조 이상'],
+    [100_000_000_000_000, '100조 이상'],
+    [500_000_000_000_000, '500조 이상'],
+    [1_000_000_000_000_000, '1000조 이상'],
+  ],
+  etf: [
+    [0, '전체'],
+    [100_000_000_000, '0.1조 이상'],
+    [500_000_000_000, '0.5조 이상'],
+    [1_000_000_000_000, '1조 이상'],
+    [5_000_000_000_000, '5조 이상'],
+  ],
+};
 const CHART_TRADING_DAYS = 63;
+const QUIZ_WINDOW_DAYS = 90;
+const QUIZ_HIDDEN_DAYS = 30;
+const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
+const QUIZ_SHARDS = ['kr', 'kr-etf', 'us', 'us-etf'];
 
 const state = {
+  mode: 'profile',
   category: 'KR',
   data: { KR:null, KR_ETF:null, US:null, US_ETF:null },
   query: '',
-  marketCapMin: DEFAULT_MARKET_CAP_MIN,
+  marketSizeMin: { equity: DEFAULT_EQUITY_SIZE_MIN, etf: DEFAULT_ETF_SIZE_MIN },
   filtered: [],
   detailCache: new Map(),
   newsCache: new Map(),
   cardObserver: null,
+  quiz: {
+    pool: null,
+    detailCache: new Map(),
+    question: null,
+    answered: false,
+    loading: false,
+    number: 0,
+  },
 };
 
 function escapeHtml(value) {
@@ -41,6 +71,57 @@ function dataUrl(path, force=false) {
 }
 
 function currentData() { return state.data[state.category]; }
+
+function switchAnalysisMode(mode) {
+  const next = ['profile', 'candle', 'quiz'].includes(mode) ? mode : 'profile';
+  state.mode = next;
+  const views = {
+    profile: $('#profileModeView'),
+    candle: $('#candleModeView'),
+    quiz: $('#quizModeView'),
+  };
+  Object.entries(views).forEach(([key, view]) => {
+    if (view) view.hidden = key !== next;
+  });
+  const select = $('#analysisMode');
+  if (select && select.value !== next) select.value = next;
+  document.body.dataset.analysisMode = next;
+  if (next === 'profile') {
+    requestAnimationFrame(() => activateLazyCards());
+  } else if (state.cardObserver) {
+    state.cardObserver.disconnect();
+  }
+}
+
+function isEtfCategory(category=state.category) {
+  return category === 'KR_ETF' || category === 'US_ETF';
+}
+
+function sizeFilterMode(category=state.category) {
+  return isEtfCategory(category) ? 'etf' : 'equity';
+}
+
+function currentSizeMin() {
+  const mode = sizeFilterMode();
+  const value = Number(state.marketSizeMin[mode]);
+  if (Number.isFinite(value) && value >= 0) return value;
+  return mode === 'etf' ? DEFAULT_ETF_SIZE_MIN : DEFAULT_EQUITY_SIZE_MIN;
+}
+
+function renderSizeFilters() {
+  const mode = sizeFilterMode();
+  const presets = CAP_FILTER_PRESETS[mode];
+  const activeValue = currentSizeMin();
+  const buttons = $$('.cap-filter');
+  buttons.forEach((button, i) => {
+    const [value, label] = presets[i];
+    button.dataset.cap = String(value);
+    button.textContent = label;
+    button.classList.toggle('active', Number(value) === activeValue);
+  });
+  const nav = $('#capFilterTabs');
+  if (nav) nav.setAttribute('aria-label', mode === 'etf' ? 'ETF 규모 필터' : '시가총액 필터');
+}
 
 function scoreValue(stock) {
   const n = Number(stock?.display_score ?? stock?.score);
@@ -117,8 +198,8 @@ async function ensureDetail(stock, force=false) {
 function filterItems() {
   const items = currentData()?.items || [];
   const q = state.query.trim().toLowerCase();
-  const capMin = Number(state.marketCapMin) || DEFAULT_MARKET_CAP_MIN;
-  const capMatched = items.filter((s) => {
+  const capMin = currentSizeMin();
+  const capMatched = capMin <= 0 ? items : items.filter((s) => {
     const cap = Number(s.market_size_krw);
     return Number.isFinite(cap) && cap >= capMin;
   });
@@ -133,16 +214,71 @@ function filterItems() {
   return { totalCapMatched: capMatched.length };
 }
 
+function marketSizeLabel(stock) {
+  return stock?.market_size_basis === 'total_assets' ? '순자산' : '시총';
+}
+
+function numericOrNaN(v) {
+  if (v == null || v === '') return Number.NaN;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+
+function signedPct(v, digits=1) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
+}
+
+function signalClass(kind, value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  if (kind === 'percentB') return n <= 0.25 ? 'signal-hot' : n >= 0.8 ? 'signal-cold' : '';
+  if (kind === 'rsi') return n >= 30 && n <= 45 ? 'signal-hot' : n >= 70 ? 'signal-cold' : '';
+  if (kind === 'highGap') return n >= 0 ? 'signal-hot' : n >= -3 ? 'signal-near' : '';
+  if (kind === 'volume') return n >= 1.5 ? 'signal-hot' : n >= 1.0 ? 'signal-near' : '';
+  return '';
+}
+
+function tradeSignalLines(stock) {
+  const signal = stock?.trade_signals || {};
+  const pb = signal.pullback || {};
+  const bo = signal.breakout || {};
+  const percentB = numericOrNaN(pb.percent_b);
+  const rsi = numericOrNaN(pb.rsi14);
+  const highGap = numericOrNaN(bo.high20_gap_pct);
+  const volumeRatio = numericOrNaN(bo.volume_ratio_20d);
+  const bbText = Number.isFinite(percentB) ? `${(percentB * 100).toFixed(0)}%` : '—';
+  const rsiText = Number.isFinite(rsi) ? rsi.toFixed(1) : '—';
+  const volumeText = Number.isFinite(volumeRatio) ? `${volumeRatio.toFixed(2)}x` : '—';
+  return `<div class="trade-signal-box">
+    <div class="trade-signal-row">
+      <span class="signal-title pullback">눌림목</span>
+      <span>BB %B <b class="${signalClass('percentB', percentB)}">${bbText}</b></span>
+      <i>·</i>
+      <span>RSI14 <b class="${signalClass('rsi', rsi)}">${rsiText}</b></span>
+    </div>
+    <div class="trade-signal-row">
+      <span class="signal-title breakout">돌파</span>
+      <span>20일고점 <b class="${signalClass('highGap', highGap)}">${signedPct(highGap)}</b></span>
+      <i>·</i>
+      <span>거래량 <b class="${signalClass('volume', volumeRatio)}">${volumeText}</b></span>
+    </div>
+  </div>`;
+}
+
 function backtestLine(stock) {
   const bt = stock?.backtest || {};
   if (!bt.available || bt.avg_60d == null) {
     const n = Number(bt.signals || 0);
-    return `백테스팅 결과: <b>60일 후 절사평균 기대수익 —</b> <small>· 유사사건 ${Number.isFinite(n) ? n : 0}건</small>`;
+    return `통합 백테스트: <b>동일 점수대 60일 평균 —</b> <small>· 비중첩 표본 ${Number.isFinite(n) ? n : 0}건 · 순위 미반영</small>`;
   }
   const klass = Number(bt.avg_60d) > 0 ? 'up' : Number(bt.avg_60d) < 0 ? 'down' : 'flat';
   const used = Number(bt.signals_used || 0);
-  const raw = Number(bt.signals || 0);
-  return `백테스팅 결과: <b>60일 후 절사평균 기대수익 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>· ${used}/${raw}건 사용 · 최고/최저 각 1건 제외</small>`;
+  const stocks = Number(bt.stock_count || 0);
+  const band = Number(bt.score_band_half_width);
+  const bandText = Number.isFinite(band) ? `±${band.toFixed(1)}점` : '유사 점수대';
+  return `통합 백테스트: <b>${bandText} · 60일 평균 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>· 비중첩 ${used}건 / ${stocks}종목 · 순위 미반영</small>`;
 }
 
 function stockCard(stock) {
@@ -157,12 +293,14 @@ function stockCard(stock) {
       </div>
 
       <div class="stock-meta-line">
-        <span>${escapeHtml(sector)}</span>
+        <span class="sector-name">${escapeHtml(sector)}</span>
         <i>·</i>
-        <span>시총 ${marketSize(stock.market_size_krw)}</span>
+        <span class="market-stat">${marketSizeLabel(stock)} ${marketSize(stock.market_size_krw)}</span>
         <i>·</i>
-        <span>현재가 ${money(stock.close, stock.currency)} ${changeText(stock.day_change_pct)}</span>
+        <span class="market-stat">현재가 ${money(stock.close, stock.currency)} ${changeText(stock.day_change_pct)}</span>
       </div>
+
+      ${tradeSignalLines(stock)}
 
       <div class="news-one-line" data-news-line>
         <span class="line-label">NEWS</span>
@@ -202,7 +340,7 @@ function renderMeta() {
   }
   $('#marketDate').textContent = data.market_date || '—';
   $('#coverage').textContent = `가격수신 ${Number(data.coverage_pct || 0).toFixed(1)}%`;
-  $('#scanStatus').textContent = data.scan_mode === 'QUICK' ? '장중 QUICK' : '종가 확정 FULL';
+  $('#scanStatus').textContent = `${data.scan_mode === 'QUICK' ? '장중 QUICK' : '종가 확정 FULL'} · 현재점수순`;
 }
 
 function stockByTicker(ticker) {
@@ -403,15 +541,23 @@ async function openScoreDetail(stock) {
   const s = detail.scores || stock.scores || {};
   const profiles = detail.metrics?.profiles || {};
   const bt = detail.backtest || stock.backtest || {};
+  const groupLabels = {
+    short: ['단기 매물대', [20,40,60]],
+    medium: ['중기 매물대', [80,100,150]],
+    long: ['장기 매물대', [200,300,400]],
+  };
   const rows = [
     ['볼린저 하단 근접', Number(s.bollinger || 0), 1, detail.metrics?.percent_b == null ? '' : `%B ${Number(detail.metrics.percent_b).toFixed(3)}`],
-    ...[20,40,60,80,100,150,200,300,400].map((days) => [
-      `${days}일 현재 매물대 비중`, Number(s[`profile_${days}`] || 0), 1, profileText(profiles[String(days)])
+    ...Object.entries(groupLabels).map(([key, [label, days]]) => [
+      label,
+      Number(s[`profile_${key}`] || 0),
+      3,
+      days.map((d) => `${d}D ${profileText(profiles[String(d)], true)}`).join(' · '),
     ]),
   ];
   const btText = bt.avg_60d == null
-    ? `유사사건 ${Number(bt.signals || 0)}건 · 계산 불가`
-    : `60일 절사평균 ${ratioPct(bt.avg_60d)} · ${Number(bt.signals_used || 0)}/${Number(bt.signals || 0)}건 사용`;
+    ? `통합 비중첩 표본 ${Number(bt.signals || 0)}건 · 계산 불가 · 순위에는 사용하지 않음`
+    : `통합 60일 평균 ${ratioPct(bt.avg_60d)} · 비중첩 ${Number(bt.signals_used || 0)}건 · ${Number(bt.stock_count || 0)}종목 · 순위에는 사용하지 않음`;
 
   body.innerHTML = `<div class="score-total"><span>CURRENT SETUP SCORE</span><b>${scoreText(stock)}</b><small>/ 10</small></div>
     <div class="score-rows">${rows.map(([label, value, max, sub]) => {
@@ -423,12 +569,16 @@ async function openScoreDetail(stock) {
     <div class="backtest-one-line" style="margin-top:14px">${escapeHtml(btText)}</div>`;
 }
 
-function profileText(p) {
+function profileText(p, compact=false) {
   if (!p?.available) return '매물대 계산 불가';
   const share = Number(p.share);
+  const relative = Number(p.relative_to_peak);
   const idx = Number(p.index);
   const zone = Number.isFinite(idx) ? `${idx + 1}/10구간` : '—';
-  return `${zone} · 거래량 비중 ${Number.isFinite(share) ? (share * 100).toFixed(1) : '—'}%`;
+  if (compact) {
+    return `${Number.isFinite(relative) ? (relative * 100).toFixed(0) : '—'}%peak`;
+  }
+  return `${zone} · 거래량 비중 ${Number.isFinite(share) ? (share * 100).toFixed(1) : '—'}% · 최대 매물대 대비 ${Number.isFinite(relative) ? (relative * 100).toFixed(0) : '—'}%`;
 }
 
 function closeModal() {
@@ -447,6 +597,7 @@ async function switchCategory(category, force=false) {
   }
 
   $$('.market-tab').forEach((b) => b.classList.toggle('active', b.dataset.category === category));
+  renderSizeFilters();
   $('#status').hidden = false;
   $('#stockList').hidden = true;
   $('#status').textContent = '데이터를 불러오는 중입니다.';
@@ -464,6 +615,410 @@ async function switchCategory(category, force=false) {
   }
 }
 
+
+// -----------------------------------------------------------------------------
+// Quiz mode
+// -----------------------------------------------------------------------------
+function quizRandomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function quizPick(arr) {
+  return arr?.length ? arr[quizRandomInt(0, arr.length - 1)] : null;
+}
+
+function quizPickEntry(pool) {
+  if (!pool?.length) return null;
+  const groups = new Map();
+  pool.forEach((item) => {
+    const key = String(item?.category || 'OTHER');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  });
+  const category = quizPick([...groups.keys()]);
+  return quizPick(groups.get(category));
+}
+
+async function ensureQuizPool(force=false) {
+  if (state.quiz.pool && !force) return state.quiz.pool;
+  const settled = await Promise.allSettled(QUIZ_SHARDS.map(async (shard) => {
+    const response = await fetch(dataUrl(`data/quiz/${shard}/manifest.json`, force), { cache: force ? 'no-store' : 'default' });
+    if (!response.ok) throw new Error(`${shard} quiz ${response.status}`);
+    return response.json();
+  }));
+  const pool = [];
+  settled.forEach((result) => {
+    if (result.status !== 'fulfilled') return;
+    const rows = Array.isArray(result.value?.items) ? result.value.items : [];
+    rows.forEach((row) => {
+      const n = Number(row?.points || 0);
+      const cap = Number(row?.market_size_krw);
+      if (n >= QUIZ_WINDOW_DAYS + 20 && Number.isFinite(cap) && cap >= QUIZ_MIN_MARKET_SIZE && row?.detail_path) pool.push(row);
+    });
+  });
+  if (force) state.quiz.detailCache.clear();
+  state.quiz.pool = pool;
+  return pool;
+}
+
+async function ensureQuizStock(entry, force=false) {
+  const key = `${entry?.category}:${entry?.ticker}`;
+  if (!force && state.quiz.detailCache.has(key)) return state.quiz.detailCache.get(key);
+  if (!entry?.detail_path) throw new Error('quiz detail path missing');
+  const response = await fetch(dataUrl(entry.detail_path, force), { cache: force ? 'no-store' : 'default' });
+  if (!response.ok) throw new Error(`quiz detail ${response.status}`);
+  const detail = await response.json();
+  state.quiz.detailCache.set(key, detail);
+  return detail;
+}
+
+function quizRows(stock, start, count=QUIZ_WINDOW_DAYS) {
+  const rows = [];
+  for (let i = start; i < start + count; i++) {
+    const o = Number(stock.o?.[i]), h = Number(stock.h?.[i]), l = Number(stock.l?.[i]);
+    const c = Number(stock.c?.[i]), v = Number(stock.v?.[i]);
+    if (![o,h,l,c].every(Number.isFinite)) return [];
+    rows.push({
+      index:i,
+      date:String(stock.d?.[i] || ''),
+      open:o,
+      high:h,
+      low:l,
+      close:c,
+      volume:Number.isFinite(v) ? Math.max(0,v) : 0,
+    });
+  }
+  return rows;
+}
+
+function quizBollinger(stock, start, count=QUIZ_WINDOW_DAYS) {
+  const closes = (stock.c || []).map(Number);
+  return Array.from({length:count}, (_, offset) => {
+    const idx = start + offset;
+    if (idx < 19) return { mid:NaN, upper:NaN, lower:NaN };
+    const w = closes.slice(idx - 19, idx + 1).filter(Number.isFinite);
+    if (w.length !== 20) return { mid:NaN, upper:NaN, lower:NaN };
+    const mid = w.reduce((a,b) => a+b, 0) / w.length;
+    const variance = w.reduce((a,b) => a + (b-mid)*(b-mid), 0) / w.length;
+    const sd = Math.sqrt(Math.max(0, variance));
+    return { mid, upper:mid + 2*sd, lower:mid - 2*sd };
+  });
+}
+
+function quizVolumeProfile(rows) {
+  if (!rows?.length) return null;
+  const pmin = Math.min(...rows.map(r => r.low));
+  const pmax = Math.max(...rows.map(r => r.high));
+  if (!(pmax > pmin)) return null;
+  const edges = Array.from({length:11}, (_, i) => pmin + (pmax-pmin)*i/10);
+  const values = Array(10).fill(0);
+  rows.forEach((r) => {
+    const span = r.high - r.low;
+    if (span > 1e-12) {
+      for (let b=0;b<10;b++) {
+        const overlap = Math.max(0, Math.min(r.high, edges[b+1]) - Math.max(r.low, edges[b]));
+        values[b] += r.volume * overlap / span;
+      }
+    } else {
+      const b = Math.max(0, Math.min(9, Math.floor((r.close-pmin)/(pmax-pmin)*10)));
+      values[b] += r.volume;
+    }
+  });
+  return { pmin, pmax, edges, values, max:Math.max(...values, 1) };
+}
+
+function quizResidualSignature(values) {
+  if (!values?.length || values.some(v => !Number.isFinite(v) || v <= 0)) return [];
+  const logs = values.map(Math.log);
+  const a = logs[0], b = logs[logs.length-1];
+  const residual = logs.map((v,i) => v - (a + (b-a)*i/Math.max(1,logs.length-1)));
+  const mean = residual.reduce((x,y)=>x+y,0)/residual.length;
+  const sd = Math.sqrt(residual.reduce((x,y)=>x+(y-mean)*(y-mean),0)/residual.length) || 1;
+  return residual.map(v => (v-mean)/sd);
+}
+
+function quizShapeDistance(a, b) {
+  const sa = quizResidualSignature(a), sb = quizResidualSignature(b);
+  if (!sa.length || sa.length !== sb.length) return Infinity;
+  return Math.sqrt(sa.reduce((sum,v,i) => sum + (v-sb[i])*(v-sb[i]), 0) / sa.length);
+}
+
+function quizDailyVol(values) {
+  if (!values?.length || values.length < 2) return 0;
+  const r=[];
+  for(let i=1;i<values.length;i++){
+    const a=Number(values[i-1]), b=Number(values[i]);
+    if(a>0&&b>0) r.push(Math.log(b/a));
+  }
+  if(!r.length) return 0;
+  const mean=r.reduce((x,y)=>x+y,0)/r.length;
+  return Math.sqrt(r.reduce((x,y)=>x+(y-mean)*(y-mean),0)/r.length);
+}
+
+function quizBridgePattern(source, target, hiddenPart, volatilityScale=1) {
+  if (!source?.length || !target?.length || source.length !== target.length) return null;
+  if (source.some(v => !Number.isFinite(v) || v <= 0)) return null;
+  const logs = source.map(Math.log);
+  const srcVol=quizDailyVol(source);
+  const targetVol=quizDailyVol(target);
+  const scale=srcVol>1e-9 ? Math.max(.25,Math.min(1.8,targetVol/srcVol*volatilityScale)) : 1;
+
+  if(hiddenPart===0){
+    // First third: only the right edge is observable. Preserve a plausible real
+    // total move so the hidden starting level is not leaked by every option.
+    const anchor=Math.log(target[target.length-1]);
+    const srcAnchor=logs[logs.length-1];
+    return logs.map(v=>Math.exp(anchor+(v-srcAnchor)*scale));
+  }
+  if(hiddenPart===2){
+    // Last third: only the left edge is observable. Let the possible final price
+    // vary with the real donor pattern rather than leaking the true endpoint.
+    const anchor=Math.log(target[0]);
+    const srcAnchor=logs[0];
+    return logs.map(v=>Math.exp(anchor+(v-srcAnchor)*scale));
+  }
+
+  // Middle third: both adjacent visible sections constrain the endpoints. Remove
+  // the donor trend and bridge its residual shape between the real endpoints.
+  const srcA=logs[0], srcB=logs[logs.length-1];
+  const targetA=Math.log(target[0]), targetB=Math.log(target[target.length-1]);
+  const residual=logs.map((v,i)=>v-(srcA+(srcB-srcA)*i/(logs.length-1)));
+  return residual.map((r,i)=>Math.exp(targetA+(targetB-targetA)*i/(logs.length-1)+r*scale));
+}
+
+
+async function quizRealSegment(pool, length=QUIZ_HIDDEN_DAYS) {
+  for (let attempt=0; attempt<30; attempt++) {
+    const entry = quizPickEntry(pool);
+    if (!entry) continue;
+    let stock;
+    try { stock = await ensureQuizStock(entry); } catch (_) { continue; }
+    const n = stock?.c?.length || 0;
+    if (n < length + 1) continue;
+    const start = quizRandomInt(0, n-length);
+    const values = stock.c.slice(start, start+length).map(Number);
+    if (values.length === length && values.every(v => Number.isFinite(v) && v > 0)) return values;
+  }
+  return null;
+}
+
+async function buildQuizQuestion(pool) {
+  for (let attempt=0; attempt<80; attempt++) {
+    const entry = quizPickEntry(pool);
+    if (!entry) continue;
+    let stock;
+    try { stock = await ensureQuizStock(entry); } catch (_) { continue; }
+    const n = stock?.c?.length || 0;
+    if (n < QUIZ_WINDOW_DAYS + 20) continue;
+    const start = quizRandomInt(19, n - QUIZ_WINDOW_DAYS);
+    const rows = quizRows(stock, start);
+    if (rows.length !== QUIZ_WINDOW_DAYS) continue;
+    const hiddenPart = quizRandomInt(0, 2);
+    const hiddenStart = hiddenPart * QUIZ_HIDDEN_DAYS;
+    const hiddenEnd = hiddenStart + QUIZ_HIDDEN_DAYS;
+    const correctSeries = rows.slice(hiddenStart, hiddenEnd).map(r => r.close);
+    if (correctSeries.some(v => !Number.isFinite(v) || v <= 0)) continue;
+
+    const distractors = [];
+    for (let dAttempt=0; dAttempt<120 && distractors.length<3; dAttempt++) {
+      const source = await quizRealSegment(pool);
+      if (!source) continue;
+      const bridged = quizBridgePattern(source, correctSeries, hiddenPart, 0.75 + Math.random()*0.5);
+      if (!bridged) continue;
+      const distToCorrect = quizShapeDistance(bridged, correctSeries);
+      if (!(distToCorrect > 0.45)) continue;
+      if (distractors.some(x => quizShapeDistance(x, bridged) < 0.32)) continue;
+      distractors.push(bridged);
+    }
+    if (distractors.length < 3) continue;
+
+    const correctIndex = quizRandomInt(0, 3);
+    const options = [];
+    let di = 0;
+    for (let i=0;i<4;i++) options.push(i === correctIndex ? correctSeries : distractors[di++]);
+    return {
+      entry,
+      stock,
+      rows,
+      bb:quizBollinger(stock, start),
+      profile:quizVolumeProfile(rows),
+      start,
+      hiddenPart,
+      hiddenStart,
+      hiddenEnd,
+      correctIndex,
+      options,
+      selectedIndex:null,
+    };
+  }
+  return null;
+}
+
+function quizPath(values, X, Y) {
+  return values.map((v,i) => Number.isFinite(v) ? `${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}` : '').filter(Boolean).join(' ');
+}
+
+function renderQuizOption(values, index, correctIndex, selectedIndex, answered, sharedRange=null) {
+  const W=260, H=112, pad={l:9,r:9,t:11,b:10};
+  let lo=sharedRange?.lo ?? Math.min(...values), hi=sharedRange?.hi ?? Math.max(...values);
+  if (!(hi>lo)) { lo*=.99; hi*=1.01; }
+  const extra=(hi-lo)*.12 || Math.abs(hi)*.01 || 1;
+  lo-=extra; hi+=extra;
+  const X=i=>pad.l+i*(W-pad.l-pad.r)/Math.max(1,values.length-1);
+  const Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo);
+  const selected = answered && selectedIndex === index;
+  const klass = answered ? (index===correctIndex ? ' correct' : selected ? ' wrong' : '') : '';
+  return `<button class="quiz-choice${klass}" type="button" data-quiz-choice="${index}" ${answered?'disabled':''}>
+    <span class="quiz-choice-key">${index+1}</span>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="보기 ${index+1}">
+      <line x1="${pad.l}" x2="${W-pad.r}" y1="${H/2}" y2="${H/2}" class="quiz-option-grid"/>
+      <path d="${quizPath(values,X,Y)}" class="quiz-option-line"/>
+    </svg>
+  </button>`;
+}
+
+function renderQuizMainChart(question, answered=false) {
+  const el = $('#quizMainChart');
+  if (!el || !question) return;
+  const {rows,bb,profile,hiddenStart,hiddenEnd} = question;
+  const W=1000,H=430,pad={l:18,r:72,t:22,b:32};
+  const vals = rows.flatMap((r,i)=>[r.low,r.high,bb[i]?.lower,bb[i]?.upper]).filter(Number.isFinite);
+  let lo=Math.min(...vals), hi=Math.max(...vals);
+  if (!(hi>lo)) { lo*=.99; hi*=1.01; }
+  const extra=(hi-lo)*.055; lo-=extra; hi+=extra;
+  const plotW=W-pad.l-pad.r, plotH=H-pad.t-pad.b;
+  const X=i=>pad.l+(i+.5)*plotW/rows.length;
+  const Y=v=>pad.t+(hi-v)*plotH/(hi-lo);
+  const candleStep=plotW/rows.length;
+  const bodyW=Math.max(2.1,candleStep*.56);
+  const hiddenX1=pad.l+hiddenStart*candleStep;
+  const hiddenX2=pad.l+hiddenEnd*candleStep;
+  const isHidden=i=>!answered && i>=hiddenStart && i<hiddenEnd;
+
+  let grid='';
+  for(let g=0;g<5;g++){
+    const y=pad.t+g*plotH/4;
+    const v=hi-g*(hi-lo)/4;
+    const label=question.stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(v>=100?0:1)}`;
+    grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="quiz-chart-grid"/><text x="${W-pad.r+7}" y="${y+4}" class="quiz-price-axis">${label}</text>`;
+  }
+
+  let profileSvg='';
+  if(profile){
+    const maxWidth=plotW*.23;
+    const current=rows[rows.length-1].close;
+    const currentBin=Math.max(0,Math.min(9,Math.floor((current-profile.pmin)/(profile.pmax-profile.pmin)*10)));
+    for(let b=0;b<10;b++){
+      const y1=Y(profile.edges[b+1]), y2=Y(profile.edges[b]);
+      const barH=Math.max(1,Math.abs(y2-y1)-1);
+      const bw=maxWidth*(profile.values[b]/profile.max);
+      profileSvg+=`<rect x="${W-pad.r-bw}" y="${Math.min(y1,y2)+.5}" width="${bw}" height="${barH}" class="quiz-profile-bar${b===currentBin?' current':''}"/>`;
+    }
+  }
+
+  function bbPath(key){
+    let out='',drawing=false;
+    for(let i=0;i<rows.length;i++){
+      const v=Number(bb[i]?.[key]);
+      if(!Number.isFinite(v)||isHidden(i)){drawing=false;continue;}
+      out+=`${drawing?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;
+      drawing=true;
+    }
+    return out.trim();
+  }
+
+  let candles='';
+  rows.forEach((r,i)=>{
+    if(isHidden(i)) return;
+    const up=r.close>=r.open;
+    const klass=up?'quiz-candle-up':'quiz-candle-down';
+    const x=X(i), yo=Y(r.open), yc=Y(r.close), yh=Y(r.high), yl=Y(r.low);
+    const top=Math.min(yo,yc), bh=Math.max(1.4,Math.abs(yc-yo));
+    candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-candle-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".5"/>`;
+  });
+
+  const dateIndices=[0,44,89];
+  const dates=dateIndices.map((i)=>{
+    const label=answered?(rows[i]?.date?.slice(2)||''):`D${i+1}`;
+    const anchor=i===0?'start':i===89?'end':'middle';
+    return `<text x="${i===0?pad.l:i===89?W-pad.r:X(i)}" y="${H-9}" text-anchor="${anchor}" class="quiz-date-axis">${escapeHtml(label)}</text>`;
+  }).join('');
+
+  const hiddenOverlay = answered
+    ? `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-reveal-zone"/>`
+    : `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-hidden-block"/><text x="${(hiddenX1+hiddenX2)/2}" y="${pad.t+plotH/2}" text-anchor="middle" class="quiz-hidden-label">HIDDEN</text>`;
+
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${grid}${profileSvg}
+    <path d="${bbPath('upper')}" class="quiz-bb-line"/><path d="${bbPath('lower')}" class="quiz-bb-line"/><path d="${bbPath('mid')}" class="quiz-bb-mid"/>
+    ${candles}${hiddenOverlay}${dates}
+  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>10-ZONE VOLUME PROFILE</span></div>`;
+}
+
+function renderQuizQuestion() {
+  const q=state.quiz.question;
+  if(!q) return;
+  $('#quizStatus').hidden=true;
+  $('#quizGame').hidden=false;
+  $('#quizNumber').textContent=`QUIZ #${String(state.quiz.number).padStart(3,'0')}`;
+  $('#quizIdentity').textContent=state.quiz.answered
+    ? `${q.stock.name} (${q.stock.symbol || q.stock.ticker}) · ${q.rows[0].date} ~ ${q.rows[q.rows.length-1].date}`
+    : '종목 · 기간 비공개';
+  const labels=['앞 1/3','중간 1/3','뒤 1/3'];
+  $('#quizSegmentLabel').textContent=`${labels[q.hiddenPart]} · 30거래일 가림`;
+  const instruction=$('#quizInstructionSub');
+  if(instruction){
+    instruction.textContent=q.hiddenPart===1
+      ? '중간 구간은 양쪽 경계가격을 맞춘 실제 시장 패턴 기반 보기입니다.'
+      : '보이는 한쪽 경계와 자연스럽게 연결한 실제 시장 패턴 기반 보기입니다.';
+  }
+  renderQuizMainChart(q,state.quiz.answered);
+  const allOptionValues=q.options.flat().filter(Number.isFinite);
+  const optionRange=allOptionValues.length?{lo:Math.min(...allOptionValues),hi:Math.max(...allOptionValues)}:null;
+  $('#quizChoices').innerHTML=q.options.map((values,i)=>renderQuizOption(values,i,q.correctIndex,q.selectedIndex,state.quiz.answered,optionRange)).join('');
+  const feedback=$('#quizFeedback');
+  if(state.quiz.answered){
+    feedback.hidden=false;
+    const ok=q.selectedIndex===q.correctIndex;
+    feedback.innerHTML=`<b>${ok?'정답입니다.':'오답입니다.'}</b> 정답은 ${q.correctIndex+1}번입니다. 실제 종목은 ${escapeHtml(q.stock.name)} (${escapeHtml(q.stock.symbol || q.stock.ticker)})이며, 가려진 30거래일 캔들을 차트에 공개했습니다.`;
+  }else{
+    feedback.hidden=true;
+    feedback.textContent='';
+  }
+}
+
+async function newQuizQuestion(forcePool=false) {
+  if(state.quiz.loading) return;
+  state.quiz.loading=true;
+  const btn=$('#newQuizBtn');
+  if(btn){btn.disabled=true;btn.textContent='문제 생성 중';}
+  $('#quizStatus').hidden=false;
+  $('#quizStatus').textContent='100조 이상 종목의 과거 차트를 불러오는 중입니다.';
+  $('#quizGame').hidden=true;
+  try{
+    const pool=await ensureQuizPool(forcePool);
+    if(!pool.length) throw new Error('quiz pool empty');
+    const q=await buildQuizQuestion(pool);
+    if(!q) throw new Error('could not build plausible distractors');
+    state.quiz.question=q;
+    state.quiz.answered=false;
+    state.quiz.number+=1;
+    renderQuizQuestion();
+  }catch(err){
+    console.error('quiz',err);
+    $('#quizStatus').hidden=false;
+    $('#quizStatus').textContent='퀴즈 데이터가 아직 없습니다. 최신 코드 배포 후 ALL · FULL 스캔을 한 번 실행해 주세요.';
+    $('#quizGame').hidden=true;
+  }finally{
+    state.quiz.loading=false;
+    if(btn){btn.disabled=false;btn.textContent='문제 내기';}
+  }
+}
+
+$('#analysisMode').addEventListener('change', (e) => {
+  switchAnalysisMode(e.target.value);
+});
+
 $('#marketTabs').addEventListener('click', (e) => {
   const b = e.target.closest('.market-tab');
   if (b) void switchCategory(b.dataset.category);
@@ -473,8 +1028,8 @@ $('#capFilterTabs').addEventListener('click', (e) => {
   const b = e.target.closest('.cap-filter');
   if (!b) return;
   const cap = Number(b.dataset.cap);
-  if (!Number.isFinite(cap) || cap <= 0) return;
-  state.marketCapMin = cap;
+  if (!Number.isFinite(cap) || cap < 0) return;
+  state.marketSizeMin[sizeFilterMode()] = cap;
   $$('.cap-filter').forEach((button) => button.classList.toggle('active', button === b));
   renderList();
 });
@@ -488,7 +1043,25 @@ $('#searchInput').addEventListener('input', (e) => {
   }, 100);
 });
 
-$('#reloadBtn').addEventListener('click', () => void switchCategory(state.category, true));
+$('#reloadBtn').addEventListener('click', () => {
+  if (state.mode === 'quiz') {
+    void newQuizQuestion(true);
+    return;
+  }
+  void switchCategory(state.category, true);
+});
+
+$('#newQuizBtn')?.addEventListener('click', () => void newQuizQuestion(false));
+
+$('#quizChoices')?.addEventListener('click', (e) => {
+  const button = e.target.closest('[data-quiz-choice]');
+  if (!button || state.quiz.answered || !state.quiz.question) return;
+  const index = Number(button.dataset.quizChoice);
+  if (!Number.isInteger(index) || index < 0 || index > 3) return;
+  state.quiz.question.selectedIndex = index;
+  state.quiz.answered = true;
+  renderQuizQuestion();
+});
 
 document.addEventListener('click', (e) => {
   const score = e.target.closest('[data-score-detail]');
@@ -514,4 +1087,5 @@ window.addEventListener('resize', () => {
   });
 });
 
+switchAnalysisMode('profile');
 void switchCategory('KR');

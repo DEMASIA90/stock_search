@@ -23,6 +23,7 @@ KR_CACHE = DATA_DIR / "universe_kr.json"
 KR_ETF_CACHE = DATA_DIR / "universe_kr_etf.json"
 US_CACHE = DATA_DIR / "universe_us.json"
 US_ETF_CACHE = DATA_DIR / "universe_us_etf.json"
+US_ETF_SELECTED_CACHE = DATA_DIR / "universe_us_etf_selected.json"
 ETF_TICKER_FILE = BASE_DIR / "etf_tickers.json"
 
 KIND_CORP_URL = "https://kind.krx.co.kr/corpgeneral/corpList.do"
@@ -732,7 +733,9 @@ def get_universe(category: str) -> tuple[list[Stock], str]:
                 )
             selected.append(stock)
 
-        _save_cache(US_ETF_CACHE, selected)
+        # Never overwrite the full Nasdaq Trader ETF directory cache with the
+        # user's 500-symbol whitelist. The full cache is the upstream fallback.
+        _save_cache(US_ETF_SELECTED_CACHE, selected)
         print(f"US ETF universe: user whitelist ({len(selected):,})")
         return selected, f"USER_ETF_WHITELIST_US500+{source}"
 

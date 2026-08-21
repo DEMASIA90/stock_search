@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "11.5"
+MORNING_INVEST_COMPONENT_VERSION = "11.7"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -37,6 +37,7 @@ ROOT_UNIVERSE_CACHE = {
 }
 
 ALL_CATEGORIES = ["KR", "KR_ETF", "US", "US_ETF"]
+QUIZ_DIRS = ["kr", "kr-etf", "us", "us-etf"]
 RESTORE_BY_MARKET = {
     "ALL": ALL_CATEGORIES,
     "KR": ALL_CATEGORIES,
@@ -96,6 +97,7 @@ def summary_item(item: dict, detail_path: str) -> dict:
         "score": item.get("score"),
         "display_score": item.get("display_score", item.get("score")),
         "scores": item.get("scores") or {},
+        "trade_signals": item.get("trade_signals") or {},
         "sector": item.get("sector") or "—",
         "market_size_krw": item.get("market_size_krw"),
         "market_size_basis": item.get("market_size_basis"),
@@ -296,6 +298,52 @@ def restore_category(category: str, bases: list[str], checkout_backup: Path | No
     return False
 
 
+def restore_optional_live_file(relative_path: str, bases: list[str]) -> bool:
+    target = DATA_DIR / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    errors = []
+    for base in bases:
+        tmp = Path('/tmp') / f"dtc-optional-{hashlib.sha1(relative_path.encode()).hexdigest()[:10]}"
+        try:
+            url = f"{base.rstrip('/')}/data/{relative_path}?ts={int(time.time())}"
+            download(url, tmp, timeout=45)
+            if not tmp.is_file() or tmp.stat().st_size <= 0:
+                raise RuntimeError('empty file')
+            target.write_bytes(tmp.read_bytes())
+            print(f"[hydrate] optional restored: {relative_path}")
+            return True
+        except Exception as exc:
+            errors.append(f"{base}: {type(exc).__name__}: {exc}")
+    print(f"[hydrate] optional missing: {relative_path}")
+    return False
+
+
+def restore_quiz_bundle(folder: str, bases: list[str]) -> bool:
+    dest = DATA_DIR / "quiz" / folder
+    errors = []
+    for base in bases:
+        tmp = Path('/tmp') / f"dtc-quiz-{folder}.zip"
+        try:
+            url = f"{base.rstrip('/')}/data/quiz/{folder}/bundle.zip?ts={int(time.time())}"
+            download(url, tmp, timeout=90)
+            if not zipfile.is_zipfile(tmp):
+                raise RuntimeError('quiz bundle is not a ZIP')
+            shutil.rmtree(dest, ignore_errors=True)
+            dest.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tmp, 'r') as zf:
+                safe_extract(zf, dest)
+            if not (dest / 'manifest.json').is_file() or not (dest / 'stocks').is_dir():
+                raise RuntimeError('quiz manifest/stocks missing after extraction')
+            shutil.copy2(tmp, dest / 'bundle.zip')
+            print(f"[hydrate] quiz restored: {folder}")
+            return True
+        except Exception as exc:
+            errors.append(f"{base}: {type(exc).__name__}: {exc}")
+    shutil.rmtree(dest, ignore_errors=True)
+    print(f"[hydrate] quiz missing: {folder}")
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", required=True, choices=list(RESTORE_BY_MARKET))
@@ -332,6 +380,10 @@ def main() -> None:
             restored.append(category)
         else:
             missing.append(category)
+
+    for folder in QUIZ_DIRS:
+        restore_quiz_bundle(folder, bases)
+    restore_optional_live_file("fx_usdkrw.json", bases)
 
     print(f"[hydrate] restored={restored or 'none'}")
     print(f"[hydrate] missing={missing or 'none'}")
