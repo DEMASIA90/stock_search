@@ -105,7 +105,7 @@ jobs:
           text = path.read_text(encoding="utf-8")
           run_number = int("${{ github.run_number }}")
           version_code = max(1, run_number)
-          version_name = f"11.3.{run_number}"
+          version_name = f"11.5.{run_number}"
           text, n1 = re.subn(r"versionCode\s+\d+", f"versionCode {version_code}", text, count=1)
           text, n2 = re.subn(r'versionName\s+[\"\'][^\"\']+[\"\']', f'versionName "{version_name}"', text, count=1)
           if not (n1 and n2):
@@ -165,7 +165,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DTC-v11.3-Android-APK
+          name: DTC-v11.5-Android-APK
           path: |
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/apk/release/*.apk
@@ -175,7 +175,7 @@ jobs:
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
-          name: DTC-v11.3-Android-AAB
+          name: DTC-v11.5-Android-AAB
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
           retention-days: 30

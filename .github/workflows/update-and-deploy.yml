@@ -18,7 +18,7 @@ on:
           - US_GROUP
           - UI_ONLY
       scan_mode:
-        description: FULL recalculates all eligible 60D backtests; QUICK reuses the last FULL result
+        description: FULL/QUICK recalculate current score and 200-date 60D trimmed-return backtest
         required: true
         default: FULL
         type: choice
@@ -80,15 +80,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v11.2 source files..."
+          echo "Checking DTC v11.5 scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' scanner.py || {
-            echo "::error::scanner.py is not DTC v11.2"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.5"' scanner.py || {
+            echo "::error::scanner.py is not DTC v11.5"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not DTC v11.2"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.5"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not DTC v11.5"
             exit 1
           }
 
@@ -107,8 +107,8 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v11.2"
-          echo "hydrate_data.py: v11.2"
+          echo "scanner.py: v11.5"
+          echo "hydrate_data.py: v11.5"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
 
@@ -188,7 +188,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v11.2 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v11.5 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -250,14 +250,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260821-v11_4",
+            "ui_build": "20260821-v11_5",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260821-v11_4"
+          echo "UI build: 20260821-v11_5"
           cat docs/build-info.json
 
       - name: Build lightweight GitHub Pages fallback
