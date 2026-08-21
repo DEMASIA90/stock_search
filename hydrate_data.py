@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "11.7"
+MORNING_INVEST_COMPONENT_VERSION = "11.8"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -62,7 +62,7 @@ def download(url: str, output: Path, timeout: int = 90) -> None:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "MorningInvest-GitHubActions/1.1",
+            "User-Agent": "DTC-GitHubActions/1.2",
             "Cache-Control": "no-cache",
         },
     )
@@ -138,7 +138,7 @@ def build_bundle(dest: Path) -> None:
 def restore_v7_bundle(category: str, base: str) -> bool:
     folder = CATEGORY_DIR[category]
     dest = DATA_DIR / folder
-    tmp = Path("/tmp") / f"morning-invest-{folder}-bundle.zip"
+    tmp = Path("/tmp") / f"dtc-{folder}-bundle.zip"
     url = f"{base.rstrip('/')}/data/{folder}/bundle.zip?ts={int(time.time())}"
 
     print(f"[hydrate] {category}: try v7 bundle")
@@ -168,7 +168,7 @@ def restore_v7_bundle(category: str, base: str) -> bool:
 def migrate_legacy_json(category: str, base: str) -> bool:
     """Convert previous v6 monolithic JSON into v7 summary/detail files."""
     legacy_name = LEGACY_FILE[category]
-    tmp = Path("/tmp") / f"morning-invest-{legacy_name}"
+    tmp = Path("/tmp") / f"dtc-{legacy_name}"
     url = f"{base.rstrip('/')}/data/{legacy_name}?ts={int(time.time())}"
 
     print(f"[hydrate] {category}: try legacy {legacy_name}")
@@ -352,16 +352,14 @@ def main() -> None:
 
     bases = [b.strip() for b in args.base_urls if b and b.strip()]
     if not bases:
-        bases = [
-            "https://morninginv.web.app",
-            "https://demasia90.github.io/stock_search",
-        ]
+        configured = os.environ.get("DTC_FIREBASE_ORIGIN", "").strip().rstrip("/")
+        bases = [b for b in [configured, "https://demasia90.github.io/stock_search"] if b]
     print(f"[hydrate] bootstrap bases={bases}")
 
     # Migration safety: old tracked v6 JSON/cache files may still exist in the
     # checkout. Preserve them before clearing docs/data so they remain a final
     # bootstrap source when Hosting has no KR snapshot yet.
-    checkout_backup = Path("/tmp/morning-invest-checkout-legacy")
+    checkout_backup = Path("/tmp/dtc-checkout-legacy")
     shutil.rmtree(checkout_backup, ignore_errors=True)
     checkout_backup.mkdir(parents=True, exist_ok=True)
     for name in [*LEGACY_FILE.values(), *ROOT_UNIVERSE_CACHE.values()]:

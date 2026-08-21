@@ -82,6 +82,11 @@ main{padding-top:20px}
 .trade-signal-row b.signal-hot{color:#ff8b78}
 .trade-signal-row b.signal-near{color:#e7c36b}
 .trade-signal-row b.signal-cold{color:#73a8e8}
+.signal-grade{font-style:normal;font-size:8px;font-weight:900;letter-spacing:.15px;padding:1px 5px;border-radius:999px;border:1px solid transparent}
+.signal-grade.good{color:#78e7b7;background:rgba(77,190,137,.10);border-color:rgba(77,190,137,.22)}
+.signal-grade.normal{color:#e6c76d;background:rgba(207,170,67,.09);border-color:rgba(207,170,67,.20)}
+.signal-grade.bad{color:#ff8b86;background:rgba(220,79,85,.09);border-color:rgba(220,79,85,.20)}
+.signal-grade.unknown{color:#7d899b;background:rgba(125,137,155,.08);border-color:rgba(125,137,155,.16)}
 .up{color:var(--red)!important}.down{color:var(--blue)!important}.flat{color:#9ba6b5!important}
 .news-one-line{margin-top:auto;min-width:0;border-top:1px solid rgba(255,255,255,.055);padding-top:17px;display:flex;gap:9px;align-items:center;font-size:12px}
 .line-label{flex:0 0 auto;font-size:9px;letter-spacing:1.1px;color:var(--cyan);font-weight:900}
@@ -95,6 +100,9 @@ main{padding-top:20px}
 .inline-chart svg{width:100%;height:100%;display:block;overflow:visible}
 .chart-loading,.chart-empty{height:100%;display:grid;place-items:center;color:#566276;font-size:10px;letter-spacing:1.1px}
 .chart-grid{stroke:#1d2735;stroke-width:1;vector-effect:non-scaling-stroke}
+.chart-candle-wick{stroke-width:1.1;vector-effect:non-scaling-stroke}
+.chart-candle-up{stroke:#66dfae;fill:#66dfae}
+.chart-candle-down{stroke:#ff6f7d;fill:#ff6f7d}
 .price-axis,.date-axis{fill:#647084;font-size:9px}
 .bb-fill{fill:rgba(82,126,183,.08)}
 .bb-edge{fill:none;stroke:#49627f;stroke-width:1;vector-effect:non-scaling-stroke}
@@ -132,7 +140,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 .install-pwa-btn[hidden]{display:none!important}
 @media (max-width:560px){.top-actions{gap:5px}.install-pwa-btn{height:36px;padding:0 10px;font-size:10.5px;border-radius:10px}}
 
-/* ===== DTC UI v11.7 : branding, mode switch, sticky compact filters ===== */
+/* ===== DTC UI v11.8 : branding, mode switch, sticky compact filters ===== */
 :root{--topbar-h:94px}
 .mode-view[hidden]{display:none!important}
 .blank-mode-view{min-height:calc(100vh - var(--topbar-h));padding:0}
@@ -269,7 +277,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 }
 
 /* --------------------------------------------------------------------------
-   Quiz mode · v11.7
+   Quiz mode · v11.8
    -------------------------------------------------------------------------- */
 .quiz-mode-view{padding-top:20px;min-height:calc(100vh - var(--topbar-h,94px))}
 .quiz-shell{max-width:1180px;margin:0 auto}
@@ -296,8 +304,8 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 .quiz-candle-wick{stroke-width:1.2}
 .quiz-candle-up{stroke:#69e6b3;fill:#69e6b3}
 .quiz-candle-down{stroke:#ff6b78;fill:#ff6b78}
-.quiz-profile-bar{fill:rgba(93,225,255,.10)}
-.quiz-profile-bar.current{fill:rgba(93,225,255,.18)}
+.quiz-profile-bar{fill:rgba(93,225,255,.22);stroke:rgba(93,225,255,.22);stroke-width:.35}
+.quiz-profile-bar.current{fill:rgba(93,225,255,.36)}
 .quiz-hidden-block{fill:#070a10;stroke:#3a475b;stroke-width:1.2;stroke-dasharray:7 6}
 .quiz-hidden-label{fill:#8d9bb0;font-size:18px;font-weight:900;letter-spacing:2px;font-family:inherit}
 .quiz-reveal-zone{fill:rgba(93,225,255,.035);stroke:rgba(93,225,255,.28);stroke-width:1}
@@ -313,18 +321,20 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 .quiz-choice.correct{border-color:rgba(105,230,179,.8);background:rgba(35,95,72,.18)}
 .quiz-choice.wrong{border-color:rgba(255,93,105,.75);background:rgba(107,34,43,.16)}
 .quiz-choice-key{position:absolute;top:8px;left:9px;width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:#151f2d;color:#9eacbf;font-size:10px;font-weight:900;z-index:2}
-.quiz-choice svg{display:block;width:100%;height:112px;margin-top:4px}
+.quiz-choice svg{display:block;width:100%;height:126px;margin-top:4px}
 .quiz-option-grid{stroke:#1a2432;stroke-width:1}
-.quiz-option-line{fill:none;stroke:#a9c7e8;stroke-width:2}
-.quiz-choice.correct .quiz-option-line{stroke:#79e4ba}
-.quiz-choice.wrong .quiz-option-line{stroke:#ff7b86}
+.quiz-option-line{fill:none;stroke:#c7dbef;stroke-width:1.25;opacity:.56}
+.quiz-option-wick{stroke-width:1}
+.quiz-option-body{stroke-width:.55}
+.quiz-choice.correct .quiz-option-line{stroke:#79e4ba;opacity:.72}
+.quiz-choice.wrong .quiz-option-line{stroke:#ff7b86;opacity:.72}
 .quiz-feedback{margin-top:12px;border:1px solid #273348;border-radius:11px;padding:12px 14px;background:#0c121b;color:#9eacbe;font-size:11px;line-height:1.55}
 .quiz-feedback b{color:#eef5ff}
 
 @media (max-width:900px){
   .quiz-main-chart{height:370px}
   .quiz-choices{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .quiz-choice svg{height:105px}
+  .quiz-choice svg{height:118px}
 }
 
 @media (max-width:760px){
@@ -340,7 +350,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
   .quiz-question-meta b{font-size:10px}
   .quiz-question-meta span{font-size:7.5px}
   .quiz-choice{padding:6px}
-  .quiz-choice svg{height:88px}
+  .quiz-choice svg{height:100px}
   .quiz-choice-key{width:20px;height:20px;font-size:8px}
 }
 
@@ -350,6 +360,6 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
   .quiz-toolbar p{display:none}
   .quiz-main-chart{height:270px}
   .quiz-choices{gap:7px}
-  .quiz-choice svg{height:74px}
+  .quiz-choice svg{height:86px}
   .quiz-feedback{font-size:9px;padding:10px}
 }

@@ -1,8 +1,8 @@
-# DTC v11.7 · PWA + Android
+# DTC v11.8 · PWA + Android
 
 Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installable PWA, Android Capacitor wrapper, and chart-reconstruction Quiz mode.
 
-## Scanner v11.7
+## Scanner v11.8
 
 - Current setup score: **0~10** and ranking is by this current setup score only.
 - Bollinger proximity: upper band or above = 0, lower band or below = 1, linearly interpolated in between.
@@ -50,4 +50,4 @@ Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installabl
 
 ## Recommended first run
 
-After deploying v11.7, run GitHub Actions with **`ALL + FULL` once**. This rebuilds all four market categories, the new score model, pooled backtest references, and all Quiz manifests/details.
+After deploying v11.8, run GitHub Actions with **`ALL + FULL` once**. This rebuilds all four market categories, the new score model, pooled backtest references, and all Quiz manifests/details.

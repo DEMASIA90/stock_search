@@ -72,6 +72,17 @@ jobs:
       - name: Install Capacitor dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Configure Firebase data endpoint for Android
+        shell: bash
+        env:
+          FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${FIREBASE_SITE_ID}" ]] || { echo "::error::Set repository variable FIREBASE_SITE_ID"; exit 1; }
+          cat > docs/runtime-config.js <<EOF
+          window.DTC_DATA_ORIGIN = 'https://${FIREBASE_SITE_ID}.web.app';
+          EOF
+
       - name: Generate fresh Android project
         shell: bash
         run: |
@@ -105,7 +116,7 @@ jobs:
           text = path.read_text(encoding="utf-8")
           run_number = int("${{ github.run_number }}")
           version_code = max(1, run_number)
-          version_name = f"11.7.{run_number}"
+          version_name = f"11.8.{run_number}"
           text, n1 = re.subn(r"versionCode\s+\d+", f"versionCode {version_code}", text, count=1)
           text, n2 = re.subn(r'versionName\s+[\"\'][^\"\']+[\"\']', f'versionName "{version_name}"', text, count=1)
           if not (n1 and n2):
@@ -165,7 +176,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DTC-v11.7-Android-APK
+          name: DTC-v11.8-Android-APK
           path: |
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/apk/release/*.apk
@@ -175,7 +186,7 @@ jobs:
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
-          name: DTC-v11.7-Android-AAB
+          name: DTC-v11.8-Android-AAB
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
           retention-days: 30

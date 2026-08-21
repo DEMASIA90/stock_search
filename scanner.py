@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "11.7"
+MORNING_INVEST_COMPONENT_VERSION = "11.8"
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v11.7
+# Dongtan Trading Center (DTC) scanner v11.8
 # -----------------------------------------------------------------------------
 # Current setup score (0~10):
 #   1) Bollinger lower-band proximity                                       0~1
@@ -504,6 +504,9 @@ def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
             })
     return {
         "d": [pd.Timestamp(i).date().isoformat() for i in chart.index],
+        "o": [clean(v) for v in chart["Open"]],
+        "h": [clean(v) for v in chart["High"]],
+        "lo": [clean(v) for v in chart["Low"]],
         "c": [clean(v) for v in chart["Close"]],
         "m": [clean(v) for v in chart["BB_Mid"]],
         "u": [clean(v) for v in chart["BB_Upper"]],
@@ -1323,7 +1326,7 @@ def _write_quiz_shard(category: str, items: list[dict], frames: dict[str, pd.Dat
             except OSError:
                 pass
 
-    # Remove the short-lived v11.7 development flat shard if present.
+    # Remove the short-lived v11.8 development flat shard if present.
     legacy_flat = DATA_DIR / "quiz" / f"{CATEGORY_DIR[category]}.json"
     if legacy_flat.is_file():
         try:
@@ -1416,7 +1419,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v11.7 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v11.8 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     print("score = BB 0~1 + grouped relative volume-profile concentration (short/mid/long 0~3 each) = max 10")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")

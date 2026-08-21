@@ -9,8 +9,9 @@ const CATEGORY = {
 };
 
 const IS_ANDROID_APP = location.hostname === 'localhost' || location.protocol === 'capacitor:';
+const CONFIGURED_DATA_ORIGIN = String(window.DTC_DATA_ORIGIN || '').trim().replace(/\/$/, '');
 const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP)
-  ? 'https://morninginv.web.app'
+  ? (CONFIGURED_DATA_ORIGIN || '.')
   : '.';
 const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();
 const NEWS_CACHE_MS = 5 * 60 * 1000;
@@ -235,9 +236,25 @@ function signalClass(kind, value) {
   if (!Number.isFinite(n)) return '';
   if (kind === 'percentB') return n <= 0.25 ? 'signal-hot' : n >= 0.8 ? 'signal-cold' : '';
   if (kind === 'rsi') return n >= 30 && n <= 45 ? 'signal-hot' : n >= 70 ? 'signal-cold' : '';
-  if (kind === 'highGap') return n >= 0 ? 'signal-hot' : n >= -3 ? 'signal-near' : '';
+  if (kind === 'highGap') return n >= -1 ? 'signal-hot' : n >= -3 ? 'signal-near' : '';
   if (kind === 'volume') return n >= 1.5 ? 'signal-hot' : n >= 1.0 ? 'signal-near' : '';
   return '';
+}
+
+function tradeSignalGrade(kind, a, b) {
+  const x = Number(a), y = Number(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { text:'판단불가', cls:'unknown' };
+  let points = 0;
+  if (kind === 'pullback') {
+    points += x <= 0.25 ? 2 : x <= 0.50 ? 1 : 0;
+    points += (y >= 30 && y <= 45) ? 2 : (y >= 25 && y <= 55) ? 1 : 0;
+  } else {
+    points += x >= -1 ? 2 : x >= -3 ? 1 : 0;
+    points += y >= 1.5 ? 2 : y >= 1.0 ? 1 : 0;
+  }
+  if (points >= 3) return { text:'좋음', cls:'good' };
+  if (points >= 1) return { text:'보통', cls:'normal' };
+  return { text:'나쁨', cls:'bad' };
 }
 
 function tradeSignalLines(stock) {
@@ -251,15 +268,17 @@ function tradeSignalLines(stock) {
   const bbText = Number.isFinite(percentB) ? `${(percentB * 100).toFixed(0)}%` : '—';
   const rsiText = Number.isFinite(rsi) ? rsi.toFixed(1) : '—';
   const volumeText = Number.isFinite(volumeRatio) ? `${volumeRatio.toFixed(2)}x` : '—';
+  const pbGrade = tradeSignalGrade('pullback', percentB, rsi);
+  const boGrade = tradeSignalGrade('breakout', highGap, volumeRatio);
   return `<div class="trade-signal-box">
     <div class="trade-signal-row">
-      <span class="signal-title pullback">눌림목</span>
+      <span class="signal-title pullback">눌림목</span><em class="signal-grade ${pbGrade.cls}">${pbGrade.text}</em>
       <span>BB %B <b class="${signalClass('percentB', percentB)}">${bbText}</b></span>
       <i>·</i>
       <span>RSI14 <b class="${signalClass('rsi', rsi)}">${rsiText}</b></span>
     </div>
     <div class="trade-signal-row">
-      <span class="signal-title breakout">돌파</span>
+      <span class="signal-title breakout">돌파</span><em class="signal-grade ${boGrade.cls}">${boGrade.text}</em>
       <span>20일고점 <b class="${signalClass('highGap', highGap)}">${signedPct(highGap)}</b></span>
       <i>·</i>
       <span>거래량 <b class="${signalClass('volume', volumeRatio)}">${volumeText}</b></span>
@@ -350,13 +369,21 @@ function stockByTicker(ticker) {
 function chartRows(detail) {
   const c = detail?.chart || {};
   const d = c.d || [];
-  return d.map((date, i) => ({
-    date,
-    close: Number(c.c?.[i]),
-    mid: Number(c.m?.[i]),
-    upper: Number(c.u?.[i]),
-    lower: Number(c.l?.[i]),
-  })).filter((x) => Number.isFinite(x.close)).slice(-CHART_TRADING_DAYS);
+  return d.map((date, i) => {
+    const close = Number(c.c?.[i]);
+    const open = Number(c.o?.[i]);
+    const high = Number(c.h?.[i]);
+    const low = Number(c.lo?.[i]);
+    return {
+      date, close,
+      open: Number.isFinite(open) ? open : close,
+      high: Number.isFinite(high) ? high : close,
+      low: Number.isFinite(low) ? low : close,
+      mid: Number(c.m?.[i]),
+      upper: Number(c.u?.[i]),
+      lower: Number(c.l?.[i]),
+    };
+  }).filter((x) => Number.isFinite(x.close)).slice(-CHART_TRADING_DAYS);
 }
 
 function drawChart(el, detail) {
@@ -369,7 +396,7 @@ function drawChart(el, detail) {
 
   const profiles = Array.isArray(detail?.chart?.profiles) ? detail.chart.profiles : [];
   const profileVals = profiles.map((p) => Number(p.center)).filter(Number.isFinite);
-  const all = data.flatMap((r) => [r.close, r.upper, r.lower]).filter(Number.isFinite).concat(profileVals);
+  const all = data.flatMap((r) => [r.low, r.high, r.upper, r.lower]).filter(Number.isFinite).concat(profileVals);
   let lo = Math.min(...all), hi = Math.max(...all);
   if (!(hi > lo)) { hi = lo * 1.01; lo = lo * 0.99; }
   const padRange = (hi - lo) * 0.07;
@@ -377,7 +404,9 @@ function drawChart(el, detail) {
 
   const W = 700, H = 250;
   const pad = { l:12, r:55, t:16, b:25 };
-  const X = (i) => pad.l + i * (W - pad.l - pad.r) / Math.max(1, data.length - 1);
+  const plotW = W - pad.l - pad.r;
+  const step = plotW / Math.max(1, data.length);
+  const X = (i) => pad.l + (i + .5) * step;
   const Y = (v) => pad.t + (hi - v) * (H - pad.t - pad.b) / (hi - lo);
   const path = (key) => data.map((d, i) => Number.isFinite(d[key]) ? `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(d[key]).toFixed(1)}` : '').filter(Boolean).join(' ');
   const poly = data.map((d, i) => `${X(i)},${Y(d.upper)}`).join(' ') + ' ' +
@@ -404,20 +433,30 @@ function drawChart(el, detail) {
       <text x="${W-pad.r-4}" y="${labelY}" text-anchor="end" class="profile-label ${profileClasses[idx] || ''}">${escapeHtml(p.days)}D</text>`;
   });
 
+  const bodyW = Math.max(2.2, Math.min(7.2, step * .56));
+  let candles = '';
+  data.forEach((r, i) => {
+    const x = X(i), yo = Y(r.open), yc = Y(r.close), yh = Y(r.high), yl = Y(r.low);
+    const up = r.close >= r.open;
+    const klass = up ? 'chart-candle-up' : 'chart-candle-down';
+    const top = Math.min(yo, yc), bh = Math.max(1.4, Math.abs(yc - yo));
+    candles += `<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".45"/>`;
+  });
+
   const dates = [0, Math.floor((data.length - 1)/2), data.length - 1].map((i) => ({ i, label:data[i]?.date?.slice(5) || '' }));
   const dateSvg = dates.map((d) => `<text x="${X(d.i)}" y="${H-6}" text-anchor="${d.i===0?'start':d.i===data.length-1?'end':'middle'}" class="date-axis">${escapeHtml(d.label)}</text>`).join('');
 
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="3개월 가격 차트">
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="3개월 캔들 차트">
     ${grid}
     <polygon points="${poly}" class="bb-fill"/>
     <path d="${path('upper')}" class="bb-edge"/>
     <path d="${path('lower')}" class="bb-edge"/>
     <path d="${path('mid')}" class="bb-mid"/>
     ${profileSvg}
-    <path d="${path('close')}" class="price-line"/>
+    ${candles}
     ${dateSvg}
   </svg>
-  <div class="chart-legend"><span>PRICE</span><span>BB</span><span>10-ZONE PROFILE</span></div>`;
+  <div class="chart-legend"><span>CANDLE</span><span>BB</span><span>10-ZONE PROFILE</span></div>`;
 }
 
 function newsSearchQuery(stock) {
@@ -796,10 +835,29 @@ async function quizRealSegment(pool, length=QUIZ_HIDDEN_DAYS) {
     const n = stock?.c?.length || 0;
     if (n < length + 1) continue;
     const start = quizRandomInt(0, n-length);
-    const values = stock.c.slice(start, start+length).map(Number);
-    if (values.length === length && values.every(v => Number.isFinite(v) && v > 0)) return values;
+    const rows = quizRows(stock, start, length);
+    const closes = rows.map(r => r.close);
+    if (rows.length === length && closes.every(v => Number.isFinite(v) && v > 0)) return { rows, closes };
   }
   return null;
+}
+
+function quizTransformCandles(sourceRows, transformedCloses) {
+  if (!sourceRows?.length || sourceRows.length !== transformedCloses?.length) return [];
+  return sourceRows.map((r, i) => {
+    const targetClose = Number(transformedCloses[i]);
+    const srcClose = Number(r.close);
+    const scale = srcClose > 0 ? targetClose / srcClose : 1;
+    const open = Number(r.open) * scale;
+    const high = Number(r.high) * scale;
+    const low = Number(r.low) * scale;
+    return {
+      open,
+      high:Math.max(high, open, targetClose),
+      low:Math.min(low, open, targetClose),
+      close:targetClose,
+    };
+  });
 }
 
 async function buildQuizQuestion(pool) {
@@ -821,21 +879,23 @@ async function buildQuizQuestion(pool) {
 
     const distractors = [];
     for (let dAttempt=0; dAttempt<120 && distractors.length<3; dAttempt++) {
-      const source = await quizRealSegment(pool);
-      if (!source) continue;
-      const bridged = quizBridgePattern(source, correctSeries, hiddenPart, 0.75 + Math.random()*0.5);
+      const donor = await quizRealSegment(pool);
+      if (!donor) continue;
+      const bridged = quizBridgePattern(donor.closes, correctSeries, hiddenPart, 0.75 + Math.random()*0.5);
       if (!bridged) continue;
       const distToCorrect = quizShapeDistance(bridged, correctSeries);
-      if (!(distToCorrect > 0.45)) continue;
-      if (distractors.some(x => quizShapeDistance(x, bridged) < 0.32)) continue;
-      distractors.push(bridged);
+      if (!(distToCorrect > 0.55)) continue;
+      if (distractors.some(x => quizShapeDistance(x.closes, bridged) < 0.38)) continue;
+      distractors.push({ closes:bridged, candles:quizTransformCandles(donor.rows, bridged) });
     }
     if (distractors.length < 3) continue;
 
     const correctIndex = quizRandomInt(0, 3);
+    const correctCandles = rows.slice(hiddenStart, hiddenEnd).map(r => ({open:r.open, high:r.high, low:r.low, close:r.close}));
+    const correctOption = { closes:correctSeries, candles:correctCandles };
     const options = [];
     let di = 0;
-    for (let i=0;i<4;i++) options.push(i === correctIndex ? correctSeries : distractors[di++]);
+    for (let i=0;i<4;i++) options.push(i === correctIndex ? correctOption : distractors[di++]);
     return {
       entry,
       stock,
@@ -858,20 +918,38 @@ function quizPath(values, X, Y) {
   return values.map((v,i) => Number.isFinite(v) ? `${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}` : '').filter(Boolean).join(' ');
 }
 
-function renderQuizOption(values, index, correctIndex, selectedIndex, answered, sharedRange=null) {
-  const W=260, H=112, pad={l:9,r:9,t:11,b:10};
-  let lo=sharedRange?.lo ?? Math.min(...values), hi=sharedRange?.hi ?? Math.max(...values);
+function renderQuizOption(option, index, correctIndex, selectedIndex, answered) {
+  const values = option?.closes || [];
+  const candles = option?.candles || [];
+  const W=260, H=126, pad={l:32,r:32,t:12,b:12};
+  const extrema = candles.flatMap(c => [Number(c.low), Number(c.high)]).filter(Number.isFinite);
+  const fitted = extrema.length ? extrema : values.filter(Number.isFinite);
+  let lo=Math.min(...fitted), hi=Math.max(...fitted);
   if (!(hi>lo)) { lo*=.99; hi*=1.01; }
-  const extra=(hi-lo)*.12 || Math.abs(hi)*.01 || 1;
+  const extra=(hi-lo)*.08 || Math.abs(hi)*.01 || 1;
   lo-=extra; hi+=extra;
-  const X=i=>pad.l+i*(W-pad.l-pad.r)/Math.max(1,values.length-1);
+  const plotW=W-pad.l-pad.r;
+  const step=plotW/Math.max(1,values.length);
+  const X=i=>pad.l+(i+.5)*step;
   const Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo);
   const selected = answered && selectedIndex === index;
   const klass = answered ? (index===correctIndex ? ' correct' : selected ? ' wrong' : '') : '';
+  const bodyW=Math.max(2.2,Math.min(5.5,step*.58));
+  let candleSvg='';
+  candles.forEach((r,i)=>{
+    if (![r.open,r.high,r.low,r.close].every(Number.isFinite)) return;
+    const x=X(i),yo=Y(r.open),yc=Y(r.close),yh=Y(r.high),yl=Y(r.low);
+    const up=r.close>=r.open, ck=up?'quiz-candle-up':'quiz-candle-down';
+    const top=Math.min(yo,yc),bh=Math.max(1.2,Math.abs(yc-yo));
+    candleSvg+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-option-wick ${ck}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="quiz-option-body ${ck}" rx=".35"/>`;
+  });
   return `<button class="quiz-choice${klass}" type="button" data-quiz-choice="${index}" ${answered?'disabled':''}>
     <span class="quiz-choice-key">${index+1}</span>
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="보기 ${index+1}">
+      <line x1="${pad.l}" x2="${W-pad.r}" y1="${pad.t}" y2="${pad.t}" class="quiz-option-grid"/>
       <line x1="${pad.l}" x2="${W-pad.r}" y1="${H/2}" y2="${H/2}" class="quiz-option-grid"/>
+      <line x1="${pad.l}" x2="${W-pad.r}" y1="${H-pad.b}" y2="${H-pad.b}" class="quiz-option-grid"/>
+      ${candleSvg}
       <path d="${quizPath(values,X,Y)}" class="quiz-option-line"/>
     </svg>
   </button>`;
@@ -949,10 +1027,10 @@ function renderQuizMainChart(question, answered=false) {
     : `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-hidden-block"/><text x="${(hiddenX1+hiddenX2)/2}" y="${pad.t+plotH/2}" text-anchor="middle" class="quiz-hidden-label">HIDDEN</text>`;
 
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    ${grid}${profileSvg}
+    ${grid}
     <path d="${bbPath('upper')}" class="quiz-bb-line"/><path d="${bbPath('lower')}" class="quiz-bb-line"/><path d="${bbPath('mid')}" class="quiz-bb-mid"/>
-    ${candles}${hiddenOverlay}${dates}
-  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>10-ZONE VOLUME PROFILE</span></div>`;
+    ${candles}${hiddenOverlay}${profileSvg}${dates}
+  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>90D 10-ZONE VOLUME PROFILE</span></div>`;
 }
 
 function renderQuizQuestion() {
@@ -973,9 +1051,7 @@ function renderQuizQuestion() {
       : '보이는 한쪽 경계와 자연스럽게 연결한 실제 시장 패턴 기반 보기입니다.';
   }
   renderQuizMainChart(q,state.quiz.answered);
-  const allOptionValues=q.options.flat().filter(Number.isFinite);
-  const optionRange=allOptionValues.length?{lo:Math.min(...allOptionValues),hi:Math.max(...allOptionValues)}:null;
-  $('#quizChoices').innerHTML=q.options.map((values,i)=>renderQuizOption(values,i,q.correctIndex,q.selectedIndex,state.quiz.answered,optionRange)).join('');
+  $('#quizChoices').innerHTML=q.options.map((option,i)=>renderQuizOption(option,i,q.correctIndex,q.selectedIndex,state.quiz.answered)).join('');
   const feedback=$('#quizFeedback');
   if(state.quiz.answered){
     feedback.hidden=false;
