@@ -1,0 +1,461 @@
+name: Dongtan Trading Center · Build & Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: Market to refresh
+        required: true
+        default: ALL
+        type: choice
+        options:
+          - ALL
+          - KR
+          - KR_ETF
+          - KR_GROUP
+          - US
+          - US_ETF
+          - US_GROUP
+          - UI_ONLY
+      scan_mode:
+        description: FULL/QUICK recalculate current score and pooled non-overlap 60D reference backtest
+        required: true
+        default: FULL
+        type: choice
+        options:
+          - FULL
+          - QUICK
+
+  schedule:
+    # Korea intraday QUICK scans (current unfinished daily bar included)
+    - cron: "30 10 * * 1-5"
+      timezone: "Asia/Seoul"
+    - cron: "00 13 * * 1-5"
+      timezone: "Asia/Seoul"
+    - cron: "50 14 * * 1-5"
+      timezone: "Asia/Seoul"
+    # Korea post-close FULL scan + pooled backtest / quiz refresh
+    - cron: "10 16 * * 1-5"
+      timezone: "Asia/Seoul"
+
+    # US intraday QUICK scans. New York timezone automatically follows DST.
+    - cron: "00 11 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "30 13 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "30 15 * * 1-5"
+      timezone: "America/New_York"
+    # US post-close FULL scan + pooled backtest / quiz refresh
+    - cron: "20 16 * * 1-5"
+      timezone: "America/New_York"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: dtc-market-refresh
+  cancel-in-progress: false
+
+env:
+  FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+  FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}
+  FIREBASE_LIVE: https://${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}.web.app
+  GITHUB_PAGES_LIVE: https://demasia90.github.io/stock_search
+
+jobs:
+  build:
+    name: Build ephemeral market data
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      market: ${{ steps.market.outputs.market }}
+      scan_mode: ${{ steps.market.outputs.scan_mode }}
+
+    steps:
+      - name: Checkout code only
+        uses: actions/checkout@v6
+
+      - name: Restore secondary DTC data cache
+        uses: actions/cache@v4
+        with:
+          path: .dtc-cache
+          key: dtc-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            dtc-data-${{ runner.os }}-
+
+      - name: Verify Morning Invest source set
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Commit: ${{ github.sha }}"
+          echo "Checking DTC v11.9 scanner + retained support files..."
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' scanner.py || {
+            echo "::error::scanner.py is not DTC v11.9"
+            exit 1
+          }
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not DTC v11.9"
+            exit 1
+          }
+
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.2"' universe.py || {
+            echo "::error::universe.py is not DTC v11.2. Replace the repository-root file named exactly universe.py."
+            exit 1
+          }
+
+          grep -q 'KRX_KIND_DIRECT_STATUS_WITH_BADGE_FALLBACK' universe.py || {
+            echo "::error::universe.py does not contain the new KIND direct-status implementation."
+            exit 1
+          }
+
+          if grep -q 'KR restriction snapshot incomplete' universe.py; then
+            echo "::error::Old KR restriction implementation is still present in universe.py."
+            exit 1
+          fi
+
+          echo "scanner.py: v11.9"
+          echo "hydrate_data.py: v11.9"
+          echo "universe.py: v11.2"
+          echo "KR restriction implementation: direct KIND status pages + badge fallback"
+
+      - name: Resolve refresh market and scan mode
+        id: market
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            case "${{ github.event.schedule }}" in
+              "30 10 * * 1-5"|"00 13 * * 1-5"|"50 14 * * 1-5")
+                MARKET="KR_GROUP"; SCAN_MODE="QUICK" ;;
+              "10 16 * * 1-5")
+                MARKET="KR_GROUP"; SCAN_MODE="FULL" ;;
+              "00 11 * * 1-5"|"30 13 * * 1-5"|"30 15 * * 1-5")
+                MARKET="US_GROUP"; SCAN_MODE="QUICK" ;;
+              "20 16 * * 1-5")
+                MARKET="US_GROUP"; SCAN_MODE="FULL" ;;
+              *)
+                echo "::error::Unknown scheduled cron: ${{ github.event.schedule }}"
+                exit 1 ;;
+            esac
+          else
+            MARKET="${{ inputs.market }}"
+            SCAN_MODE="${{ inputs.scan_mode }}"
+          fi
+
+          if [[ "$MARKET" == "UI_ONLY" ]]; then
+            SCAN_MODE="FULL"
+          fi
+
+          echo "market=$MARKET" >> "$GITHUB_OUTPUT"
+          echo "scan_mode=$SCAN_MODE" >> "$GITHUB_OUTPUT"
+          echo "Refresh market: $MARKET"
+          echo "Scan mode: $SCAN_MODE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate Firebase repository settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${FIREBASE_PROJECT_ID}" ]] || { echo "::error::Set repository variable FIREBASE_PROJECT_ID"; exit 1; }
+          [[ -n "${FIREBASE_SITE_ID}" ]] || { echo "::error::Set repository variable FIREBASE_SITE_ID"; exit 1; }
+          echo "Firebase project: ${FIREBASE_PROJECT_ID}"
+          echo "Firebase site: ${FIREBASE_SITE_ID}"
+          echo "Firebase URL: ${FIREBASE_LIVE}"
+
+      - name: Restore previous market snapshots
+        shell: bash
+        run: |
+          RESTORE_MARKET="${{ steps.market.outputs.market }}"
+          if [[ "$RESTORE_MARKET" == "UI_ONLY" ]]; then
+            RESTORE_MARKET="KR"
+            echo "UI_ONLY: restoring all live market snapshots without rescanning."
+          fi
+
+          python hydrate_data.py \
+            --market "$RESTORE_MARKET" \
+            --cache-snapshot ".dtc-cache/data-snapshot.tar.gz" \
+            --base-url "${FIREBASE_LIVE}" \
+            --base-url "${GITHUB_PAGES_LIVE}"
+
+      - name: Recover missing snapshots from Actions cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE_TAR=".dtc-cache/data-snapshot.tar.gz"
+          if [[ ! -s "$CACHE_TAR" ]]; then
+            echo "No secondary data cache available."
+            exit 0
+          fi
+
+          rm -rf /tmp/dtc-cache-restore
+          mkdir -p /tmp/dtc-cache-restore
+          tar -xzf "$CACHE_TAR" -C /tmp/dtc-cache-restore
+
+          for DIR in kr kr-etf us us-etf; do
+            if [[ ! -s "docs/data/$DIR/summary.json" && -s "/tmp/dtc-cache-restore/docs/data/$DIR/summary.json" ]]; then
+              echo "Recover category from secondary cache: $DIR"
+              rm -rf "docs/data/$DIR"
+              cp -a "/tmp/dtc-cache-restore/docs/data/$DIR" "docs/data/$DIR"
+            fi
+          done
+
+          for DIR in kr kr-etf us us-etf; do
+            if [[ ! -s "docs/data/quiz/$DIR/manifest.json" && -s "/tmp/dtc-cache-restore/docs/data/quiz/$DIR/manifest.json" ]]; then
+              echo "Recover quiz pool from secondary cache: $DIR"
+              mkdir -p docs/data/quiz
+              rm -rf "docs/data/quiz/$DIR"
+              cp -a "/tmp/dtc-cache-restore/docs/data/quiz/$DIR" "docs/data/quiz/$DIR"
+            fi
+          done
+
+          if [[ ! -s docs/data/fx_usdkrw.json && -s /tmp/dtc-cache-restore/docs/data/fx_usdkrw.json ]]; then
+            cp /tmp/dtc-cache-restore/docs/data/fx_usdkrw.json docs/data/fx_usdkrw.json
+          fi
+
+      - name: Inspect hydrated market snapshots
+        shell: bash
+        run: |
+          echo "Hydrated docs/data before scan:"
+          for DIR in kr kr-etf us us-etf; do
+            echo "---- $DIR ----"
+            if [[ -s "docs/data/$DIR/summary.json" ]]; then
+              echo "summary: PRESENT ($(du -h "docs/data/$DIR/summary.json" | cut -f1))"
+            else
+              echo "summary: MISSING"
+            fi
+            if [[ -s "docs/data/$DIR/bundle.zip" ]]; then
+              echo "bundle: PRESENT ($(du -h "docs/data/$DIR/bundle.zip" | cut -f1))"
+            else
+              echo "bundle: MISSING"
+            fi
+          done
+
+      - name: Scan selected market
+        if: steps.market.outputs.market != 'UI_ONLY'
+        run: |
+          echo "Running DTC v11.9 FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          python scanner.py \
+            --market "${{ steps.market.outputs.market }}" \
+            --scan-mode "${{ steps.market.outputs.scan_mode }}"
+
+      - name: Skip market scan for UI-only deploy
+        if: steps.market.outputs.market == 'UI_ONLY'
+        run: echo "UI_ONLY selected — existing live market snapshots will be redeployed with the new UI."
+
+      - name: Remove scanner-only root caches
+        run: rm -f docs/data/universe_kr.json docs/data/universe_kr_etf.json docs/data/universe_us.json docs/data/universe_us_etf.json docs/data/universe_us_etf_selected.json
+
+      - name: Verify complete deploy tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FAILED=0
+          for DIR in kr kr-etf us us-etf; do
+            echo "---- verify $DIR ----"
+
+            if [[ ! -s "docs/data/$DIR/summary.json" ]]; then
+              echo "::error::$DIR/summary.json is missing or empty"
+              FAILED=1
+            else
+              echo "summary.json: OK ($(du -h "docs/data/$DIR/summary.json" | cut -f1))"
+            fi
+
+            if [[ ! -s "docs/data/$DIR/bundle.zip" ]]; then
+              echo "::error::$DIR/bundle.zip is missing or empty"
+              FAILED=1
+            else
+              echo "bundle.zip: OK ($(du -h "docs/data/$DIR/bundle.zip" | cut -f1))"
+            fi
+
+            if [[ ! -d "docs/data/$DIR/stocks" ]]; then
+              echo "::error::$DIR/stocks directory is missing"
+              FAILED=1
+            else
+              COUNT=$(find "docs/data/$DIR/stocks" -maxdepth 1 -type f -name '*.json' | wc -l)
+              echo "stock details: $COUNT"
+            fi
+          done
+
+          echo "---- generated docs/data tree ----"
+          find docs/data -maxdepth 2 -type f -printf '%p %k KB\n' | sort || true
+
+          if [[ "$FAILED" -ne 0 ]]; then
+            echo "::error::Deploy tree incomplete. Check 'Scan selected market' above to see which category failed."
+            exit 1
+          fi
+
+          echo "Generated file count:"
+          find docs/data -type f | wc -l
+          echo "Generated data size:"
+          du -sh docs/data
+          echo "Quiz shards:"
+          find docs/data/quiz -maxdepth 1 -type f -name '*.json' -printf '%f %k KB\n' 2>/dev/null | sort || true
+
+      - name: Back up generated market data
+        shell: bash
+        run: |
+          tar -czf dtc-data-snapshot.tar.gz docs/data
+          mkdir -p .dtc-cache
+          cp dtc-data-snapshot.tar.gz .dtc-cache/data-snapshot.tar.gz
+
+      - name: Upload market-data backup
+        uses: actions/upload-artifact@v7
+        with:
+          name: dtc-data-snapshot-${{ github.run_id }}
+          path: dtc-data-snapshot.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Stamp UI build
+        shell: bash
+        run: |
+          cat > docs/build-info.json <<EOF
+          {
+            "ui_build": "20260821-v11_9",
+            "github_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "market": "${{ steps.market.outputs.market }}",
+            "scan_mode": "${{ steps.market.outputs.scan_mode }}"
+          }
+          EOF
+          echo "UI build: 20260821-v11_9"
+          cat docs/build-info.json
+
+      - name: Generate runtime Firebase endpoint
+        shell: bash
+        run: |
+          cat > docs/runtime-config.js <<EOF
+          // Generated by GitHub Actions.
+          window.DTC_DATA_ORIGIN = '${FIREBASE_LIVE}';
+          EOF
+
+      - name: Build lightweight GitHub Pages fallback
+        shell: bash
+        run: |
+          rm -rf pages-lite
+          mkdir -p pages-lite
+          cp docs/index.html docs/runtime-config.js docs/app.js docs/styles.css docs/logo-dtc.svg docs/news-config.js docs/pwa.js docs/sw.js docs/manifest.webmanifest docs/build-info.json pages-lite/
+          cp -R docs/icons pages-lite/icons
+          touch pages-lite/.nojekyll
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload lightweight GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./pages-lite
+          include-hidden-files: true
+
+      - name: Pack Firebase deploy artifact
+        run: tar -czf dtc-site.tar.gz docs firebase.json .firebaserc
+
+      - name: Upload Firebase deploy artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dtc-site
+          path: dtc-site.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy_pages:
+    name: Deploy GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  deploy_firebase:
+    name: Deploy Firebase Hosting
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download built site
+        uses: actions/download-artifact@v6
+        with:
+          name: dtc-site
+
+      - name: Extract built site
+        run: tar -xzf dtc-site.tar.gz
+
+      - name: Deploy to selected Firebase Hosting site
+        shell: bash
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "${FIREBASE_SERVICE_ACCOUNT_JSON}" ]] || { echo "::error::Set secret FIREBASE_SERVICE_ACCOUNT_JSON"; exit 1; }
+          SA_FILE="$RUNNER_TEMP/dtc-firebase-service-account.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$SA_FILE"
+          chmod 600 "$SA_FILE"
+
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+          [[ -n "${FIREBASE_PROJECT_ID}" && -n "${FIREBASE_SITE_ID}" ]] || { echo "::error::Firebase repository variables are missing"; exit 1; }
+
+          python - <<'PYCFG'
+          import json, os
+          p=json.load(open('firebase.json',encoding='utf-8'))
+          p['hosting']['site']=os.environ['FIREBASE_SITE_ID']
+          open('firebase.json','w',encoding='utf-8').write(json.dumps(p,ensure_ascii=False,indent=2)+'\n')
+          PYCFG
+
+          echo "Firebase project: ${FIREBASE_PROJECT_ID}"
+          echo "Firebase site: ${FIREBASE_SITE_ID}"
+          echo "Expected Hosting URL: ${FIREBASE_LIVE}"
+
+          npx -y firebase-tools@15.25.1 deploy \
+            --only hosting \
+            --project "${FIREBASE_PROJECT_ID}" \
+            --non-interactive
+
+          rm -f "$SA_FILE"
+
+      - name: Verify Firebase Hosting is serving this build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_SHA="${{ github.sha }}"
+          LIVE_URL="${FIREBASE_LIVE}/build-info.json"
+
+          for TRY in 1 2 3 4 5 6 7 8; do
+            echo "Firebase live verification $TRY/8"
+            BODY=$(curl -fsSL \
+              -H 'Cache-Control: no-cache' \
+              "${LIVE_URL}?run=${{ github.run_id }}&try=$TRY&ts=$(date +%s)" || true)
+
+            echo "$BODY"
+
+            if echo "$BODY" | grep -q "\"github_sha\": \"$EXPECTED_SHA\""; then
+              echo "SUCCESS: ${FIREBASE_LIVE} is serving the current GitHub build."
+              echo "GitHub SHA: $EXPECTED_SHA"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::Firebase CLI deploy finished, but ${FIREBASE_LIVE} is not serving the current build."
+          exit 1
+
