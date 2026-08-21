@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "11.9"
+MORNING_INVEST_COMPONENT_VERSION = "11.8"
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v11.9
+# Dongtan Trading Center (DTC) scanner v11.8
 # -----------------------------------------------------------------------------
 # Current setup score (0~10):
 #   1) Bollinger lower-band proximity                                       0~1
@@ -51,18 +51,14 @@ FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 # Total return uses Adj Close when available so dividends are reflected.
 # -----------------------------------------------------------------------------
 
-FULL_HISTORY_CALENDAR_DAYS = 1120
-# QUICK does not rebuild the historical model when a recent FULL model exists,
-# so only enough history for the current 400-session setup score is required.
-QUICK_HISTORY_CALENDAR_DAYS = 720
-BATCH_SIZE = 48
-RETRY_BATCH_SIZE = 8
-DOWNLOAD_THREADS = 8
-# Successful batches are throttled only periodically (see scan loop) rather than
-# after every request. Retries remain deliberately slower to avoid a 429 cascade.
-PRIMARY_BATCH_SLEEP = (0.10, 0.28)
-RETRY_BATCH_SLEEP = (0.70, 1.35)
-RETRY_ATTEMPTS = 2
+FULL_HISTORY_CALENDAR_DAYS = 1250
+QUICK_HISTORY_CALENDAR_DAYS = 1050
+BATCH_SIZE = 24
+RETRY_BATCH_SIZE = 4
+DOWNLOAD_THREADS = 4
+PRIMARY_BATCH_SLEEP = (0.55, 0.95)
+RETRY_BATCH_SLEEP = (1.5, 2.8)
+RETRY_ATTEMPTS = 3
 
 BB_WINDOW = 20
 BB_SIGMA = 2.0
@@ -102,17 +98,7 @@ BACKTEST_RECENT_TRADES = 10
 BACKTEST_NON_OVERLAP_STEP = 60
 BACKTEST_TARGET_POOL_SAMPLES = 40
 BACKTEST_MAX_BAND_HALF_WIDTH = 2.0
-BACKTEST_MODEL_GRID_STEP = 0.1
-BACKTEST_MODEL_MAX_AGE_DAYS = 10
 DISPLAY_META_TOP_N = 100
-
-# A symbol that survives the official exchange filters but still has no Yahoo
-# daily data after a healthy FULL scan is temporarily quarantined. This stops
-# the same stale/mismapped ticker from producing 404s on every intraday run,
-# while automatically retrying it the next day.
-YAHOO_QUARANTINE_HOURS = 20
-YAHOO_QUARANTINE_MAX_RATIO = 0.01
-YAHOO_QUARANTINE_MIN_HEALTHY_COVERAGE = 0.97
 
 # Slow metadata caches. Price scanning never waits on these for the whole universe;
 # sector/ETF size enrichment runs only for the displayed top 100.
@@ -607,7 +593,7 @@ def _refresh_kr_etf_size_cache_from_naver(size_cache: dict) -> int:
     return updated
 
 
-def _refresh_kr_equity_size_cache_from_krx(size_cache: dict, universe: list[Stock]) -> tuple[int, set[str]]:
+def _refresh_kr_equity_size_cache_from_krx(size_cache: dict, universe: list[Stock]) -> int:
     """Best-effort one-request KR stock market-cap snapshot.
 
     This avoids thousands of Yahoo metadata calls when KRX Data Marketplace is
@@ -650,17 +636,12 @@ def _refresh_kr_equity_size_cache_from_krx(size_cache: dict, universe: list[Stoc
                 continue
             fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             updated = 0
-            active_symbols: set[str] = set()
             for row in rows:
                 code = re.sub(r"\D", "", str(row.get("ISU_SRT_CD") or row.get("ISU_CD") or ""))
                 raw_cap = str(row.get("MKTCAP") or "").replace(",", "").strip()
                 cap = finite(raw_cap)
                 if not re.fullmatch(r"\d{6}", code) or not np.isfinite(cap) or cap <= 0:
                     continue
-                # MDCSTAT01501 is the official current trading-date snapshot.
-                # Keep this set even when the KIND name universe has no match; it
-                # is used to remove stale/delisted KIND rows before Yahoo download.
-                active_symbols.add(code)
                 ticker = ticker_by_code.get(code)
                 if not ticker:
                     continue
@@ -677,15 +658,15 @@ def _refresh_kr_equity_size_cache_from_krx(size_cache: dict, universe: list[Stoc
                 })
                 size_cache[ticker] = entry
                 updated += 1
-            if updated >= 500 and len(active_symbols) >= 500:
-                print(f"[KR] KRX market-cap snapshot {d}: {updated:,} matched stocks / {len(active_symbols):,} active codes")
-                return updated, active_symbols
+            if updated >= 500:
+                print(f"[KR] KRX market-cap snapshot {d}: {updated:,} stocks")
+                return updated
         except Exception as exc:
             last_error = exc
             continue
     if last_error:
         print(f"[KR] KRX bulk market-cap unavailable; Yahoo/cache fallback: {type(last_error).__name__}: {last_error}")
-    return 0, set()
+    return 0
 
 
 def _fetch_stock_size_basis(stock: Stock) -> dict | None:
@@ -807,16 +788,6 @@ def resolve_market_size(stock: Stock, close: float, thresholds: dict, size_cache
         if not np.isfinite(fx) or fx <= 0:
             return None
         size_krw = native_size * fx
-
-    # Persist a recent computed size so later QUICK scans can avoid downloading
-    # obviously sub-threshold US equities. A generous 75% cutoff is used later
-    # so boundary names are always rechecked with fresh prices.
-    if isinstance(entry, dict):
-        entry["last_close"] = float(close)
-        entry["last_size_native"] = float(native_size)
-        entry["last_size_krw"] = float(size_krw)
-        entry["last_size_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        size_cache[stock.ticker] = entry
     return float(native_size), float(size_krw), basis
 
 
@@ -886,229 +857,6 @@ def enrich_display_metadata(stock: Stock, item: dict, thresholds: dict, size_cac
     display_krw = _to_krw(display_native, stock.currency, thresholds)
     item["market_size_krw"] = clean(display_krw, 0)
 
-
-
-# -----------------------------------------------------------------------------
-# Scan acceleration / stale-symbol quarantine
-# -----------------------------------------------------------------------------
-
-def _category_data_dir(category: str) -> Path:
-    return DATA_DIR / CATEGORY_DIR[category]
-
-
-def _yahoo_quarantine_path(category: str) -> Path:
-    return _category_data_dir(category) / "yahoo-unavailable.json"
-
-
-def _load_yahoo_quarantine(category: str) -> dict[str, dict]:
-    path = _yahoo_quarantine_path(category)
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    now = datetime.now(timezone.utc)
-    live: dict[str, dict] = {}
-    for ticker, entry in raw.items():
-        if not isinstance(entry, dict):
-            continue
-        try:
-            until = datetime.fromisoformat(str(entry.get("skip_until") or "").replace("Z", "+00:00"))
-            if until.tzinfo is None:
-                until = until.replace(tzinfo=timezone.utc)
-        except Exception:
-            continue
-        if until > now:
-            live[str(ticker)] = entry
-    return live
-
-
-def _save_yahoo_quarantine(category: str, entries: dict[str, dict]) -> None:
-    _atomic_write_text(
-        _yahoo_quarantine_path(category),
-        json.dumps(entries, ensure_ascii=False, separators=(",", ":")),
-    )
-
-
-
-def _prefilter_us_equities_from_yahoo_screener(
-    universe: list[Stock],
-    thresholds: dict,
-    size_cache: dict,
-) -> tuple[list[Stock], dict]:
-    """Best-effort bulk prefilter for US equities using Yahoo's screener API.
-
-    We query at 80% of the app's hard 10T-KRW threshold, then intersect the
-    result with the Nasdaq Trader common-equity universe. The 20% buffer avoids
-    boundary omissions from FX/intraday market-cap differences. If yfinance's
-    screener is unavailable, pagination is incomplete, or the result is
-    implausibly small, the caller receives the original universe unchanged.
-    """
-    fx = finite(thresholds.get("usdkrw"))
-    if not np.isfinite(fx) or fx <= 0:
-        return universe, {"used": False, "reason": "usdkrw_unavailable"}
-    screen_fn = getattr(yf, "screen", None)
-    query_cls = getattr(yf, "EquityQuery", None)
-    if not callable(screen_fn) or query_cls is None:
-        return universe, {"used": False, "reason": "yfinance_screen_api_unavailable"}
-
-    min_native = (MIN_MARKET_SIZE_KRW / fx) * 0.80
-    page_size = 250
-    max_pages = 20
-    quotes: list[dict] = []
-    total = None
-    seen_symbols: set[str] = set()
-    try:
-        query = query_cls("gt", ["intradaymarketcap", float(min_native)])
-        for page in range(max_pages):
-            offset = page * page_size
-            response = screen_fn(
-                query,
-                offset=offset,
-                size=page_size,
-                sortField="intradaymarketcap",
-                sortAsc=False,
-            )
-            if not isinstance(response, dict):
-                raise RuntimeError("Yahoo screener returned non-dict payload")
-            page_quotes = response.get("quotes") or []
-            if not isinstance(page_quotes, list):
-                raise RuntimeError("Yahoo screener quotes missing")
-            if total is None:
-                try:
-                    total = int(response.get("total"))
-                except Exception:
-                    total = None
-            page_symbols = {
-                str(q.get("symbol") or "").strip().upper().replace(".", "-")
-                for q in page_quotes if isinstance(q, dict) and q.get("symbol")
-            }
-            new_symbols = page_symbols - seen_symbols
-            if page > 0 and page_quotes and not new_symbols:
-                raise RuntimeError("Yahoo screener pagination made no progress")
-            seen_symbols.update(page_symbols)
-            quotes.extend(q for q in page_quotes if isinstance(q, dict))
-            if len(page_quotes) < page_size:
-                break
-            if total is not None and len(seen_symbols) >= total:
-                break
-        if total is not None and total > len(seen_symbols) and len(seen_symbols) >= page_size * max_pages:
-            raise RuntimeError(f"Yahoo screener pagination capped before total={total}")
-
-        candidates: set[str] = set()
-        fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        for quote in quotes:
-            symbol = str(quote.get("symbol") or "").strip().upper().replace(".", "-")
-            if not symbol:
-                continue
-            candidates.add(symbol)
-            market_cap = finite(
-                quote.get("marketCap")
-                if quote.get("marketCap") is not None
-                else quote.get("intradaymarketcap")
-            )
-            if np.isfinite(market_cap) and market_cap > 0:
-                old = size_cache.get(symbol) if isinstance(size_cache.get(symbol), dict) else {}
-                entry = dict(old)
-                entry.update({
-                    "basis": "market_cap",
-                    "value": float(market_cap),
-                    "currency": "USD",
-                    "fetched_at": fetched_at,
-                    "source": "yahoo_bulk_screener",
-                })
-                size_cache[symbol] = entry
-
-        selected = [s for s in universe if s.ticker.upper() in candidates]
-        # A real 10T-KRW candidate universe should comfortably exceed this.
-        if len(selected) < 50:
-            raise RuntimeError(f"Yahoo screener intersection implausibly small: {len(selected)}")
-        print(
-            f"[US] Yahoo bulk market-cap prefilter: {len(universe):,} -> {len(selected):,} "
-            f"(query floor ~KRW {MIN_MARKET_SIZE_KRW*0.80/1e12:.1f}T, exact 10T filter still applied later)"
-        )
-        return selected, {
-            "used": True,
-            "input": len(universe),
-            "selected": len(selected),
-            "query_floor_krw": MIN_MARKET_SIZE_KRW * 0.80,
-            "quotes": len(quotes),
-            "reported_total": total,
-        }
-    except Exception as exc:
-        print(f"[US] Yahoo bulk market-cap prefilter unavailable; full-universe fallback: {type(exc).__name__}: {exc}")
-        return universe, {"used": False, "reason": f"{type(exc).__name__}:{exc}"}
-
-
-def _cached_quick_size_prefilter(
-    category: str,
-    universe: list[Stock],
-    size_cache: dict,
-    scan_mode: str,
-) -> tuple[list[Stock], int]:
-    """Skip only clearly-small cached US equities on QUICK scans.
-
-    A stock is excluded only when its computed KRW market size is <=75% of the
-    10T hard threshold and the value was refreshed within seven days. This gives
-    a very large safety margin for fast movers and never affects FULL scans.
-    """
-    if scan_mode != "QUICK" or category != "US":
-        return universe, 0
-    cutoff = MIN_MARKET_SIZE_KRW * 0.75
-    kept: list[Stock] = []
-    skipped = 0
-    for stock in universe:
-        entry = size_cache.get(stock.ticker) if isinstance(size_cache.get(stock.ticker), dict) else {}
-        value = finite(entry.get("last_size_krw"))
-        age = _age_days(entry.get("last_size_at"))
-        if np.isfinite(value) and value > 0 and age <= 7 and value < cutoff:
-            skipped += 1
-            continue
-        kept.append(stock)
-    return kept, skipped
-
-
-def _backtest_model_path(category: str) -> Path:
-    return _category_data_dir(category) / "backtest_model.json"
-
-
-def _load_backtest_model(category: str) -> dict | None:
-    path = _backtest_model_path(category)
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("grid"), dict):
-        return None
-    if _age_days(payload.get("generated_at_utc")) > BACKTEST_MODEL_MAX_AGE_DAYS:
-        return None
-    return payload
-
-
-def _attach_cached_backtest_model(items: list[dict], model: dict) -> tuple[list[dict], dict]:
-    grid = model.get("grid") or {}
-    for item in items:
-        score = min(MAX_SCORE, max(0.0, finite(item.get("score"), 0.0)))
-        snapped = round(round(score / BACKTEST_MODEL_GRID_STEP) * BACKTEST_MODEL_GRID_STEP, 1)
-        bt = dict(grid.get(f"{snapped:.1f}") or {})
-        if bt:
-            bt["current_score"] = round(score, 4)
-            bt["model"] = "cached_full_category_pooled_nonoverlap_60d"
-            bt["rank_influence"] = "none"
-            bt["reference_generated_at_utc"] = model.get("generated_at_utc")
-            bt["reference_reused_on_quick"] = True
-        else:
-            bt = {"available": False, "reason": "cached_backtest_grid_missing", "rank_influence": "none"}
-        item["backtest"] = bt
-    diagnostics = dict(model.get("diagnostics") or {})
-    diagnostics["reference_reused_on_quick"] = True
-    diagnostics["reference_generated_at_utc"] = model.get("generated_at_utc")
-    return items, diagnostics
 
 # -----------------------------------------------------------------------------
 # Current analysis + 60-day backtest
@@ -1323,7 +1071,7 @@ def build_pooled_backtests(
     items: list[dict],
     frames: dict[str, pd.DataFrame],
     scan_mode: str = "FULL",
-) -> tuple[list[dict], dict, dict]:
+) -> tuple[list[dict], dict]:
     """Attach statistically safer pooled backtests and return pool diagnostics."""
     samples: list[dict] = []
     for idx, item in enumerate(items, 1):
@@ -1377,20 +1125,7 @@ def build_pooled_backtests(
             diagnostics["score_band_mean_return_corr"] = clean(np.corrcoef(x[valid_xy], y[valid_xy])[0, 1], 4)
             diffs = np.diff(y[valid_xy])
             diagnostics["monotonic_up_step_ratio"] = clean(np.mean(diffs >= 0), 4) if len(diffs) else None
-    grid = {}
-    grid_steps = int(round(MAX_SCORE / BACKTEST_MODEL_GRID_STEP))
-    for idx in range(grid_steps + 1):
-        grid_score = round(idx * BACKTEST_MODEL_GRID_STEP, 1)
-        grid[f"{grid_score:.1f}"] = pooled_backtest_for_score(samples, grid_score)
-    model = {
-        "version": "DTC_BACKTEST_MODEL_V1",
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "grid_step": BACKTEST_MODEL_GRID_STEP,
-        "forward_days": BACKTEST_FORWARD_DAYS,
-        "grid": grid,
-        "diagnostics": diagnostics,
-    }
-    return items, diagnostics, model
+    return items, diagnostics
 
 
 # -----------------------------------------------------------------------------
@@ -1642,12 +1377,6 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict], s
     with zipfile.ZipFile(bundle_tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         zf.write(summary_tmp, "summary.json")
         zf.write(sizes_file, "sizes.json")
-        backtest_model_file = category_dir / "backtest_model.json"
-        if backtest_model_file.is_file():
-            zf.write(backtest_model_file, "backtest_model.json")
-        quarantine_file = category_dir / "yahoo-unavailable.json"
-        if quarantine_file.is_file():
-            zf.write(quarantine_file, "yahoo-unavailable.json")
         if universe_snapshot.is_file():
             zf.write(universe_snapshot, "universe.json")
         for detail_file in sorted(stocks_dir.glob("*.json")):
@@ -1682,16 +1411,15 @@ def scan_category(
     thresholds = thresholds_for(category, usdkrw)
     restricted, restriction_meta = _load_restrictions(category, universe)
     size_cache = _load_size_cache(category)
-    krx_active_symbols: set[str] = set()
     if category == "KR":
-        _, krx_active_symbols = _refresh_kr_equity_size_cache_from_krx(size_cache, universe)
+        _refresh_kr_equity_size_cache_from_krx(size_cache, universe)
     if category == "KR_ETF":
         # Fix KR ETF cards/filtering: Yahoo often omits Korean ETF totalAssets.
         # One Naver snapshot supplies market cap for the full fixed whitelist.
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v11.9 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v11.8 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     print("score = BB 0~1 + grouped relative volume-profile concentration (short/mid/long 0~3 each) = max 10")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
@@ -1708,52 +1436,7 @@ def scan_category(
 
     scan_universe = [s for s in universe if s.ticker not in restricted and s.symbol not in restricted]
     rejection["restricted_status"] += len(universe) - len(scan_universe)
-
-    # KIND is used for names/status, while the KRX daily market-cap snapshot is
-    # the authoritative current tradable-code list. This drops stale/delisted
-    # KIND rows (the recurring .KQ/.KS Yahoo 404s) before any Yahoo request.
-    if category == "KR" and krx_active_symbols:
-        before = len(scan_universe)
-        scan_universe = [s for s in scan_universe if s.symbol in krx_active_symbols]
-        rejection["not_in_current_krx_snapshot"] += before - len(scan_universe)
-
-        before = len(scan_universe)
-        def official_cap_ok(stock: Stock) -> bool:
-            entry = size_cache.get(stock.ticker) if isinstance(size_cache.get(stock.ticker), dict) else {}
-            if str(entry.get("source") or "") != "krx_MDCSTAT01501":
-                return True
-            cap = finite(entry.get("value"))
-            return not np.isfinite(cap) or cap >= MIN_MARKET_SIZE_KRW
-        scan_universe = [s for s in scan_universe if official_cap_ok(s)]
-        rejection["krx_market_size_lt_10t_prefilter"] += before - len(scan_universe)
-
-    us_bulk_prefilter_meta = {"used": False, "reason": "not_us"}
-    if category == "US":
-        scan_universe, us_bulk_prefilter_meta = _prefilter_us_equities_from_yahoo_screener(
-            scan_universe, thresholds, size_cache
-        )
-
-    # If Yahoo's bulk screener is unavailable, reuse recently-computed sizes for
-    # obviously small US equities during QUICK scans. FULL fallback still scans
-    # the complete live universe so no candidate is permanently lost.
-    if category == "US" and us_bulk_prefilter_meta.get("used"):
-        cached_small_skipped = 0
-    else:
-        scan_universe, cached_small_skipped = _cached_quick_size_prefilter(category, scan_universe, size_cache, scan_mode)
-    rejection["cached_small_quick_prefilter"] += cached_small_skipped
-
-    quarantine = _load_yahoo_quarantine(category)
-    if quarantine:
-        before = len(scan_universe)
-        scan_universe = [s for s in scan_universe if s.ticker not in quarantine]
-        rejection["yahoo_quarantine"] += before - len(scan_universe)
-
-    print(
-        f"[{category}] price-download universe={len(scan_universe):,} "
-        f"| KRX-stale={rejection['not_in_current_krx_snapshot']:,} "
-        f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,} "
-        f"| yahoo-quarantine={rejection['yahoo_quarantine']:,}"
-    )
+    print(f"[{category}] price-download universe={len(scan_universe):,}")
 
     batches = list(chunks(scan_universe, BATCH_SIZE))
     total_batches = len(batches)
@@ -1790,14 +1473,9 @@ def scan_category(
                 f"[{category}] {batch_no}/{total_batches} batches "
                 f"({batch_no/max(1,total_batches)*100:5.1f}%) | priced={len(priced_tickers):,} | eligible={len(results):,}"
             )
-        # Avoid a fixed sleep after every successful batch; it dominated wall
-        # time on 2k-5k symbol universes. A short pause every four batches keeps
-        # request bursts bounded while retaining Yahoo retry protection.
-        if batch_no % 4 == 0 and batch_no != total_batches:
-            time.sleep(random.uniform(*PRIMARY_BATCH_SLEEP))
+        time.sleep(random.uniform(*PRIMARY_BATCH_SLEEP))
 
     retry = [t for t in dict.fromkeys(missing) if t not in priced_tickers and t in by_ticker]
-    final_unavailable: list[str] = []
     if retry:
         print(f"[{category}] retrying {len(retry):,} unavailable symbols")
         remaining = retry
@@ -1835,7 +1513,6 @@ def scan_category(
             if remaining and attempt < attempts:
                 time.sleep(min(30.0, 5.0 * (2 ** (attempt - 1))))
         if remaining:
-            final_unavailable = list(remaining)
             print(f"[{category}] final unavailable symbols={len(remaining):,}")
 
     expected_price_count = len(scan_universe)
@@ -1847,30 +1524,6 @@ def scan_category(
             f"{category} price coverage too low: {len(priced_tickers)}/{expected_price_count} "
             f"({coverage:.1%}), required>={required_coverage:.0%}. Existing site data was not overwritten."
         )
-
-    # Healthy FULL scans may quarantine only a tiny tail of repeatedly unavailable
-    # symbols. Mass Yahoo failures are never quarantined, preventing a transient
-    # outage from silently shrinking the next scan universe.
-    for ticker in list(quarantine):
-        if ticker in priced_tickers:
-            quarantine.pop(ticker, None)
-    max_quarantine = max(20, int(max(1, expected_price_count) * YAHOO_QUARANTINE_MAX_RATIO))
-    if (
-        scan_mode == "FULL"
-        and final_unavailable
-        and coverage >= YAHOO_QUARANTINE_MIN_HEALTHY_COVERAGE
-        and len(final_unavailable) <= max_quarantine
-    ):
-        now = datetime.now(timezone.utc)
-        skip_until = now + timedelta(hours=YAHOO_QUARANTINE_HOURS)
-        for ticker in final_unavailable:
-            quarantine[ticker] = {
-                "failed_at": now.isoformat(timespec="seconds"),
-                "skip_until": skip_until.isoformat(timespec="seconds"),
-                "reason": "no_daily_price_after_full_retries",
-            }
-        print(f"[{category}] Yahoo quarantine added={len(final_unavailable):,} until {skip_until.isoformat(timespec='minutes')}")
-    _save_yahoo_quarantine(category, quarantine)
 
     if category not in ETF_CATEGORIES:
         size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
@@ -1887,28 +1540,8 @@ def scan_category(
     # Rank by the current setup itself. Historical performance is pooled and
     # attached only as a reference statistic; it has zero influence on order.
     unsorted_items = list(results.values())
-    backtest_refreshed = True
-    backtest_model = None
-    if scan_mode == "QUICK":
-        cached_model = _load_backtest_model(category)
-        if cached_model:
-            print(f"[{category}] QUICK: reusing latest FULL pooled backtest model (no historical rescoring)")
-            unsorted_items, backtest_diagnostics = _attach_cached_backtest_model(unsorted_items, cached_model)
-            backtest_refreshed = False
-        else:
-            print(f"[{category}] QUICK: no cached FULL backtest model; building fallback reference once")
-            unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
-                unsorted_items, frames, scan_mode=scan_mode
-            )
-    else:
-        print(f"[{category}] pooled non-overlap 60D reference backtest: {len(unsorted_items):,} eligible items")
-        unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
-            unsorted_items, frames, scan_mode=scan_mode
-        )
-        _atomic_write_text(
-            _backtest_model_path(category),
-            json.dumps(backtest_model, ensure_ascii=False, separators=(",", ":")),
-        )
+    print(f"[{category}] pooled non-overlap 60D reference backtest: {len(unsorted_items):,} eligible items")
+    unsorted_items, backtest_diagnostics = build_pooled_backtests(unsorted_items, frames, scan_mode=scan_mode)
 
     def _rank_key(item: dict):
         return (-finite(item.get("score"), 0.0), item.get("symbol", ""))
@@ -1936,16 +1569,7 @@ def scan_category(
         if _age_days((size_cache.get(item["ticker"]) or {}).get("meta_fetched_at")) < 0.01:
             time.sleep(random.uniform(0.12, 0.24))
 
-    quiz_manifest = DATA_DIR / "quiz" / CATEGORY_DIR[category] / "manifest.json"
-    if scan_mode == "FULL" or not quiz_manifest.is_file():
-        quiz_count = _write_quiz_shard(category, items, frames)
-    else:
-        try:
-            quiz_payload = json.loads(quiz_manifest.read_text(encoding="utf-8"))
-            quiz_count = len(quiz_payload.get("items") or [])
-        except Exception:
-            quiz_count = 0
-        print(f"[{category}] QUICK: reusing FULL quiz shard ({quiz_count:,} symbols)")
+    quiz_count = _write_quiz_shard(category, items, frames)
 
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
@@ -1956,16 +1580,12 @@ def scan_category(
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "scan_mode": scan_mode,
         "data_status": "intraday_live" if scan_mode == "QUICK" else "close_confirmed",
-        "backtest_refreshed": backtest_refreshed,
+        "backtest_refreshed": True,
         "market_date": market_date,
         "universe_source": universe_source,
         "restriction_snapshot": restriction_meta,
         "universe_count": len(universe),
         "price_download_universe_count": expected_price_count,
-        "krx_stale_prefilter_count": rejection["not_in_current_krx_snapshot"],
-        "market_size_prefilter_count": rejection["krx_market_size_lt_10t_prefilter"] + rejection["cached_small_quick_prefilter"],
-        "us_bulk_marketcap_prefilter": us_bulk_prefilter_meta,
-        "yahoo_quarantine_count": rejection["yahoo_quarantine"],
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
@@ -2033,7 +1653,7 @@ def main():
         "--scan-mode",
         choices=["FULL", "QUICK"],
         default="FULL",
-        help="FULL rebuilds the pooled 60D reference model + quiz; QUICK refreshes current scores with a short price window and reuses the latest FULL model/quiz.",
+        help="FULL/QUICK calculate the current 0~10 score and pooled non-overlapping 60-session reference backtest; QUICK uses a shorter download window.",
     )
     args = parser.parse_args()
 

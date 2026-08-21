@@ -1,8 +1,8 @@
-# DTC v11.9 · PWA + Android
+# DTC v11.8 · PWA + Android
 
 Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installable PWA, Android Capacitor wrapper, and chart-reconstruction Quiz mode.
 
-## Scanner v11.9
+## Scanner v11.8
 
 - Current setup score: **0~10** and ranking is by this current setup score only.
 - Bollinger proximity: upper band or above = 0, lower band or below = 1, linearly interpolated in between.
@@ -38,17 +38,6 @@ Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installabl
 - Card signals: pullback = Bollinger %B + RSI(14); breakout = distance vs prior 20-day high + current volume / prior 20-day average volume.
 - RSI warm-up remains NaN until enough observations exist.
 
-## v11.9 scan acceleration
-
-- KR: compare the KIND universe with the official KRX daily market-cap snapshot before Yahoo download. Stale/delisted KIND rows are removed before they can produce repeated `.KQ/.KS` 404s.
-- KR: because the app already has a hard KRW 10T equity rule, official KRX market cap is used to remove sub-10T equities before historical OHLC download rather than after it.
-- US: best-effort Yahoo bulk screener preselects equities above an 8T-KRW buffer, then intersects that set with the Nasdaq Trader common-equity universe. The exact 10T rule is still applied after prices are loaded. If the screener fails or looks incomplete, scanning automatically falls back to the full official universe.
-- Yahoo price download: batch 24→48, worker 4→8, and successful-request throttling occurs every four batches instead of every batch. Retry paths remain slower and use backoff.
-- QUICK: history window 1050→720 calendar days, reuses the latest FULL pooled-backtest grid, and reuses the FULL Quiz shard. Current setup scores still refresh from live/intraday prices.
-- FULL: rebuilds the pooled backtest grid and Quiz pool once after close.
-- Repeated Yahoo-missing symbols from an otherwise healthy FULL scan are quarantined for 20 hours; mass Yahoo failures are never quarantined.
-- GitHub Actions restores the prior `docs/data` snapshot from Actions cache before trying Firebase/GitHub Pages downloads, eliminating redundant hydration network work on normal repeated runs.
-
 ## Reliability changes
 
 - Korean equities use a best-effort KRX bulk market-cap snapshot before Yahoo per-symbol fallback.
@@ -61,4 +50,4 @@ Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installabl
 
 ## Recommended first run
 
-After deploying v11.9, run GitHub Actions with **`ALL + FULL` once**. This rebuilds all four market categories, the new score model, pooled backtest references, and all Quiz manifests/details.
+After deploying v11.8, run GitHub Actions with **`ALL + FULL` once**. This rebuilds all four market categories, the new score model, pooled backtest references, and all Quiz manifests/details.
