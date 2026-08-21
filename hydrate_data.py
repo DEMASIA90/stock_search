@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "11.2"
+MORNING_INVEST_COMPONENT_VERSION = "11.5"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -81,7 +81,6 @@ def detail_filename(item: dict) -> str:
 
 def summary_item(item: dict, detail_path: str) -> dict:
     bt = item.get("backtest") or {}
-    forecast = bt.get("forecast") or {}
     return {
         "ticker": item.get("ticker"),
         "symbol": item.get("symbol"),
@@ -95,20 +94,24 @@ def summary_item(item: dict, detail_path: str) -> dict:
         "rank": item.get("rank"),
         "base_score": item.get("base_score"),
         "score": item.get("score"),
+        "display_score": item.get("display_score", item.get("score")),
         "scores": item.get("scores") or {},
+        "sector": item.get("sector") or "—",
+        "market_size_krw": item.get("market_size_krw"),
+        "market_size_basis": item.get("market_size_basis"),
         "backtest": {
             "available": bool(bt.get("available")),
+            "reason": bt.get("reason"),
+            "evaluation_days": bt.get("evaluation_days"),
             "signals": bt.get("signals"),
-            "avg_20d": bt.get("avg_20d"),
-            "win_20d": bt.get("win_20d"),
-            "quality_score": bt.get("quality_score"),
-            "quality_label": bt.get("quality_label", "NORMAL"),
-            "score_adjustment": bt.get("score_adjustment", 0.0),
+            "signals_used": bt.get("signals_used"),
+            "current_score_threshold": bt.get("current_score_threshold"),
             "avg_60d": bt.get("avg_60d"),
+            "raw_avg_60d": bt.get("raw_avg_60d"),
             "median_60d": bt.get("median_60d"),
             "win_60d": bt.get("win_60d"),
-            "threshold": bt.get("threshold"),
-            "forecast_available": bool(forecast.get("available")),
+            "excluded_low": bt.get("excluded_low"),
+            "excluded_high": bt.get("excluded_high"),
         },
         "detail_path": detail_path,
     }

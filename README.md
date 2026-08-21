@@ -1,21 +1,28 @@
-# Dongtan Trading Center (DTC)
+# DTC v11.5 · PWA + Android
 
-Static stock scanner deployed from GitHub Actions to Firebase Hosting.
+Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installable PWA, and Android Capacitor wrapper.
 
-## Current scanner
+## Scanner v11.5
 
-- Final score: 0~100. Items 1~6 create an 85-point base score and the backtest adds -10/0/+10/+15.
-- Bollinger lower-band proximity: 0~10 points, linearly scored from upper band (0) to lower band (10).
-- Dominant 7-zone volume profiles: 20D +5, 40D +10, 60D +15, 120D +20, 200D +25 when the current close is inside the dominant zone.
-- Backtest: base score >=60, next-session open entry, 60 trading-day close exit; average return adds -10/0/+10/+15.
-- Main list: TOP20 only; search covers the full eligible summary universe.
-- Market-cap filters: 10/50/100/500/1000조 이상, default 100조 이상.
-- Card chart: latest 63 trading sessions (about 3 months).
-- ETF universe is restricted to the user-supplied whitelist in `etf_tickers.json` (KR 300 / US 500).
+- Current setup score: **0~10**.
+- Bollinger proximity: upper band or above = 0, lower band or below = 1, linearly interpolated in between.
+- Volume profile: each lookback is always split into **10 equal price zones**.
+- Lookbacks: **20 / 40 / 60 / 80 / 100 / 150 / 200 / 300 / 400 trading days**.
+- Each lookback contributes `volume in the current-price zone / total volume in all 10 zones`, so each component is 0~1.
+- Maximum score = Bollinger 1 + nine profile shares 9 = **10**.
+- Backtest: evaluate the latest 200 historical dates with known 60-session outcomes. Historical dates whose setup score is at least today's setup score are comparable events.
+- 60-day return = `Close[t+60] / Close[t] - 1`.
+- The single highest and single lowest return events are removed. Ranking is by the remaining mean 60-day return, highest first.
+- If fewer than 3 comparable events exist, the backtest is marked unavailable and the stock sorts after stocks with a valid trimmed mean.
 
-See `README_DTC_V11.md` for implementation details.
+## UI
 
-## Android app (v11.3)
+- Market tabs: 국장 / 국장 ETF / 미장 / 미장 ETF.
+- Default screen shows TOP20 by backtest rank; search can find the remaining eligible names.
+- Market-cap filters: 10 / 50 / 100 / 500 / 1000조 이상, default 100조 이상.
+- Chart window: approximately 3 trading months (63 sessions).
+- PWA can be installed from supported browsers and reads market data live from Firebase.
 
-Android APK/AAB 빌드 구성이 포함되어 있습니다. 자세한 사용법은 `README_ANDROID.md`를 참고하세요.
-GitHub Actions의 **DTC Android · Build APK & AAB** workflow를 실행하면 install 가능한 debug APK가 생성됩니다.
+## Recommended first run
+
+Run GitHub Actions with `ALL + FULL` once after deploying v11.5 so all categories are rebuilt using the new score/backtest model.

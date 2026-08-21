@@ -1,6 +1,6 @@
-# DTC v11.3 Android
+# DTC v11.5 Android
 
-DTC v11.2 scanner/web app에 Android 빌드 구성을 추가한 버전입니다.
+DTC v11.5 scanner/web app에 Android 빌드 구성을 추가한 버전입니다.
 
 ## Android 동작 방식
 
@@ -19,7 +19,7 @@ UI 코드(`docs/index.html`, `app.js`, `styles.css`) 자체를 변경한 경우�
 2. GitHub의 **Actions** 탭으로 이동합니다.
 3. **DTC Android · Build APK & AAB** workflow를 선택합니다.
 4. **Run workflow**를 실행합니다.
-5. 완료 후 workflow 하단 Artifacts에서 `DTC-v11.3-Android-APK`를 받습니다.
+5. 완료 후 workflow 하단 Artifacts에서 `DTC-v11.5-Android-APK`를 받습니다.
 6. 압축을 풀면 `app-debug.apk`가 있으며 Android 기기에 직접 설치할 수 있습니다.
 
 `main` 또는 `master` 브랜치의 `docs/**`, `package.json`, `capacitor.config.json` 또는 Android workflow가 변경되어 push될 때도 자동 빌드됩니다.

@@ -1,99 +1,37 @@
-# DTC v11.3
+# DTC v11.5 Scanner Model
 
-> Scanner/backtest component version remains `11.2`; v11.3 adds the Android/Capacitor build layer and deployment fixes without changing the scoring algorithm.
+## 1. Current setup score (0~10)
 
-## UI
+### Bollinger component (0~1)
 
-Header: `동탄 트레이딩 센터 (Dongtan Trading Center, DTC)`
+`score = 1 - clamp(%B, 0, 1)`
 
-Main market buttons: `국장 / 국장ETF / 미장 / 미장ETF`.
+- upper band or above: 0
+- middle band: 0.5
+- lower band or below: 1
 
-- Normal list: score-ranked TOP20 only.
-- Search: searches the full eligible summary universe, including stocks outside TOP20.
-- Market-size filters: 10조 / 50조 / 100조 / 500조 / 1000조 이상, default 100조 이상.
-- Card chart: most recent ~3 trading months (63 sessions).
+### 10-zone volume-profile components (0~1 each)
 
-## Unified final score (0~100)
+Lookbacks: `20, 40, 60, 80, 100, 150, 200, 300, 400` trading days.
 
-The score is built in two stages. Items 1~6 form an 85-point **base score**. Item 7 is a backtest adjustment from -10 to +15. Final display score is clipped to 0~100.
+For every lookback, `[minimum Low, maximum High]` is divided into exactly 10 equal price zones. Daily volume is distributed across zones according to Low~High overlap. The component score is:
 
-### 1. Bollinger lower-band proximity: 0~10
+`current price zone volume / total volume across all 10 zones`
 
-20-day Bollinger Band, 2 standard deviations.
+Nine lookbacks can contribute at most 9 points. Together with Bollinger, the theoretical maximum is exactly 10.
 
-`%B = (Close - Lower) / (Upper - Lower)`
+## 2. Backtest and ranking
 
-`BB score = 10 * (1 - clamp(%B, 0, 1))`
+The scanner looks at the latest 200 historical evaluation dates for which a 60-trading-day forward close is already known. Each historical date is scored using the same 0~10 point-in-time model.
 
-- Upper band or above: 0
-- Middle band: 5
-- Lower band or below: 10
-- Between upper/lower: linear interpolation
+A historical date is a comparable event when:
 
-### 2~6. Dominant 7-zone volume profile
+`historical setup score >= current setup score`
 
-| Lookback | Score when current Close is inside dominant zone |
-|---:|---:|
-| 20 trading days | +5 |
-| 40 trading days | +10 |
-| 60 trading days | +15 |
-| 120 trading days | +20 |
-| 200 trading days | +25 |
+For each comparable event:
 
-For every lookback:
+`60D return = Close[t+60] / Close[t] - 1`
 
-1. Find the lookback minimum Low and maximum High.
-2. Divide the price range into exactly seven equal price zones.
-3. Distribute each daily bar's Volume across every zone overlapped by `[Low, High]`, proportional to overlap length.
-4. The zone with the largest accumulated volume is the dominant volume zone.
-5. If the current Close is inside that dominant zone, add the lookback's assigned score. Otherwise add 0.
-6. The dominant zone center is saved and drawn on the chart.
+Before averaging, exactly one highest-return event and one lowest-return event are removed. At least 3 comparable raw events are therefore required.
 
-`해당 매물대` means the single largest-volume zone among the seven bins.
-
-### 7. Backtest adjustment: -10~+15
-
-To avoid circular scoring, the historical signal is generated from **items 1~6 only**.
-
-Existing execution model is retained:
-
-- Signal: base score >= 60 at the close.
-- Entry: next trading-day Open.
-- Exit: Close 60 trading days after entry.
-- Historical signal window: most recent 252 eligible trading days.
-- Cooldown: 10 trading days between signals for the same stock.
-- Backtest result used for scoring: average 60-trading-day return.
-
-Adjustment:
-
-| Average return | Score adjustment |
-|---:|---:|
-| < 0% | -10 |
-| 0% to <5% | 0 |
-| 5% to <10% | +10 |
-| >=10% | +15 |
-
-Therefore the theoretical maximum is `85 + 15 = 100`.
-
-## FULL / QUICK behavior
-
-- **FULL**: recalculates the backtest for every eligible stock because item 7 affects the final rank.
-- **QUICK**: refreshes the current 1~6 base score and reuses the latest compatible FULL backtest adjustment.
-- If no compatible FULL backtest exists yet, item 7 is neutral (0) until the next FULL run.
-
-## Universe rules retained
-
-- KR restricted/halted/watch-list handling.
-- US trading-halt handling.
-- Minimum history / minimum price checks.
-- KR/US equities retain the existing KRW 10T minimum market-size rule.
-- ETFs are exempt from the scanner's hard 10T eligibility rule.
-- ETF whitelist remains `etf_tickers.json`: KR 300 and US 500 tickers.
-
-## Deployment
-
-Because the score schema changed, the first deployment should be run once with:
-
-`ALL + FULL`
-
-After that, scheduled QUICK/FULL refreshes can continue normally.
+Final stock ordering is descending by this trimmed 60-day mean. The current 0~10 setup score is the setup-quality indicator and acts as the historical comparison threshold; it is not added to the backtest return.

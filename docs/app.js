@@ -44,19 +44,19 @@ function currentData() { return state.data[state.category]; }
 
 function scoreValue(stock) {
   const n = Number(stock?.display_score ?? stock?.score);
-  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+  return Number.isFinite(n) ? Math.max(0, Math.min(10, n)) : 0;
 }
 
 function scoreText(stock) {
   const n = Number(stock?.display_score ?? stock?.score);
-  return Number.isFinite(n) ? n.toFixed(1) : '—';
+  return Number.isFinite(n) ? n.toFixed(2) : '—';
 }
 
 function heatClass(stock) {
   const n = scoreValue(stock);
-  if (n >= 80) return 'heat-80';
-  if (n >= 70) return 'heat-70';
-  if (n >= 60) return 'heat-60';
+  if (n >= 8) return 'heat-80';
+  if (n >= 7) return 'heat-70';
+  if (n >= 6) return 'heat-60';
   return '';
 }
 
@@ -136,12 +136,13 @@ function filterItems() {
 function backtestLine(stock) {
   const bt = stock?.backtest || {};
   if (!bt.available || bt.avg_60d == null) {
-    return '백테스팅 결과: <b>60일 후 평균 기대수익 —</b> <small>(1~6 기본점수 60점 이상 기준)</small>';
+    const n = Number(bt.signals || 0);
+    return `백테스팅 결과: <b>60일 후 절사평균 기대수익 —</b> <small>· 유사사건 ${Number.isFinite(n) ? n : 0}건</small>`;
   }
   const klass = Number(bt.avg_60d) > 0 ? 'up' : Number(bt.avg_60d) < 0 ? 'down' : 'flat';
-  const adj = Number(bt.score_adjustment);
-  const adjText = Number.isFinite(adj) ? `${adj > 0 ? '+' : ''}${adj.toFixed(0)}점` : '0점';
-  return `백테스팅 결과: <b>60일 후 평균 기대수익 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>· 점수 ${adjText}</small>`;
+  const used = Number(bt.signals_used || 0);
+  const raw = Number(bt.signals || 0);
+  return `백테스팅 결과: <b>60일 후 절사평균 기대수익 <span class="${klass}">${ratioPct(bt.avg_60d)}</span></b> <small>· ${used}/${raw}건 사용 · 최고/최저 각 1건 제외</small>`;
 }
 
 function stockCard(stock) {
@@ -254,7 +255,7 @@ function drawChart(el, detail) {
     grid += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+6}" y="${y+4}" class="price-axis">${label}</text>`;
   }
 
-  const profileClasses = ['profile20','profile40','profile60','profile120','profile200'];
+  const profileClasses = ['profile20','profile40','profile60','profile80','profile100','profile150','profile200','profile300','profile400'];
   let profileSvg = '';
   profiles.forEach((p, idx) => {
     const center = Number(p.center);
@@ -278,7 +279,7 @@ function drawChart(el, detail) {
     <path d="${path('close')}" class="price-line"/>
     ${dateSvg}
   </svg>
-  <div class="chart-legend"><span>PRICE</span><span>BB</span><span>40D</span><span>60D</span><span>120D</span><span>200D</span></div>`;
+  <div class="chart-legend"><span>PRICE</span><span>BB</span><span>10-ZONE PROFILE</span></div>`;
 }
 
 function newsSearchQuery(stock) {
@@ -402,32 +403,32 @@ async function openScoreDetail(stock) {
   const s = detail.scores || stock.scores || {};
   const profiles = detail.metrics?.profiles || {};
   const bt = detail.backtest || stock.backtest || {};
-  const btAvg = bt.avg_60d == null ? '' : `평균수익 ${ratioPct(bt.avg_60d)}`;
   const rows = [
-    ['볼린저 하단 근접', Number(s.bollinger || 0), 10, detail.metrics?.percent_b == null ? '' : `%B ${Number(detail.metrics.percent_b).toFixed(3)}`],
-    ['20일 주매물대', Number(s.profile_20 || 0), 5, profileText(profiles['20'])],
-    ['40일 주매물대', Number(s.profile_40 || 0), 10, profileText(profiles['40'])],
-    ['60일 주매물대', Number(s.profile_60 || 0), 15, profileText(profiles['60'])],
-    ['120일 주매물대', Number(s.profile_120 || 0), 20, profileText(profiles['120'])],
-    ['200일 주매물대', Number(s.profile_200 || 0), 25, profileText(profiles['200'])],
-    ['백테스트 보정', Number(s.backtest || bt.score_adjustment || 0), 15, btAvg],
+    ['볼린저 하단 근접', Number(s.bollinger || 0), 1, detail.metrics?.percent_b == null ? '' : `%B ${Number(detail.metrics.percent_b).toFixed(3)}`],
+    ...[20,40,60,80,100,150,200,300,400].map((days) => [
+      `${days}일 현재 매물대 비중`, Number(s[`profile_${days}`] || 0), 1, profileText(profiles[String(days)])
+    ]),
   ];
-  body.innerHTML = `<div class="score-total"><span>TOTAL SCORE</span><b>${scoreText(stock)}</b><small>/ 100</small></div>
+  const btText = bt.avg_60d == null
+    ? `유사사건 ${Number(bt.signals || 0)}건 · 계산 불가`
+    : `60일 절사평균 ${ratioPct(bt.avg_60d)} · ${Number(bt.signals_used || 0)}/${Number(bt.signals || 0)}건 사용`;
+
+  body.innerHTML = `<div class="score-total"><span>CURRENT SETUP SCORE</span><b>${scoreText(stock)}</b><small>/ 10</small></div>
     <div class="score-rows">${rows.map(([label, value, max, sub]) => {
-      const isBacktest = label === '백테스트 보정';
-      const valueText = isBacktest ? `${value > 0 ? '+' : ''}${Number(value).toFixed(1)}` : Number(value).toFixed(1);
-      const maxText = isBacktest ? '-10~+15' : `/${max}`;
       return `<div class="score-row">
         <div><b>${escapeHtml(label)}</b>${sub ? `<small>${escapeHtml(sub)}</small>` : ''}</div>
-        <strong class="${value >= max ? 'full' : ''}">${valueText}<small>${maxText}</small></strong>
+        <strong class="${value >= max - 1e-9 ? 'full' : ''}">${Number(value).toFixed(3)}<small>/${max}</small></strong>
       </div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>
+    <div class="backtest-one-line" style="margin-top:14px">${escapeHtml(btText)}</div>`;
 }
 
 function profileText(p) {
   if (!p?.available) return '매물대 계산 불가';
-  const center = Number(p.center);
-  return `${p.hit ? '현재가 포함' : '현재가 미포함'} · 중심 ${Number.isFinite(center) ? center.toLocaleString('ko-KR', { maximumFractionDigits:2 }) : '—'}`;
+  const share = Number(p.share);
+  const idx = Number(p.index);
+  const zone = Number.isFinite(idx) ? `${idx + 1}/10구간` : '—';
+  return `${zone} · 거래량 비중 ${Number.isFinite(share) ? (share * 100).toFixed(1) : '—'}%`;
 }
 
 function closeModal() {

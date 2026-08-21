@@ -14,7 +14,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "11.2"
+MORNING_INVEST_COMPONENT_VERSION = "11.5"
 
 import numpy as np
 import pandas as pd
@@ -27,30 +27,34 @@ DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v11.2
+# Dongtan Trading Center (DTC) scanner v11.5
 # -----------------------------------------------------------------------------
-# One unified 100-point score:
-#   1) Bollinger lower-band proximity                            0~10
-#   2) Current price inside dominant 7-bin volume zone, 20D     +5
-#   3) Current price inside dominant 7-bin volume zone, 40D    +10
-#   4) Current price inside dominant 7-bin volume zone, 60D    +15
-#   5) Current price inside dominant 7-bin volume zone, 120D   +20
-#   6) Current price inside dominant 7-bin volume zone, 200D   +25
-#   7) Backtest adjustment from the 1~6 base score        -10~+15
+# Current setup score (0~10):
+#   1) Bollinger lower-band proximity                                  0~1
+#   2) Volume-profile share of the CURRENT price zone for each of:
+#      20/40/60/80/100/150/200/300/400 trading days                    0~1 each
 #
-# For each lookback, the price range [min Low, max High] is split into 7 equal
-# price zones. Each daily bar's volume is distributed across the zones in
-# proportion to the overlap of [Low, High] with each zone. The single zone with
-# the largest accumulated volume is the "dominant supply/volume zone".
+# Every volume profile always uses 10 equal price zones over
+# [min Low, max High]. Daily volume is distributed across touched zones in
+# proportion to each bar's Low~High overlap. The score for a lookback is:
 #
-# The backtest uses only items 1~6 (base score, max 85) to avoid circular
-# scoring. Historical base-score signals >=60 keep the existing execution model:
-# next-session open entry and 60-trading-day close exit. The average return then
-# contributes -10 / 0 / +10 / +15 to the current final score.
+#     volume accumulated in the zone containing current close
+#     --------------------------------------------------------
+#              volume accumulated in all 10 zones
+#
+# Therefore Bollinger max 1 + nine profile shares max 9 = exact max score 10.
+#
+# Ranking is NOT by the 0~10 score. For each stock, the last 200 historical
+# evaluation dates that already have a 60-trading-day outcome are scored with
+# the same model. A historical date is treated as a comparable event when its
+# setup score is >= today's setup score. Return is Close[t+60]/Close[t]-1.
+# The single highest-return event and the single lowest-return event are removed,
+# and stocks are ranked by the remaining (trimmed) mean 60-day return.
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1250
-QUICK_HISTORY_CALENDAR_DAYS = 460
+QUICK_HISTORY_CALENDAR_DAYS = 1050
 BATCH_SIZE = 24
 RETRY_BATCH_SIZE = 4
 DOWNLOAD_THREADS = 4
@@ -60,27 +64,26 @@ RETRY_ATTEMPTS = 3
 
 BB_WINDOW = 20
 BB_SIGMA = 2.0
-PROFILE_BINS = 7
-PROFILE_WEIGHTS = {20: 5.0, 40: 10.0, 60: 15.0, 120: 20.0, 200: 25.0}
-PROFILE_LOOKBACKS = tuple(PROFILE_WEIGHTS)
-BOLLINGER_MAX_SCORE = 10.0
-BASE_MAX_SCORE = BOLLINGER_MAX_SCORE + sum(PROFILE_WEIGHTS.values())
-MAX_SCORE = 100.0
+PROFILE_BINS = 10
+PROFILE_LOOKBACKS = (20, 40, 60, 80, 100, 150, 200, 300, 400)
+BOLLINGER_MAX_SCORE = 1.0
+BASE_MAX_SCORE = BOLLINGER_MAX_SCORE + float(len(PROFILE_LOOKBACKS))
+MAX_SCORE = 10.0
 CHART_POINTS = 63  # ~3 trading months
 
-MIN_TRADING_DAYS = 250
+MIN_TRADING_DAYS = 400
 MIN_PRICE_KRW = 1_000.0
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
 ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
 
-# FULL backtest: base score (items 1~6 only) >=60, next-day open entry,
-# 60 trading-day exit. The average return becomes the final score adjustment.
-BACKTEST_MIN_SCORE = 60.0
-BACKTEST_LOOKBACK_DAYS = 252
+# Backtest uses 200 historical evaluation dates with known 60-session outcomes.
+# Comparable event rule: historical setup score >= the stock's current setup score.
+# One highest and one lowest return event are excluded from the reported mean.
+BACKTEST_LOOKBACK_DAYS = 200
 BACKTEST_FORWARD_DAYS = 60
-BACKTEST_COOLDOWN_DAYS = 10
-DISPLAY_META_TOP_N = 100
 BACKTEST_RECENT_TRADES = 10
+BACKTEST_MIN_EVENTS_FOR_TRIM = 3
+DISPLAY_META_TOP_N = 100
 
 # Slow metadata caches. Price scanning never waits on these for the whole universe;
 # sector/ETF size enrichment runs only for the displayed top 100.
@@ -188,27 +191,26 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def bollinger_proximity_score(percent_b: float) -> float:
-    """0~10 linear proximity score across the whole Bollinger channel.
+    """0~1 linear proximity score across the Bollinger channel.
 
-    lower band / below (%B<=0) -> 10
-    middle band (%B=0.5)       -> 5
+    lower band / below (%B<=0) -> 1
+    middle band (%B=0.5)       -> 0.5
     upper band / above (%B>=1) -> 0
     """
     if not np.isfinite(percent_b):
         return 0.0
-    return round(BOLLINGER_MAX_SCORE * (1.0 - clip(float(percent_b), 0.0, 1.0)), 4)
+    return round(BOLLINGER_MAX_SCORE * (1.0 - clip(float(percent_b), 0.0, 1.0)), 6)
 
+def current_price_volume_zone(window: pd.DataFrame, current_price: float) -> dict:
+    """Return the 10-bin volume-profile share of the zone containing current_price.
 
-def dominant_volume_zone(window: pd.DataFrame, current_price: float) -> dict:
-    """Return the largest of seven volume-at-price zones for one lookback.
-
-    A day's volume is distributed over every price zone touched by that day's
-    [Low, High] range, proportional to overlap length. This is a daily-bar proxy
-    for an intraday volume profile and is deterministic for both live scoring
-    and point-in-time backtesting.
+    The window price range [min Low, max High] is always split into 10 equal
+    price zones. Each bar's volume is distributed over the zones touched by its
+    Low~High range, proportional to overlap length. The scoring value is the
+    current price zone's accumulated volume divided by total accumulated volume.
     """
     if window is None or window.empty or not np.isfinite(current_price):
-        return {"available": False, "hit": False}
+        return {"available": False, "share": 0.0}
 
     lows = pd.to_numeric(window["Low"], errors="coerce").to_numpy(dtype=float)
     highs = pd.to_numeric(window["High"], errors="coerce").to_numpy(dtype=float)
@@ -218,35 +220,32 @@ def dominant_volume_zone(window: pd.DataFrame, current_price: float) -> dict:
     valid = np.isfinite(lows) & np.isfinite(highs) & np.isfinite(closes) & np.isfinite(volumes)
     valid &= (lows > 0) & (highs >= lows) & (volumes >= 0)
     if not valid.any():
-        return {"available": False, "hit": False}
+        return {"available": False, "share": 0.0}
 
     lows, highs, closes, volumes = lows[valid], highs[valid], closes[valid], volumes[valid]
     pmin = float(np.nanmin(lows))
     pmax = float(np.nanmax(highs))
     if not (np.isfinite(pmin) and np.isfinite(pmax) and pmax >= pmin and pmin > 0):
-        return {"available": False, "hit": False}
+        return {"available": False, "share": 0.0}
 
     values = np.zeros(PROFILE_BINS, dtype=float)
 
     if np.isclose(pmax, pmin):
-        values[0] = float(np.nansum(volumes))
-        lower = upper = center = pmin
-        hit = bool(np.isclose(current_price, pmin))
+        total = float(np.nansum(volumes))
+        share = 1.0 if total > 0 else 0.0
         return {
-            "available": True,
-            "hit": hit,
+            "available": total > 0,
             "index": 0,
-            "lower": clean(lower),
-            "upper": clean(upper),
-            "center": clean(center),
-            "dominant_volume": clean(values[0], 0),
-            "dominant_share": 1.0 if values[0] > 0 else None,
+            "lower": clean(pmin),
+            "upper": clean(pmax),
+            "center": clean(pmin),
+            "zone_volume": clean(total, 0),
+            "total_volume": clean(total, 0),
+            "share": clean(share, 6),
+            "bins": PROFILE_BINS,
         }
 
     edges = np.linspace(pmin, pmax, PROFILE_BINS + 1)
-
-    # Vectorized 7-zone overlap allocation. This is identical to distributing
-    # each bar in a Python loop, but is fast enough for the 60D backtest.
     spans = highs - lows
     ranged = spans > 1e-12
     if ranged.any():
@@ -267,28 +266,30 @@ def dominant_volume_zone(window: pd.DataFrame, current_price: float) -> dict:
 
     total = float(values.sum())
     if total <= 0:
-        return {"available": False, "hit": False}
+        return {"available": False, "share": 0.0}
 
-    idx = int(np.argmax(values))
+    idx = int(np.searchsorted(edges, current_price, side="right") - 1)
+    idx = int(np.clip(idx, 0, PROFILE_BINS - 1))
     lower = float(edges[idx])
     upper = float(edges[idx + 1])
     center = float((lower + upper) / 2.0)
-    tol = max(1e-12, abs(current_price) * 1e-10)
-    hit = bool((current_price + tol) >= lower and (current_price - tol) <= upper)
+    zone_volume = float(values[idx])
+    share = zone_volume / total
 
     return {
         "available": True,
-        "hit": hit,
         "index": idx,
         "lower": clean(lower),
         "upper": clean(upper),
         "center": clean(center),
-        "dominant_volume": clean(values[idx], 0),
-        "dominant_share": clean(values[idx] / total, 4),
+        "zone_volume": clean(zone_volume, 0),
+        "total_volume": clean(total, 0),
+        "share": clean(share, 6),
+        "bins": PROFILE_BINS,
     }
 
-
 def score_at(frame: pd.DataFrame, ind: pd.DataFrame, pos: int) -> tuple[float, dict, dict]:
+    """Calculate the current 0~10 setup score at one point in time."""
     if pos < max(BB_WINDOW - 1, max(PROFILE_LOOKBACKS) - 1) or pos >= len(frame):
         return 0.0, {}, {}
 
@@ -300,15 +301,16 @@ def score_at(frame: pd.DataFrame, ind: pd.DataFrame, pos: int) -> tuple[float, d
     s_bb = bollinger_proximity_score(percent_b)
     scores = {"bollinger": s_bb}
     profiles = {}
-
     total = s_bb
+
     for days in PROFILE_LOOKBACKS:
         window = frame.iloc[pos - days + 1 : pos + 1]
-        profile = dominant_volume_zone(window, close)
+        profile = current_price_volume_zone(window, close)
         profile["days"] = days
         profiles[str(days)] = profile
-        component = PROFILE_WEIGHTS[days] if profile.get("available") and profile.get("hit") else 0.0
-        scores[f"profile_{days}"] = component
+        component = finite(profile.get("share"), 0.0) if profile.get("available") else 0.0
+        component = float(clip(component, 0.0, 1.0))
+        scores[f"profile_{days}"] = round(component, 6)
         total += component
 
     metrics = {
@@ -318,40 +320,7 @@ def score_at(frame: pd.DataFrame, ind: pd.DataFrame, pos: int) -> tuple[float, d
         "bb_upper": clean(ind["BB_Upper"].iloc[pos]),
         "profiles": profiles,
     }
-    return round(float(clip(total, 0.0, BASE_MAX_SCORE)), 4), scores, metrics
-
-
-
-def qualifying_base_score_for_backtest(
-    frame: pd.DataFrame, ind: pd.DataFrame, pos: int, threshold: float = BACKTEST_MIN_SCORE
-) -> float | None:
-    """Return the exact 1~6 base score only when it can reach the signal threshold.
-
-    Backtests evaluate hundreds of historical dates per stock. The 200D/120D
-    zones carry the largest weights, so evaluate high-weight zones first and
-    stop as soon as even all remaining points cannot reach the threshold. This
-    preserves the exact signal decision while avoiding unnecessary profile work.
-    """
-    if pos < max(BB_WINDOW - 1, max(PROFILE_LOOKBACKS) - 1) or pos >= len(frame):
-        return None
-    close = finite(frame["Close"].iloc[pos])
-    percent_b = finite(ind["PercentB"].iloc[pos])
-    if not np.isfinite(close) or close <= 0 or not np.isfinite(percent_b):
-        return None
-
-    total = bollinger_proximity_score(percent_b)
-    ordered = sorted(PROFILE_WEIGHTS.items(), key=lambda kv: (-kv[1], -kv[0]))
-    remaining = float(sum(weight for _, weight in ordered))
-    for days, weight in ordered:
-        remaining -= weight
-        window = frame.iloc[pos - days + 1 : pos + 1]
-        profile = dominant_volume_zone(window, close)
-        if profile.get("available") and profile.get("hit"):
-            total += weight
-        if total + remaining < threshold:
-            return None
-
-    return round(float(total), 4) if total >= threshold else None
+    return round(float(clip(total, 0.0, BASE_MAX_SCORE)), 6), scores, metrics
 
 def thresholds_for(category: str, usdkrw: float | None) -> dict:
     if category in {"KR", "KR_ETF"}:
@@ -396,7 +365,8 @@ def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
                 "center": p.get("center"),
                 "lower": p.get("lower"),
                 "upper": p.get("upper"),
-                "hit": bool(p.get("hit")),
+                "share": p.get("share"),
+                "index": p.get("index"),
             })
     return {
         "d": [pd.Timestamp(i).date().isoformat() for i in chart.index],
@@ -638,7 +608,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     if frame.empty:
         return None, "no_price"
     if len(frame) < MIN_TRADING_DAYS:
-        return None, "listed_lt_250d"
+        return None, "listed_lt_400d"
 
     ind = add_indicators(frame)
     pos = len(frame) - 1
@@ -678,9 +648,9 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "close": clean(close),
         "day_change_pct": clean(day_change, 2),
         "rank": None,
-        "base_score": round(score, 1),
-        "score": round(score, 1),
-        "display_score": round(score, 1),
+        "base_score": round(score, 4),
+        "score": round(score, 4),
+        "display_score": round(score, 2),
         "scores": scores,
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
@@ -697,122 +667,124 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     return item, "passed"
 
 
-def backtest_score_adjustment(avg_return: float) -> float:
-    """Map average decimal return to the requested final score adjustment.
+def backtest_60d(frame: pd.DataFrame, current_score: float) -> dict:
+    """Estimate 60-session return for historical setups comparable to today.
 
-    < 0%      -> -10
-    0%~<5%    ->   0
-    5%~<10%   -> +10
-    >=10%     -> +15
-    """
-    r = finite(avg_return)
-    if not np.isfinite(r):
-        return 0.0
-    if r < 0.0:
-        return -10.0
-    if r < 0.05:
-        return 0.0
-    if r < 0.10:
-        return 10.0
-    return 15.0
+    Evaluation window: exactly the most recent 200 historical trading dates for
+    which t+60 is already known. Each historical date is scored using the exact
+    same 0~10 model. A date is a comparable event when historical_score >=
+    current_score. Return is close[t+60] / close[t] - 1.
 
-
-def apply_backtest_adjustment(item: dict, backtest: dict | None) -> None:
-    """Apply item 7 to a current item after items 1~6 have been scored."""
-    bt = dict(backtest or {})
-    base = finite(item.get("base_score"), finite(item.get("score"), 0.0))
-    adjustment = finite(bt.get("score_adjustment"))
-    if not np.isfinite(adjustment):
-        adjustment = backtest_score_adjustment(bt.get("avg_60d")) if bt.get("available") else 0.0
-    adjustment = float(adjustment) if np.isfinite(adjustment) else 0.0
-    bt["score_adjustment"] = adjustment
-    item["backtest"] = bt
-    item["base_score"] = round(float(clip(base, 0.0, BASE_MAX_SCORE)), 1)
-    final = clip(base + adjustment, 0.0, MAX_SCORE)
-    item["score"] = round(float(final), 1)
-    item["display_score"] = round(float(final), 1)
-    item.setdefault("scores", {})["backtest"] = adjustment
-    item.setdefault("metrics", {})["base_score"] = item["base_score"]
-    item["metrics"]["backtest_score_adjustment"] = adjustment
-
-
-def backtest_60d(frame: pd.DataFrame) -> dict:
-    """Point-in-time backtest for score items 1~6 only.
-
-    Signal: base score (items 1~6) >= 60 at daily close.
-    Entry: next trading-day open.
-    Exit: close 60 trading sessions after entry.
-    A 10-session cooldown limits near-duplicate signals from the same setup.
-
-    The historical average return is mapped to item 7 of the current score:
-    <0%=-10, 0~<5%=0, 5~<10%=+10, >=10%=+15.
+    The single highest-return event and the single lowest-return event are
+    excluded before calculating avg_60d. At least three raw comparable events
+    are required so that at least one event remains after trimming.
     """
     n = len(frame)
     min_pos = max(BB_WINDOW - 1, max(PROFILE_LOOKBACKS) - 1)
-    if n < min_pos + BACKTEST_FORWARD_DAYS + 25:
+    current_score = finite(current_score)
+    if not np.isfinite(current_score):
+        current_score = 0.0
+    current_score = float(clip(current_score, 0.0, MAX_SCORE))
+
+    # last_i has a known t+60 close. We need up to 200 evaluation dates before it.
+    last_i = n - BACKTEST_FORWARD_DAYS - 1
+    if last_i < min_pos:
         return {
             "available": False,
             "reason": "insufficient_history",
             "signals": 0,
+            "signals_used": 0,
             "avg_60d": None,
-            "threshold": BACKTEST_MIN_SCORE,
-            "score_adjustment": 0.0,
+            "current_score_threshold": round(current_score, 4),
         }
 
-    ind = add_indicators(frame)
-    last_signal_pos = -10_000
-    # entry=i+1, exit=entry+60 must exist.
-    last_i = n - BACKTEST_FORWARD_DAYS - 2
     start_i = max(min_pos, last_i - BACKTEST_LOOKBACK_DAYS + 1)
-
+    evaluation_days = last_i - start_i + 1
+    if evaluation_days < BACKTEST_LOOKBACK_DAYS:
+        return {
+            "available": False,
+            "reason": "insufficient_200d_backtest_history",
+            "evaluation_days": evaluation_days,
+            "signals": 0,
+            "signals_used": 0,
+            "avg_60d": None,
+            "current_score_threshold": round(current_score, 4),
+        }
+    ind = add_indicators(frame)
     trades = []
+
     for i in range(start_i, last_i + 1):
-        if i - last_signal_pos < BACKTEST_COOLDOWN_DAYS:
-            continue
-        base_score = qualifying_base_score_for_backtest(frame, ind, i, BACKTEST_MIN_SCORE)
-        if base_score is None:
+        hist_score, _, _ = score_at(frame, ind, i)
+        if hist_score + 1e-12 < current_score:
             continue
 
-        entry_i = i + 1
-        exit_i = entry_i + BACKTEST_FORWARD_DAYS
-        if exit_i >= n:
-            continue
-        entry = finite(frame["Open"].iloc[entry_i])
+        exit_i = i + BACKTEST_FORWARD_DAYS
+        entry = finite(frame["Close"].iloc[i])
         exit_price = finite(frame["Close"].iloc[exit_i])
         if not (np.isfinite(entry) and entry > 0 and np.isfinite(exit_price) and exit_price > 0):
             continue
+
         ret60 = exit_price / entry - 1.0
         trades.append({
             "signal_date": pd.Timestamp(frame.index[i]).date().isoformat(),
-            "entry_date": pd.Timestamp(frame.index[entry_i]).date().isoformat(),
             "exit_date": pd.Timestamp(frame.index[exit_i]).date().isoformat(),
-            "base_score": round(base_score, 1),
-            "entry": clean(entry),
-            "exit": clean(exit_price),
-            "ret_60d": clean(ret60, 5),
+            "setup_score": round(hist_score, 4),
+            "entry_close": clean(entry),
+            "exit_close": clean(exit_price),
+            "ret_60d": clean(ret60, 6),
         })
-        last_signal_pos = i
 
-    returns = [finite(t["ret_60d"]) for t in trades]
-    returns = [x for x in returns if np.isfinite(x)]
-    avg = float(np.mean(returns)) if returns else np.nan
-    med = float(np.median(returns)) if returns else np.nan
-    win = float(np.mean([x > 0 for x in returns])) if returns else np.nan
-    adjustment = backtest_score_adjustment(avg)
+    valid = [t for t in trades if np.isfinite(finite(t.get("ret_60d")))]
+    if len(valid) < BACKTEST_MIN_EVENTS_FOR_TRIM:
+        return {
+            "available": False,
+            "reason": "fewer_than_3_comparable_events",
+            "model": "score_gte_current_close_to_close_60d_trim_extremes_v11_5",
+            "evaluation_days": evaluation_days,
+            "lookback_signal_days": BACKTEST_LOOKBACK_DAYS,
+            "forward_days": BACKTEST_FORWARD_DAYS,
+            "current_score_threshold": round(current_score, 4),
+            "signals": len(valid),
+            "signals_used": 0,
+            "avg_60d": None,
+            "raw_avg_60d": clean(np.mean([finite(t["ret_60d"]) for t in valid]), 6) if valid else None,
+            "trades": valid[-BACKTEST_RECENT_TRADES:][::-1],
+        }
+
+    ordered = sorted(valid, key=lambda t: finite(t["ret_60d"]))
+    lowest = ordered[0]
+    highest = ordered[-1]
+    trimmed = ordered[1:-1]
+    trimmed_returns = [finite(t["ret_60d"]) for t in trimmed]
+    raw_returns = [finite(t["ret_60d"]) for t in valid]
+
+    avg = float(np.mean(trimmed_returns))
+    raw_avg = float(np.mean(raw_returns))
+    med = float(np.median(trimmed_returns))
+    win = float(np.mean([x > 0 for x in trimmed_returns]))
 
     return {
         "available": True,
-        "model": "base_score60_next_open_60tradingday_exit_v11_2",
-        "threshold": BACKTEST_MIN_SCORE,
+        "model": "score_gte_current_close_to_close_60d_trim_extremes_v11_5",
+        "evaluation_days": evaluation_days,
         "lookback_signal_days": BACKTEST_LOOKBACK_DAYS,
         "forward_days": BACKTEST_FORWARD_DAYS,
-        "cooldown_days": BACKTEST_COOLDOWN_DAYS,
-        "signals": len(trades),
-        "avg_60d": clean(avg, 5),
-        "median_60d": clean(med, 5),
+        "current_score_threshold": round(current_score, 4),
+        "signals": len(valid),
+        "signals_used": len(trimmed),
+        "avg_60d": clean(avg, 6),
+        "raw_avg_60d": clean(raw_avg, 6),
+        "median_60d": clean(med, 6),
         "win_60d": clean(win, 4),
-        "score_adjustment": adjustment,
-        "trades": trades[-BACKTEST_RECENT_TRADES:][::-1],
+        "excluded_low": {
+            "signal_date": lowest.get("signal_date"),
+            "ret_60d": lowest.get("ret_60d"),
+        },
+        "excluded_high": {
+            "signal_date": highest.get("signal_date"),
+            "ret_60d": highest.get("ret_60d"),
+        },
+        "trades": sorted(valid, key=lambda t: t["signal_date"], reverse=True)[:BACKTEST_RECENT_TRADES],
     }
 
 
@@ -882,13 +854,17 @@ def _detail_filename(item: dict) -> str:
 def _compact_backtest(bt: dict) -> dict:
     return {
         "available": bool((bt or {}).get("available")),
+        "reason": (bt or {}).get("reason"),
+        "evaluation_days": (bt or {}).get("evaluation_days"),
         "signals": (bt or {}).get("signals"),
+        "signals_used": (bt or {}).get("signals_used"),
+        "current_score_threshold": (bt or {}).get("current_score_threshold"),
         "avg_60d": (bt or {}).get("avg_60d"),
+        "raw_avg_60d": (bt or {}).get("raw_avg_60d"),
         "median_60d": (bt or {}).get("median_60d"),
         "win_60d": (bt or {}).get("win_60d"),
-        "threshold": (bt or {}).get("threshold", BACKTEST_MIN_SCORE),
-        "score_adjustment": (bt or {}).get("score_adjustment", 0.0),
-        "preserved_from_full": bool((bt or {}).get("preserved_from_full")),
+        "excluded_low": (bt or {}).get("excluded_low"),
+        "excluded_high": (bt or {}).get("excluded_high"),
     }
 
 
@@ -965,42 +941,15 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict], s
 # Market scan
 # -----------------------------------------------------------------------------
 
-def _load_previous_backtests(category: str) -> dict[str, dict]:
-    """Load only compatible v11.2 FULL backtests for QUICK score refreshes."""
-    summary_file = DATA_DIR / CATEGORY_DIR[category] / "summary.json"
-    if not summary_file.is_file():
-        return {}
-    try:
-        payload = json.loads(summary_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if payload.get("strategy") != "DTC_V11_2_BB_PROFILE_BACKTEST_SCORE":
-        return {}
-    out: dict[str, dict] = {}
-    for row in payload.get("items") or []:
-        if not isinstance(row, dict):
-            continue
-        ticker = str(row.get("ticker") or "")
-        bt = row.get("backtest") or {}
-        if ticker and bt.get("available"):
-            kept = dict(bt)
-            kept["preserved_from_full"] = True
-            out[ticker] = kept
-    return out
-
-
 def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "FULL") -> None:
     universe, universe_source = get_universe(category)
     thresholds = thresholds_for(category, usdkrw)
     restricted, restriction_meta = _load_restrictions(category, universe)
     size_cache = _load_size_cache(category)
-    previous_backtests = _load_previous_backtests(category) if scan_mode == "QUICK" else {}
 
     print("=" * 76)
-    print(f"DTC v11.2 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
-    print("score = BB 0~10 + profiles 20/40/60/120/200D = 5/10/15/20/25 + backtest -10~+15")
-    if scan_mode == "QUICK":
-        print(f"compatible FULL backtests reused={len(previous_backtests):,}")
+    print(f"DTC v11.5 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print("score = BB 0~1 + 10-bin current-zone volume shares for 20/40/60/80/100/150/200/300/400D (0~1 each) = max 10")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1117,22 +1066,25 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
     else:
         size_coverage = np.nan
 
-    # Item 7 affects the final rank, so every eligible item needs either a fresh
-    # FULL backtest or the last compatible FULL result during QUICK scans.
+    # Final rank is determined by the trimmed 60-day historical expected return.
+    # Backtest is recalculated in both FULL and QUICK because the comparable-event
+    # threshold is the stock's current 0~10 setup score and can change intraday.
     unsorted_items = list(results.values())
-    if scan_mode == "FULL":
-        print(f"[{category}] 60D base-score backtest: all {len(unsorted_items):,} eligible items")
-        for idx, item in enumerate(unsorted_items, 1):
-            frame = frames.get(item["ticker"])
-            bt = backtest_60d(frame) if frame is not None and not frame.empty else {}
-            apply_backtest_adjustment(item, bt)
-            if idx % 50 == 0 or idx == len(unsorted_items):
-                print(f"[{category}] backtest {idx}/{len(unsorted_items)}")
-    else:
-        for item in unsorted_items:
-            apply_backtest_adjustment(item, previous_backtests.get(item["ticker"]) or {})
+    print(f"[{category}] 200-event-window / 60D trimmed-return backtest: {len(unsorted_items):,} eligible items")
+    for idx, item in enumerate(unsorted_items, 1):
+        frame = frames.get(item["ticker"])
+        bt = backtest_60d(frame, item.get("score", 0.0)) if frame is not None and not frame.empty else {}
+        item["backtest"] = bt
+        if idx % 50 == 0 or idx == len(unsorted_items):
+            print(f"[{category}] backtest {idx}/{len(unsorted_items)}")
 
-    items = sorted(unsorted_items, key=lambda x: (-float(x.get("score", 0.0)), x.get("symbol", "")))
+    def _rank_key(item: dict):
+        bt = item.get("backtest") or {}
+        avg = finite(bt.get("avg_60d"))
+        available = bool(bt.get("available")) and np.isfinite(avg)
+        return (0 if available else 1, -avg if available else 0.0, -finite(item.get("score"), 0.0), item.get("symbol", ""))
+
+    items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
         item["rank"] = rank
 
@@ -1158,13 +1110,13 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Dongtan Trading Center",
-        "strategy": "DTC_V11_2_BB_PROFILE_BACKTEST_SCORE",
+        "strategy": "DTC_V11_5_BB_PROFILE_SHARE_TRIMMED_BACKTEST",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "scan_mode": scan_mode,
         "data_status": "intraday_live" if scan_mode == "QUICK" else "close_confirmed",
-        "backtest_refreshed": scan_mode == "FULL",
+        "backtest_refreshed": True,
         "market_date": market_date,
         "universe_source": universe_source,
         "restriction_snapshot": restriction_meta,
@@ -1180,13 +1132,12 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
         "filter_counts": dict(sorted(rejection.items())),
         "max_score": MAX_SCORE,
         "score_model": {
-            "base_score_max": BASE_MAX_SCORE,
-            "final_score_max": MAX_SCORE,
+            "score_max": MAX_SCORE,
             "bollinger": {
                 "weight": BOLLINGER_MAX_SCORE,
-                "formula": "10*(1-clamp(percentB,0,1))",
-                "lower_band": 10,
-                "middle_band": 5,
+                "formula": "1*(1-clamp(percentB,0,1))",
+                "lower_band": 1,
+                "middle_band": 0.5,
                 "upper_band": 0,
                 "window": BB_WINDOW,
                 "sigma": BB_SIGMA,
@@ -1194,26 +1145,20 @@ def scan_category(category: str, usdkrw: float | None = None, scan_mode: str = "
             "volume_profile": {
                 "lookbacks": list(PROFILE_LOOKBACKS),
                 "bins": PROFILE_BINS,
-                "weights": {str(k): v for k, v in PROFILE_WEIGHTS.items()},
-                "condition": "current_close_inside_highest_volume_zone",
+                "component_range_each": [0, 1],
+                "formula": "volume_in_current_price_zone / total_volume_across_10_zones",
                 "allocation": "daily_volume_distributed_by_low_high_overlap",
-            },
-            "backtest_adjustment": {
-                "lt_0pct": -10,
-                "0_to_lt_5pct": 0,
-                "5_to_lt_10pct": 10,
-                "gte_10pct": 15,
             },
         },
         "backtest_model": {
-            "signal_base_score_gte": BACKTEST_MIN_SCORE,
-            "score_source": "items_1_to_6_only",
-            "entry": "next_trading_day_open",
-            "exit": f"{BACKTEST_FORWARD_DAYS}_trading_days_after_entry_close",
-            "signal_lookback_days": BACKTEST_LOOKBACK_DAYS,
-            "cooldown_days": BACKTEST_COOLDOWN_DAYS,
-            "computed_for": "all_eligible_items_on_full",
-            "quick_mode": "reuse_last_compatible_full_backtest",
+            "evaluation_days": BACKTEST_LOOKBACK_DAYS,
+            "comparable_event": "historical_setup_score_gte_current_setup_score",
+            "entry": "signal_day_close",
+            "exit": f"close_{BACKTEST_FORWARD_DAYS}_trading_days_later",
+            "trim": "exclude_one_highest_and_one_lowest_return_event",
+            "minimum_comparable_events": BACKTEST_MIN_EVENTS_FOR_TRIM,
+            "rank_by": "trimmed_avg_60d_desc",
+            "computed_for": "all_eligible_items_in_full_and_quick",
         },
     }
 
@@ -1237,7 +1182,7 @@ def main():
         "--scan-mode",
         choices=["FULL", "QUICK"],
         default="FULL",
-        help="FULL recalculates item-1~6 score>=60 backtests for all eligible items; QUICK reuses the last compatible FULL backtests.",
+        help="FULL/QUICK both calculate the 0~10 current score and the 200-date / 60-session trimmed-return backtest; QUICK uses a shorter download window.",
     )
     args = parser.parse_args()
 
