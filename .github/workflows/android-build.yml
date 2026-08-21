@@ -1,0 +1,192 @@
+name: DTC Android · Build APK & AAB
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "docs/**"
+      - "package.json"
+      - "capacitor.config.json"
+      - ".github/workflows/android-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dtc-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_android:
+    name: Build Android package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Android SDK platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          SDKMANAGER=""
+          if [[ -n "$SDK_ROOT" && -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager not found on runner"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Capacitor dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Configure Firebase data endpoint for Android
+        shell: bash
+        env:
+          FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${FIREBASE_SITE_ID}" ]] || { echo "::error::Set repository variable FIREBASE_SITE_ID"; exit 1; }
+          cat > docs/runtime-config.js <<EOF
+          window.DTC_DATA_ORIGIN = 'https://${FIREBASE_SITE_ID}.web.app';
+          EOF
+
+      - name: Generate fresh Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf android
+          npx cap add android
+          npx cap sync android
+
+      - name: Apply DTC launcher icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          for D in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "android/app/src/main/res/mipmap-$D"
+            cp "android-assets/mipmap-$D/ic_launcher.png" "android/app/src/main/res/mipmap-$D/ic_launcher.png"
+            cp "android-assets/mipmap-$D/ic_launcher_round.png" "android/app/src/main/res/mipmap-$D/ic_launcher_round.png"
+            cp "android-assets/mipmap-$D/ic_launcher_foreground.png" "android/app/src/main/res/mipmap-$D/ic_launcher_foreground.png"
+          done
+          if [[ -f android/app/src/main/res/values/ic_launcher_background.xml ]]; then
+            sed -i -E 's|<color name="ic_launcher_background">[^<]+</color>|<color name="ic_launcher_background">#080B12</color>|' android/app/src/main/res/values/ic_launcher_background.xml
+          fi
+
+      - name: Stamp Android version
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("android/app/build.gradle")
+          text = path.read_text(encoding="utf-8")
+          run_number = int("${{ github.run_number }}")
+          version_code = max(1, run_number)
+          version_name = f"11.9.{run_number}"
+          text, n1 = re.subn(r"versionCode\s+\d+", f"versionCode {version_code}", text, count=1)
+          text, n2 = re.subn(r'versionName\s+[\"\'][^\"\']+[\"\']', f'versionName "{version_name}"', text, count=1)
+          if not (n1 and n2):
+              raise SystemExit("Could not stamp Android versionCode/versionName")
+          path.write_text(text, encoding="utf-8")
+          print(f"Android version: {version_name} ({version_code})")
+          PY
+
+      - name: Configure optional release signing
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ANDROID_KEYSTORE_BASE64}" && -n "${ANDROID_KEYSTORE_PASSWORD}" && -n "${ANDROID_KEY_ALIAS}" && -n "${ANDROID_KEY_PASSWORD}" ]]; then
+            printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > android/app/dtc-release.keystore
+            cat >> android/app/build.gradle <<'GRADLE'
+
+          // DTC release signing injected by GitHub Actions.
+          android {
+              signingConfigs {
+                  dtcRelease {
+                      storeFile file("dtc-release.keystore")
+                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.dtcRelease
+                  }
+              }
+          }
+          GRADLE
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Release signing: ENABLED"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "Release signing: disabled (debug APK + unsigned release AAB will still be built)"
+          fi
+
+      - name: Build installable debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Build release package
+        working-directory: android
+        run: |
+          if [[ "${{ steps.signing.outputs.signed }}" == "true" ]]; then
+            ./gradlew --no-daemon assembleRelease bundleRelease
+          else
+            ./gradlew --no-daemon bundleRelease
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DTC-v11.10-Android-APK
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: DTC-v11.10-Android-AAB
+          path: android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 30
