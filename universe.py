@@ -386,16 +386,16 @@ def _normalize_kr_etf_rows(rows: list[dict], source: str) -> list[Stock]:
         if not isinstance(row, dict):
             continue
 
-        code = re.sub(
-            r"\D",
-            "",
-            str(
-                row.get("ISU_SRT_CD")
-                or row.get("itemcode")
-                or row.get("symbol")
-                or ""
-            ),
-        ).zfill(6)
+        raw_code = str(
+            row.get("ISU_SRT_CD")
+            or row.get("itemcode")
+            or row.get("symbol")
+            or ""
+        ).strip().upper()
+        # KRX introduced alphanumeric short codes for newer ETFs (e.g. 0048J0,
+        # 0072R0). Keep the six-character exchange code verbatim instead of
+        # stripping letters. Pure numeric legacy codes are zero-padded.
+        code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
         name = str(
             row.get("ISU_ABBRV")
             or row.get("ISU_NM")
@@ -404,7 +404,7 @@ def _normalize_kr_etf_rows(rows: list[dict], source: str) -> list[Stock]:
             or ""
         ).strip()
 
-        if not re.fullmatch(r"\d{6}", code) or not name:
+        if not re.fullmatch(r"[0-9A-Z]{6}", code) or not name:
             continue
 
         listed_date = None
@@ -553,7 +553,11 @@ def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
     for row in _load_cache(KR_ETF_CACHE):
         name_map[str(row.symbol).upper()] = row.name
 
-    # Optional name lookup only; membership never comes from this response.
+    # Resolve names and, when the current Naver ETF master is healthy, remove
+    # stale/delisted whitelist members before Yahoo is called. The upstream list
+    # may only REMOVE unavailable symbols; it never adds symbols outside the
+    # user's fixed 300-ticker whitelist.
+    active_codes: set[str] | None = None
     try:
         response = requests.get(
             NAVER_ETF_LIST_URL,
@@ -562,16 +566,30 @@ def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
         )
         response.raise_for_status()
         rows = ((response.json().get("result") or {}).get("etfItemList") or [])
+        current_codes: set[str] = set()
         for row in rows:
             code = str(row.get("itemcode") or "").strip().upper()
+            code = code.zfill(6) if code.isdigit() else code
             name = str(row.get("itemname") or "").strip()
-            if code and name:
-                name_map[code] = name
+            if re.fullmatch(r"[0-9A-Z]{6}", code):
+                current_codes.add(code)
+                if name:
+                    name_map[code] = name
+        # Guard against a partial/error payload accidentally shrinking the
+        # universe. Korea has far more than 300 listed ETFs today.
+        if len(current_codes) >= 300:
+            active_codes = current_codes
     except Exception as exc:
         print(
-            "KR ETF name lookup unavailable; ticker symbols will be used as names: "
+            "KR ETF current-master lookup unavailable; fixed whitelist retained: "
             f"{type(exc).__name__}: {exc}"
         )
+
+    selected = whitelist if active_codes is None else [code for code in whitelist if code in active_codes]
+    if active_codes is not None:
+        stale = [code for code in whitelist if code not in active_codes]
+        if stale:
+            print(f"KR ETF current-master removed {len(stale)} stale/unavailable whitelist symbols")
 
     result = [
         Stock(
@@ -582,7 +600,7 @@ def fetch_kr_etf_universe() -> tuple[list[Stock], str]:
             currency="KRW",
             exchange="KRX ETF",
         )
-        for code in whitelist
+        for code in selected
     ]
     _save_cache(KR_ETF_CACHE, result)
     print(f"KR ETF universe: user whitelist ({len(result):,})")

@@ -579,10 +579,11 @@ def _refresh_kr_etf_size_cache_from_naver(size_cache: dict) -> int:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        code = re.sub(r"\D", "", str(row.get("itemcode") or ""))
+        code = str(row.get("itemcode") or "").strip().upper()
+        code = code.zfill(6) if code.isdigit() else code
         raw_market_sum = str(row.get("marketSum") or "").replace(",", "").strip()
         market_sum_eok = finite(raw_market_sum)
-        if not re.fullmatch(r"\d{6}", code) or not np.isfinite(market_sum_eok) or market_sum_eok <= 0:
+        if not re.fullmatch(r"[0-9A-Z]{6}", code) or not np.isfinite(market_sum_eok) or market_sum_eok <= 0:
             continue
 
         native_size = float(market_sum_eok * NAVER_ETF_MARKET_SUM_UNIT_KRW)
