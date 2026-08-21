@@ -140,7 +140,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 .install-pwa-btn[hidden]{display:none!important}
 @media (max-width:560px){.top-actions{gap:5px}.install-pwa-btn{height:36px;padding:0 10px;font-size:10.5px;border-radius:10px}}
 
-/* ===== DTC UI v11.8 : branding, mode switch, sticky compact filters ===== */
+/* ===== DTC UI v11.9 : branding, mode switch, sticky compact filters ===== */
 :root{--topbar-h:94px}
 .mode-view[hidden]{display:none!important}
 .blank-mode-view{min-height:calc(100vh - var(--topbar-h));padding:0}
@@ -277,7 +277,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 }
 
 /* --------------------------------------------------------------------------
-   Quiz mode · v11.8
+   Quiz mode · v11.9
    -------------------------------------------------------------------------- */
 .quiz-mode-view{padding-top:20px;min-height:calc(100vh - var(--topbar-h,94px))}
 .quiz-shell{max-width:1180px;margin:0 auto}

@@ -90,15 +90,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v11.8 scanner + retained support files..."
+          echo "Checking DTC v11.9 scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.8"' scanner.py || {
-            echo "::error::scanner.py is not DTC v11.8"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' scanner.py || {
+            echo "::error::scanner.py is not DTC v11.9"
             exit 1
           }
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.8"' hydrate_data.py || {
-            echo "::error::hydrate_data.py is not DTC v11.8"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' hydrate_data.py || {
+            echo "::error::hydrate_data.py is not DTC v11.9"
             exit 1
           }
 
@@ -117,8 +117,8 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: v11.8"
-          echo "hydrate_data.py: v11.8"
+          echo "scanner.py: v11.9"
+          echo "hydrate_data.py: v11.9"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
 
@@ -184,6 +184,7 @@ jobs:
 
           python hydrate_data.py \
             --market "$RESTORE_MARKET" \
+            --cache-snapshot ".dtc-cache/data-snapshot.tar.gz" \
             --base-url "${FIREBASE_LIVE}" \
             --base-url "${GITHUB_PAGES_LIVE}"
 
@@ -243,7 +244,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v11.8 | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v11.9 FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -322,14 +323,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260821-v11_8",
+            "ui_build": "20260821-v11_9",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260821-v11_8"
+          echo "UI build: 20260821-v11_9"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint

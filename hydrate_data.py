@@ -5,12 +5,13 @@ import hashlib
 import json
 import re
 import shutil
+import tarfile
 import time
 import urllib.request
 import zipfile
 from pathlib import Path
 
-MORNING_INVEST_COMPONENT_VERSION = "11.8"
+MORNING_INVEST_COMPONENT_VERSION = "11.9"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -128,9 +129,10 @@ def build_bundle(dest: Path) -> None:
 
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         zf.write(summary, "summary.json")
-        universe = dest / "universe.json"
-        if universe.is_file():
-            zf.write(universe, "universe.json")
+        for optional_name in ("sizes.json", "backtest_model.json", "yahoo-unavailable.json", "universe.json"):
+            optional = dest / optional_name
+            if optional.is_file():
+                zf.write(optional, optional_name)
         for detail in sorted(stocks.glob("*.json")):
             zf.write(detail, f"stocks/{detail.name}")
 
@@ -344,10 +346,55 @@ def restore_quiz_bundle(folder: str, bases: list[str]) -> bool:
     return False
 
 
+
+def _valid_local_category(category: str) -> bool:
+    dest = DATA_DIR / CATEGORY_DIR[category]
+    return (
+        (dest / "summary.json").is_file()
+        and (dest / "bundle.zip").is_file()
+        and (dest / "stocks").is_dir()
+    )
+
+
+def _valid_local_quiz(folder: str) -> bool:
+    dest = DATA_DIR / "quiz" / folder
+    return (
+        (dest / "manifest.json").is_file()
+        and (dest / "bundle.zip").is_file()
+        and (dest / "stocks").is_dir()
+    )
+
+
+def _extract_action_cache(snapshot: Path) -> Path | None:
+    """Extract our own Actions snapshot and return its docs/data directory."""
+    if not snapshot.is_file() or snapshot.stat().st_size <= 0:
+        return None
+    seed_root = Path("/tmp/dtc-actions-cache-seed")
+    shutil.rmtree(seed_root, ignore_errors=True)
+    seed_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(snapshot, "r:gz") as tf:
+            root = seed_root.resolve()
+            for member in tf.getmembers():
+                target = (seed_root / member.name).resolve()
+                if root != target and root not in target.parents:
+                    raise RuntimeError(f"Unsafe cache TAR path: {member.name}")
+            tf.extractall(seed_root)
+    except Exception as exc:
+        print(f"[hydrate] Actions cache snapshot unusable: {type(exc).__name__}: {exc}")
+        return None
+    seed_data = seed_root / "docs" / "data"
+    if not seed_data.is_dir():
+        print("[hydrate] Actions cache snapshot has no docs/data tree")
+        return None
+    return seed_data
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", required=True, choices=list(RESTORE_BY_MARKET))
     parser.add_argument("--base-url", action="append", dest="base_urls", default=[])
+    parser.add_argument("--cache-snapshot", default="", help="Optional Actions data-snapshot.tar.gz to seed docs/data before network hydration")
     args = parser.parse_args()
 
     bases = [b.strip() for b in args.base_urls if b and b.strip()]
@@ -368,20 +415,39 @@ def main() -> None:
             shutil.copy2(src, checkout_backup / name)
             print(f"[hydrate] preserved checkout legacy: {name}")
 
+    cache_seed = _extract_action_cache(Path(args.cache_snapshot)) if args.cache_snapshot else None
+
     shutil.rmtree(DATA_DIR, ignore_errors=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if cache_seed is not None:
+        shutil.copytree(cache_seed, DATA_DIR, dirs_exist_ok=True)
+        print(f"[hydrate] seeded docs/data from Actions cache: {args.cache_snapshot}")
 
     restored = []
     missing = []
     for category in RESTORE_BY_MARKET[args.market]:
+        if _valid_local_category(category):
+            restored.append(f"{category}(actions-cache)")
+            print(f"[hydrate] {category}: use Actions cache; skip live bundle download")
+            # Restore scanner-root universe cache from the cached category snapshot.
+            universe = DATA_DIR / CATEGORY_DIR[category] / "universe.json"
+            if universe.is_file():
+                shutil.copy2(universe, DATA_DIR / ROOT_UNIVERSE_CACHE[category])
+            continue
         if restore_category(category, bases, checkout_backup=checkout_backup):
             restored.append(category)
         else:
             missing.append(category)
 
     for folder in QUIZ_DIRS:
-        restore_quiz_bundle(folder, bases)
-    restore_optional_live_file("fx_usdkrw.json", bases)
+        if _valid_local_quiz(folder):
+            print(f"[hydrate] quiz/{folder}: use Actions cache")
+        else:
+            restore_quiz_bundle(folder, bases)
+    if not (DATA_DIR / "fx_usdkrw.json").is_file():
+        restore_optional_live_file("fx_usdkrw.json", bases)
+    else:
+        print("[hydrate] fx_usdkrw.json: use Actions cache")
 
     print(f"[hydrate] restored={restored or 'none'}")
     print(f"[hydrate] missing={missing or 'none'}")
