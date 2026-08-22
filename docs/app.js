@@ -254,7 +254,10 @@ function stockCard(stock) {
       ${strategyLines(stock)}
       <div class="backtest-one-line">${backtestLine(stock)}</div>
     </section>
-    <section class="stock-chart-pane"><div class="inline-chart" data-chart-box><div class="chart-loading">6M CANDLE + SUPERTREND</div></div></section>
+    <section class="stock-chart-pane tv-chart-trigger" data-tv-chart="${escapeHtml(stock.ticker)}" role="button" tabindex="0" aria-label="${escapeHtml(stock.name)} TradingView 인터랙티브 차트 열기">
+      <div class="inline-chart" data-chart-box><div class="chart-loading">6M CANDLE + SUPERTREND</div></div>
+      <div class="tv-chart-hint" aria-hidden="true"><span>TradingView</span><b>인터랙티브 차트 열기 ↗</b></div>
+    </section>
   </article>`;
 }
 function renderList() {
@@ -301,6 +304,121 @@ function drawSupertrendChart(el, detail) {
 
 function drawChart(el, detail) { drawSupertrendChart(el, detail); }
 
+function tradingViewSymbol(stock) {
+  if (!stock) return '';
+  const raw = String(stock.symbol || stock.ticker || '').trim();
+  if (!raw) return '';
+  const symbol = raw.replace(/\.(KS|KQ)$/i, '');
+  const category = String(stock.category || '').toUpperCase();
+  if (category === 'KR' || category === 'KR_ETF') return `KRX:${symbol}`;
+
+  const exchange = String(stock.exchange || '').trim().toUpperCase();
+  let prefix = '';
+  if (exchange.includes('NASDAQ')) prefix = 'NASDAQ';
+  else if (exchange === 'NYSE') prefix = 'NYSE';
+  else if (exchange.includes('NYSE AMERICAN') || exchange.includes('NYSE ARCA')) prefix = 'AMEX';
+  else if (exchange.includes('CBOE') || exchange.includes('BZX')) prefix = 'BATS';
+  else if (exchange.includes('IEX')) prefix = 'IEX';
+  else prefix = 'NASDAQ';
+  return `${prefix}:${symbol}`;
+}
+
+function tradingViewChartUrl(tvSymbol) {
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSymbol)}`;
+}
+
+function setModalOpenState() {
+  const scoreOpen = $('#scoreModal') && !$('#scoreModal').hidden;
+  const tvOpen = $('#tradingViewModal') && !$('#tradingViewModal').hidden;
+  document.body.classList.toggle('modal-open', Boolean(scoreOpen || tvOpen));
+}
+
+function closeTradingView() {
+  const modal = $('#tradingViewModal');
+  if (!modal) return;
+  modal.hidden = true;
+  const host = $('#tradingViewWidgetHost');
+  if (host) host.replaceChildren();
+  setModalOpenState();
+}
+
+function openTradingView(stock) {
+  const modal = $('#tradingViewModal');
+  const host = $('#tradingViewWidgetHost');
+  const title = $('#tradingViewModalTitle');
+  const symbolText = $('#tradingViewSymbolText');
+  const external = $('#tradingViewOpenExternal');
+  if (!modal || !host || !stock) return;
+
+  const tvSymbol = tradingViewSymbol(stock);
+  if (!tvSymbol) return;
+  if (title) title.textContent = `${stock.name} (${stock.symbol || stock.ticker})`;
+  if (symbolText) symbolText.textContent = tvSymbol;
+  if (external) external.href = tradingViewChartUrl(tvSymbol);
+
+  modal.hidden = false;
+  setModalOpenState();
+  host.innerHTML = '<div class="tv-widget-loading">TradingView 차트를 불러오는 중…</div>';
+
+  const container = document.createElement('div');
+  container.className = 'tradingview-widget-container';
+  container.style.height = '100%';
+  container.style.width = '100%';
+
+  const widget = document.createElement('div');
+  widget.className = 'tradingview-widget-container__widget';
+  widget.style.height = 'calc(100% - 28px)';
+  widget.style.width = '100%';
+  container.appendChild(widget);
+
+  const copyright = document.createElement('div');
+  copyright.className = 'tradingview-widget-copyright';
+  const link = document.createElement('a');
+  link.href = tradingViewChartUrl(tvSymbol);
+  link.rel = 'noopener nofollow';
+  link.target = '_blank';
+  link.textContent = `${tvSymbol} 차트`;
+  const suffix = document.createElement('span');
+  suffix.textContent = ' by TradingView';
+  copyright.append(link, suffix);
+  container.appendChild(copyright);
+
+  host.replaceChildren(container);
+
+  const script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+  script.async = true;
+  script.textContent = JSON.stringify({
+    autosize: true,
+    symbol: tvSymbol,
+    interval: 'D',
+    timezone: 'exchange',
+    theme: 'dark',
+    backgroundColor: 'rgba(8, 11, 18, 1)',
+    gridColor: 'rgba(255, 255, 255, 0.055)',
+    style: '1',
+    locale: 'ko',
+    withdateranges: true,
+    hide_side_toolbar: false,
+    hide_top_toolbar: false,
+    hide_legend: false,
+    hide_volume: false,
+    allow_symbol_change: true,
+    save_image: false,
+    calendar: false,
+    details: false,
+    hotlist: false,
+    studies: [],
+    support_host: 'https://www.tradingview.com'
+  });
+  script.onerror = () => {
+    host.innerHTML = `<div class="tv-widget-error">TradingView 위젯을 불러오지 못했습니다.<a href="${escapeHtml(tradingViewChartUrl(tvSymbol))}" target="_blank" rel="noopener">TradingView에서 직접 열기 ↗</a></div>`;
+  };
+  container.appendChild(script);
+}
+
+
 async function hydrateCard(card) {
   if(!card?.isConnected||card.dataset.hydrated==='1')return; card.dataset.hydrated='1';
   const stock=stockByTicker(card.dataset.ticker); if(!stock)return;
@@ -312,7 +430,7 @@ function activateLazyCards() {
   $$('.stock-card').forEach(card=>state.cardObserver.observe(card));
 }
 async function openScoreDetail(stock) {
-  const modal=$('#scoreModal'),body=$('#scoreModalBody'); $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol||stock.ticker}) · ${opinionText(stock)}`;modal.hidden=false;document.body.classList.add('modal-open');body.innerHTML='<div class="modal-loading">Supertrend 상세를 불러오는 중…</div>';
+  const modal=$('#scoreModal'),body=$('#scoreModalBody'); $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol||stock.ticker}) · ${opinionText(stock)}`;modal.hidden=false;setModalOpenState();body.innerHTML='<div class="modal-loading">Supertrend 상세를 불러오는 중…</div>';
   let detail=stock;try{detail=await ensureDetail(stock);}catch(_){ }
   const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{},refs=st.reference_setups||stock.reference_setups||{};
   const r=numberOrNaN(st.r_pct),win=numberOrNaN(bt.win_rate_pct),bo=refs.breakout||{},pb=refs.pullback||{};
@@ -327,7 +445,7 @@ async function openScoreDetail(stock) {
   </div>`;
 }
 
-function closeModal(){ $('#scoreModal').hidden=true;document.body.classList.remove('modal-open'); }
+function closeModal(){ $('#scoreModal').hidden=true;setModalOpenState(); }
 
 async function switchCategory(category, force=false) {
   if(!CATEGORY[category])return;state.category=category;state.query='';$('#searchInput').value='';
@@ -942,11 +1060,31 @@ document.addEventListener('click', (e) => {
     if (stock) void openScoreDetail(stock);
     return;
   }
+  const chart = e.target.closest('[data-tv-chart]');
+  if (chart) {
+    const stock = stockByTicker(chart.dataset.tvChart);
+    if (stock) openTradingView(stock);
+    return;
+  }
+  if (e.target.closest('[data-close-tv-modal]')) {
+    closeTradingView();
+    return;
+  }
   if (e.target.closest('[data-close-modal]')) closeModal();
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('#scoreModal').hidden) closeModal();
+  const chart = e.target.closest?.('[data-tv-chart]');
+  if (chart && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    const stock = stockByTicker(chart.dataset.tvChart);
+    if (stock) openTradingView(stock);
+    return;
+  }
+  if (e.key === 'Escape') {
+    if ($('#tradingViewModal') && !$('#tradingViewModal').hidden) closeTradingView();
+    else if ($('#scoreModal') && !$('#scoreModal').hidden) closeModal();
+  }
 });
 
 document.addEventListener('toggle', (e) => {

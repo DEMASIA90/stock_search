@@ -115,6 +115,27 @@ main{padding-top:20px}
 .stock-chart-pane{padding:13px 15px 10px;min-width:0;background:linear-gradient(180deg,rgba(14,19,29,.72),rgba(8,12,19,.82))}
 .inline-chart{width:100%;height:225px;position:relative}
 .inline-chart svg{width:100%;height:100%;display:block;overflow:visible}
+.tv-chart-trigger{position:relative;cursor:pointer;outline:none;transition:background .18s ease,box-shadow .18s ease}
+.tv-chart-trigger:hover,.tv-chart-trigger:focus-visible{background:linear-gradient(180deg,rgba(20,29,43,.86),rgba(9,14,23,.92));box-shadow:inset 0 0 0 1px rgba(41,98,255,.28)}
+.tv-chart-hint{position:absolute;top:9px;right:10px;z-index:5;display:flex;align-items:center;gap:6px;padding:5px 7px;border:1px solid rgba(41,98,255,.34);border-radius:8px;background:rgba(8,11,18,.82);backdrop-filter:blur(6px);pointer-events:none;box-shadow:0 5px 18px rgba(0,0,0,.20)}
+.tv-chart-hint span{font-size:7px;font-weight:950;letter-spacing:.65px;color:#6fa0ff}
+.tv-chart-hint b{font-size:7.5px;color:#cbd7eb;font-weight:800}
+.tv-modal{z-index:130;padding:16px}
+.tv-modal-card{width:min(1240px,97vw);height:min(840px,92vh);max-height:92vh;overflow:hidden;display:flex;flex-direction:column;border-radius:16px}
+.tv-modal-head{flex:0 0 auto}
+.tv-modal-actions{display:flex;align-items:center;gap:8px}
+.tv-external-link{height:35px;display:inline-flex;align-items:center;padding:0 12px;border:1px solid rgba(41,98,255,.40);border-radius:10px;background:rgba(41,98,255,.10);color:#92b7ff;font-size:10px;font-weight:850;text-decoration:none}
+.tv-external-link:hover{background:rgba(41,98,255,.18);border-color:rgba(41,98,255,.66);color:#d9e6ff}
+.tv-chart-note{flex:0 0 auto;min-height:39px;padding:8px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);background:#0a1018;color:#7f8da2;font-size:9px}
+.tv-chart-note span{color:#9ebcff;font-weight:900;letter-spacing:.4px}
+.tv-chart-note b{color:#bac6d8;font-size:9px}
+.tv-chart-note em{margin-left:auto;font-style:normal;color:#69778b}
+.tv-widget-host{position:relative;flex:1 1 auto;min-height:0;background:#080b12}
+.tv-widget-host>.tradingview-widget-container{height:100%!important;width:100%!important}
+.tv-widget-loading,.tv-widget-error{height:100%;display:flex;align-items:center;justify-content:center;gap:10px;color:#728096;font-size:11px}
+.tv-widget-error{flex-direction:column}.tv-widget-error a{color:#7aa6ff;text-decoration:none;font-weight:850}
+.tradingview-widget-copyright{height:28px;display:flex;align-items:center;justify-content:center;gap:4px;background:#080b12;color:#667286;font-size:9px}
+.tradingview-widget-copyright a{color:#739cf4;text-decoration:none}
 .chart-loading,.chart-empty{height:100%;display:grid;place-items:center;color:#566276;font-size:10px;letter-spacing:1.1px}
 .chart-grid{stroke:#1d2735;stroke-width:1;vector-effect:non-scaling-stroke}
 .chart-candle-wick{stroke-width:1.1;vector-effect:non-scaling-stroke}
@@ -160,6 +181,18 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 }
 
 /* Android / installed-webview safe areas */
+@media (max-width:700px){
+  .tv-modal{padding:6px}
+  .tv-modal-card{width:100%;height:94vh;max-height:94vh;border-radius:12px}
+  .tv-modal-head{padding:12px}
+  .tv-modal-head h2{font-size:14px}
+  .tv-external-link{height:32px;padding:0 9px;font-size:9px}
+  .tv-chart-note{padding:7px 10px;gap:6px;flex-wrap:wrap}
+  .tv-chart-note em{width:100%;margin-left:0;font-size:8px}
+  .tv-chart-hint{top:6px;right:6px;padding:4px 5px}
+  .tv-chart-hint b{display:none}
+}
+
 @supports (padding: max(0px)) {
   body {
     padding-top: env(safe-area-inset-top);
