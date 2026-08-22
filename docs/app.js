@@ -349,9 +349,15 @@ function chartRows(detail) {
 }
 
 function drawForecastChart(el, detail) {
-  if (!el?.isConnected) return;
+  // Never return silently: any early exit here used to leave the card stuck on
+  // its "63D + 20D FORECAST" placeholder with no indication of why.
+  if (!el) { console.warn('drawForecastChart: no element'); return; }
   const data = chartRows(detail);
-  if (data.length < 5) { el.innerHTML = '<div class="chart-empty">차트 데이터 없음</div>'; return; }
+  if (data.length < 5) {
+    const n = (detail?.chart?.d || []).length;
+    el.innerHTML = `<div class="chart-empty">차트 데이터 없음<br><small>chart.d = ${n}봉</small></div>`;
+    return;
+  }
 
   // The forecast is an OVERLAY. Candles must render whether or not the payload
   // carries a usable forecast block - stale data files, newly listed names and
@@ -441,8 +447,13 @@ function drawForecastChart(el, detail) {
 }
 
 function drawChart(el, detail) {
-  if (!el?.isConnected) return;
-  drawForecastChart(el, detail);
+  if (!el) return;
+  try {
+    drawForecastChart(el, detail);
+  } catch (err) {
+    console.error('drawChart', err);
+    el.innerHTML = `<div class="chart-empty">차트 렌더 오류<br><small>${escapeHtml(String(err && err.message || err))}</small></div>`;
+  }
 }
 
 async function hydrateCard(card) {
@@ -453,14 +464,21 @@ async function hydrateCard(card) {
   if (!stock) return;
 
   void loadHeadline(stock, card);
+
+  // Resolve the chart box after the await as well: the card may have been
+  // re-rendered while the detail request was in flight.
+  const chartBox = () => $('[data-chart-box]', card)
+    || $(`.stock-card[data-ticker="${CSS.escape(String(stock.ticker))}"] [data-chart-box]`);
+
   try {
     const detail = await ensureDetail(stock);
-    if (!card?.isConnected) return;
-    drawChart($('[data-chart-box]', card), detail);
+    const box = chartBox();
+    if (!box) { console.warn('chart box missing for', stock.ticker); return; }
+    drawChart(box, detail);
   } catch (err) {
-    console.error('chart detail', err);
-    const box = $('[data-chart-box]', card);
-    if (box) box.innerHTML = '<div class="chart-empty">차트를 불러오지 못했습니다.</div>';
+    console.error('chart detail', stock.ticker, stock.detail_path, err);
+    const box = chartBox();
+    if (box) box.innerHTML = `<div class="chart-empty">차트 로드 실패<br><small>${escapeHtml(String(err && err.message || err))}</small></div>`;
   }
 }
 
