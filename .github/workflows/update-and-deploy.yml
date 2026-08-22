@@ -351,14 +351,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260822-v12_0_forecast_pjt1",
+            "ui_build": "20260822-v12_2_news_chart_regression",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260822-v12_0_forecast_pjt1"
+          echo "UI build: 20260822-v12_2_news_chart_regression"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint

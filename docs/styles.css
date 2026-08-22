@@ -384,7 +384,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 
 
 /* Forecast PJT 1 · v12.0 */
-.forecast-fit-line{fill:none;stroke:#8ca0b8;stroke-width:1.15;opacity:.78}
+.forecast-fit-line{fill:none;stroke:#6fb7ff;stroke-width:1.8;opacity:.92;stroke-linecap:round}
 .forecast-projection-line{fill:none;stroke:#ffd166;stroke-width:2.4;stroke-dasharray:7 5;stroke-linecap:round;stroke-linejoin:round}
 .forecast-anchor{fill:#5de1ff;stroke:#07111c;stroke-width:1.2}
 .forecast-today-line{stroke:rgba(255,255,255,.32);stroke-width:1;stroke-dasharray:4 4}

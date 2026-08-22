@@ -377,7 +377,7 @@ function drawForecastChart(el, detail) {
         .map((x) => ({ offset: Number(x.offset), price: Number(x.price) }))
         .filter((x) => Number.isFinite(x.offset) && Number.isFinite(x.price)))
     : [];
-  const futureSlots = hasForecast ? 20 : 0;
+  const futureSlots = 20;
 
   const bandVals = data.flatMap((r) => [r.mid, r.upper, r.lower]).filter(Number.isFinite);
   const all = data.flatMap((r) => [r.low, r.high]).filter(Number.isFinite)
@@ -433,7 +433,7 @@ function drawForecastChart(el, detail) {
     const opacity = Number.isFinite(conf) ? Math.max(0.15, Math.min(1, conf)) : 0.15;
     overlay = `<path d="${fitPath}" class="forecast-fit-line"/>${anchors}${gap}<line x1="${todayX}" x2="${todayX}" y1="${pad.t}" y2="${H - pad.b}" class="forecast-today-line"/><path d="${predPath}" class="forecast-projection-line" style="opacity:${opacity.toFixed(3)}"/>`;
     const anchorTitle = (f.anchors || []).map((a, i) => `A${i + 1} ${a.date} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}`).join(' | ');
-    legendExtra = `<span>WLS FIT</span><span title="${escapeHtml(anchorTitle)}">ANCHOR 6</span><span>20D FORECAST</span>`;
+    legendExtra = `<span>WLS REGRESSION</span><span title="${escapeHtml(anchorTitle)}">ANCHOR 6</span><span>20D FORECAST</span>`;
   } else {
     legendExtra = `<span class="legend-muted" title="${escapeHtml(f.reason || 'forecast 데이터 없음')}">FORECAST 없음</span>`;
   }
@@ -444,6 +444,83 @@ function drawForecastChart(el, detail) {
   const dateLabels = `<text x="${X(0)}" y="${H - 6}" text-anchor="start" class="date-axis">${escapeHtml(data[0]?.date?.slice(5) || '')}</text>${hasForecast ? `<text x="${todayX}" y="${H - 6}" text-anchor="middle" class="date-axis">TODAY</text>` : ''}${rightLabel}`;
 
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="주가 차트">${grid}${bands}${candles}${overlay}${dateLabels}</svg><div class="chart-legend"><span>CANDLE</span><span>BB</span>${legendExtra}</div>`;
+}
+
+
+function newsSearchQuery(stock) {
+  const name = String(stock?.name || '').trim();
+  const symbol = String(stock?.symbol || stock?.ticker || '').trim();
+  if (stock?.category === 'KR_ETF') return `${name} ${symbol} ETF`;
+  if (stock?.category === 'KR') return `${name} ${symbol} 주식`;
+  if (stock?.category === 'US_ETF') return `${name} ${symbol} ETF`;
+  return `${name} ${symbol} stock`;
+}
+
+function newsSearchUrl(stock) {
+  const q = encodeURIComponent(newsSearchQuery(stock));
+  return ['KR','KR_ETF'].includes(stock?.category)
+    ? `https://news.google.com/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`
+    : `https://news.google.com/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
+}
+
+function jsonp(url, params={}, timeoutMs=12000) {
+  return new Promise((resolve, reject) => {
+    const callback = `__dtcNews_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement('script');
+    const query = new URLSearchParams({ ...params, callback });
+    const sep = url.includes('?') ? '&' : '?';
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      script.remove();
+      try { delete window[callback]; } catch (_) { window[callback] = undefined; }
+    };
+    window[callback] = (payload) => { cleanup(); resolve(payload); };
+    script.onerror = () => { cleanup(); reject(new Error('news proxy load failed')); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('news proxy timeout')); }, timeoutMs);
+    script.src = `${url}${sep}${query.toString()}`;
+    script.async = true;
+    document.head.appendChild(script);
+  });
+}
+
+async function loadHeadline(stock, card) {
+  const line = $('[data-news-line]', card);
+  if (!line?.isConnected) return;
+  const direct = newsSearchUrl(stock);
+  if (!NEWS_PROXY_URL || NEWS_PROXY_URL.includes('PASTE_YOUR')) {
+    line.innerHTML = `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
+    return;
+  }
+
+  const key = `${stock.category}:${stock.ticker}`;
+  const cached = state.newsCache.get(key);
+  let articles = null;
+  if (cached && Date.now() - cached.at < NEWS_CACHE_MS) {
+    articles = cached.articles;
+  } else {
+    try {
+      const payload = await jsonp(NEWS_PROXY_URL, {
+        q: newsSearchQuery(stock),
+        region: ['KR','KR_ETF'].includes(stock.category) ? 'KR' : 'US',
+        limit: '1',
+      });
+      if (!payload?.ok) throw new Error(payload?.error || 'news proxy error');
+      articles = Array.isArray(payload.articles) ? payload.articles.slice(0, 1) : [];
+      state.newsCache.set(key, { at:Date.now(), articles });
+    } catch (err) {
+      console.error('headline', err);
+      articles = [];
+    }
+  }
+
+  if (!line?.isConnected) return;
+  const article = articles?.[0];
+  line.innerHTML = article?.title && article?.link
+    ? `<span class="line-label">NEWS</span><a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(article.title)}">${escapeHtml(article.title)}</a>`
+    : `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
 }
 
 function drawChart(el, detail) {
@@ -463,10 +540,19 @@ async function hydrateCard(card) {
   const stock = stockByTicker(ticker);
   if (!stock) return;
 
-  void loadHeadline(stock, card);
+  // News and chart are intentionally independent. A news/proxy failure must
+  // never prevent the detail JSON from loading or the forecast chart rendering.
+  Promise.resolve()
+    .then(() => loadHeadline(stock, card))
+    .catch((err) => {
+      console.error('headline hydrate', err);
+      const line = $('[data-news-line]', card);
+      if (line?.isConnected) {
+        const direct = newsSearchUrl(stock);
+        line.innerHTML = `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
+      }
+    });
 
-  // Resolve the chart box after the await as well: the card may have been
-  // re-rendered while the detail request was in flight.
   const chartBox = () => $('[data-chart-box]', card)
     || $(`.stock-card[data-ticker="${CSS.escape(String(stock.ticker))}"] [data-chart-box]`);
 
