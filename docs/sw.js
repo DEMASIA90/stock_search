@@ -1,14 +1,14 @@
-const CACHE_NAME = 'dtc-pwa-v13-2-supertrend';
+const CACHE_NAME = 'dtc-pwa-v13-3-supertrend';
 const SHELL_FILES = [
   './',
   './index.html',
-  './styles.css?v=20260823-v13_2_supertrend',
-  './runtime-config.js?v=20260823-v13_2_supertrend',
-  './app.js?v=20260823-v13_2_supertrend',
-  './news-config.js?v=20260823-v13_2_supertrend',
-  './pwa.js?v=20260823-v13_2_supertrend',
+  './styles.css?v=20260823-v13_3_supertrend',
+  './runtime-config.js?v=20260823-v13_3_supertrend',
+  './app.js?v=20260823-v13_3_supertrend',
+  './news-config.js?v=20260823-v13_3_supertrend',
+  './pwa.js?v=20260823-v13_3_supertrend',
   './manifest.webmanifest',
-  './logo-dtc.svg?v=20260823-v13_2_supertrend',
+  './logo-dtc.svg?v=20260823-v13_3_supertrend',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-512-maskable.png'

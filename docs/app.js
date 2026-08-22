@@ -37,8 +37,8 @@ const QUIZ_HIDDEN_DAYS = 30;
 const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr', 'kr-etf', 'us', 'us-etf'];
 
-const OPINION_ORDER = { BUY_S:0, BUY_A:1, BUY_B:2, BUY_C:3, HOLD:4, SELL:5 };
-const OPINION_TEXT = { BUY_S:'매수S', BUY_A:'매수A', BUY_B:'매수B', BUY_C:'매수C', HOLD:'Hold', SELL:'매도' };
+const OPINION_ORDER = { STRONG_BUY:0, BUY:1, HOLD:2, SELL:3 };
+const OPINION_TEXT = { STRONG_BUY:'강한 매수', BUY:'매수', HOLD:'Hold', SELL:'매도' };
 
 const state = {
   mode: 'supertrend',
@@ -209,26 +209,37 @@ function pct(v, digits=2) {
   if (v === null || v === undefined || v === '') return '—';
   const n=Number(v); return Number.isFinite(n) ? `${n>=0?'+':''}${n.toFixed(digits)}%` : '—';
 }
+function referenceGradeClass(v) {
+  const k=String(v||'NORMAL').toLowerCase();
+  return ['good','normal','bad'].includes(k)?k:'normal';
+}
+function referenceLines(stock) {
+  const refs=stock?.reference_setups || stock?.supertrend?.reference_setups || {};
+  const bo=refs.breakout||{}, pb=refs.pullback||{};
+  const boLabel=bo.label||'보통', pbLabel=pb.label||'보통';
+  return `<div class="reference-setups" title="참고자료용 · SuperTrend 의견/정렬/백테스트에 반영되지 않음">
+    <div class="reference-row"><span>돌파매매</span><b class="signal-grade ${referenceGradeClass(bo.grade)}">${escapeHtml(boLabel)}</b></div>
+    <div class="reference-row"><span>눌림목 매매</span><b class="signal-grade ${referenceGradeClass(pb.grade)}">${escapeHtml(pbLabel)}</b></div>
+  </div>`;
+}
 function strategyLines(stock) {
   const st = stock?.supertrend || {};
   const p0Raw=st.p0 ?? stock.p0, p1Raw=st.p1 ?? stock.p1;
-  const p0=numberOrNaN(p0Raw), p1=numberOrNaN(p1Raw), r=numberOrNaN(st.r_pct ?? stock.r_pct);
-  const stop=numberOrNaN(st.stop_pct ?? stock.stop_pct), atr=numberOrNaN(st.atr_pct ?? stock.atr_pct);
+  const r=numberOrNaN(st.r_pct ?? stock.r_pct), stop=numberOrNaN(st.stop_pct ?? stock.stop_pct), atr=numberOrNaN(st.atr_pct ?? stock.atr_pct);
   const bars=numberOrNaN(st.bars_since_gate ?? stock.bars_since_gate);
   const dir=st.direction === 'UP' ? '상승' : st.direction === 'DOWN' ? '하락' : '—';
   const reason=String(st.hold_reason ?? stock.hold_reason ?? '');
-  const reasonText={BELOW_GATE:'게이트 미통과',OVEREXTENDED:'20% 이상 진행',NO_FLIP:'전환점 없음'}[reason] || '';
+  const reasonText={BELOW_GATE:'게이트 미통과',NO_FLIP:'전환점 없음'}[reason] || '';
   return `<div class="trade-signal-box">
     <div class="trade-signal-row"><span class="signal-title breakout">ST 10·2</span><span>현재 <b>${dir}</b></span><i>·</i><span>P1 <b>${money(p1Raw, stock.currency)}</b></span>${stock.new_sell?'<span class="new-sell-tag">신규매도</span>':''}</div>
     <div class="trade-signal-row"><span class="signal-title pullback">P0</span><span>전환 직전 ST <b>${money(p0Raw, stock.currency)}</b></span><i>·</i><span>r <b>${Number.isFinite(r)?r.toFixed(2)+'%':'—'}</b></span>${reasonText?`<i>·</i><span>${reasonText}</span>`:''}</div>
-    <div class="trade-signal-row"><span class="signal-title risk">RISK</span><span>ST 거리 <b>${Number.isFinite(stop)?stop.toFixed(2)+'%':'—'}</b></span><i>·</i><span>ATR <b>${Number.isFinite(atr)?atr.toFixed(2)+'%':'—'}</b></span><i>·</i><span>Gate +<b>${Number.isFinite(bars)?Math.max(0,Math.trunc(bars)):'—'}</b>봉</span></div>
+    <div class="trade-signal-row"><span class="signal-title risk">GATE</span><span>경과 <b>${Number.isFinite(bars)?Math.max(0,Math.trunc(bars))+'봉':'—'}</b></span><i>·</i><span>ST 거리 <b>${Number.isFinite(stop)?stop.toFixed(2)+'%':'—'}</b></span><i>·</i><span>ATR <b>${Number.isFinite(atr)?atr.toFixed(2)+'%':'—'}</b></span></div>
   </div>`;
 }
 function backtestLine(stock) {
   const bt=stock?.supertrend?.backtest || {};
-  const comp=bt.completed || {};
-  const avg=numberOrNaN(comp.avg_return_pct), trades=numberOrNaN(comp.trades), win=numberOrNaN(comp.win_rate_pct);
-  return `2Y Back test: S→매도 평균 <b>${Number.isFinite(avg)?pct(avg):'—'}</b> <small>· 완료 ${Number.isFinite(trades)?trades:0}회 · 승률 ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</small>`;
+  const win=numberOrNaN(bt.win_rate_pct);
+  return `2Y Back test: 매수 후 <b>+10% 도달 승률 ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</b>`;
 }
 function stockCard(stock) {
   const ticker=stock.symbol || stock.ticker || '—';
@@ -239,6 +250,7 @@ function stockCard(stock) {
         <button class="opinion-pill ${opinionClass(stock)}" type="button" data-score-detail="${escapeHtml(stock.ticker)}">${escapeHtml(opinionText(stock))}</button>
       </div>
       <div class="stock-meta-line"><span class="sector-name">${escapeHtml(stock.sector || '—')}</span><i>·</i><span class="market-stat">${marketSizeLabel(stock)} ${marketSize(stock.market_size_krw)}</span><i>·</i><span class="market-stat">현재가 ${money(stock.close, stock.currency)} ${changeText(stock.day_change_pct)}</span></div>
+      ${referenceLines(stock)}
       ${strategyLines(stock)}
       <div class="backtest-one-line">${backtestLine(stock)}</div>
     </section>
@@ -261,7 +273,7 @@ function renderMeta() {
   if(!data){ $('#marketDate').textContent='—'; $('#coverage').textContent='—'; $('#scanStatus').textContent='—'; return; }
   $('#marketDate').textContent=data.market_date || '—';
   $('#coverage').textContent=`가격수신 ${Number(data.coverage_pct||0).toFixed(1)}%`;
-  $('#scanStatus').textContent=`${data.scan_mode==='QUICK'?'장중 QUICK':'종가 확정 FULL'} · Buy S→A→B→C→Hold→매도 · 동일등급 시총순`;
+  $('#scanStatus').textContent=`${data.scan_mode==='QUICK'?'장중 QUICK':'종가 확정 FULL'} · 강한 매수→매수→Hold→매도 · 동일등급 시총순`;
 }
 function stockByTicker(ticker) { return (currentData()?.items || []).find(x=>x.ticker===ticker) || null; }
 
@@ -302,18 +314,17 @@ function activateLazyCards() {
 async function openScoreDetail(stock) {
   const modal=$('#scoreModal'),body=$('#scoreModalBody'); $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol||stock.ticker}) · ${opinionText(stock)}`;modal.hidden=false;document.body.classList.add('modal-open');body.innerHTML='<div class="modal-loading">Supertrend 상세를 불러오는 중…</div>';
   let detail=stock;try{detail=await ensureDetail(stock);}catch(_){ }
-  const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{},comp=bt.completed||{},inc=bt.including_open||{};
-  const avg=numberOrNaN(comp.avg_return_pct),win=numberOrNaN(comp.win_rate_pct),r=numberOrNaN(st.r_pct);
-  const trades=(bt.recent_trades||[]).map(t=>`<div class="score-row"><div><b>${escapeHtml(t.buy_date)} → ${escapeHtml(t.sell_date)}</b></div><strong>${pct(t.return_pct)}</strong></div>`).join('');
-  body.innerHTML=`<div class="score-total"><span>SUPERTREND 10·2 · WILDER RMA</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
-    <div class="score-row"><div><b>P0</b><small>하락→상승 전환 직전 봉의 ST = ST[flip−1]</small></div><strong>${money(st.p0,stock.currency)}</strong></div>
-    <div class="score-row"><div><b>P1</b><small>현재 Supertrend 가격</small></div><strong>${money(st.p1,stock.currency)}</strong></div>
-    <div class="score-row"><div><b>r</b><small>(현재 종가 − P0) / P0 · 등급의 유일한 근거</small></div><strong>${Number.isFinite(r)?r.toFixed(2)+'%':'—'}</strong></div>
-    <div class="score-row"><div><b>ST 손절폭</b><small>(Close − P1) / Close</small></div><strong>${pct(st.stop_pct)}</strong></div>
-    <div class="score-row"><div><b>ATR% / g_ATR / d_ATR</b><small>진단 전용 · 의견 판정에 미사용</small></div><strong>${pct(st.atr_pct)} · ${Number.isFinite(numberOrNaN(st.g_atr))?numberOrNaN(st.g_atr).toFixed(2):'—'} · ${Number.isFinite(numberOrNaN(st.d_atr))?numberOrNaN(st.d_atr).toFixed(2):'—'}</strong></div>
-    <div class="score-row"><div><b>레그 / 게이트 경과</b></div><strong>${st.bars_since_flip??'—'}봉 · ${st.bars_since_gate??'—'}봉</strong></div>
-    <div class="score-row"><div><b>2Y 완료거래 평균 / 승률</b><small>S 최초 신호 다음 시가 → 매도전환 다음 시가</small></div><strong>${Number.isFinite(avg)?pct(avg):'—'} · ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</strong></div>
-    <div class="score-row"><div><b>완료 / 미청산 포함</b></div><strong>${Number(comp.trades||0)}회 · ${Number(inc.trades||0)}회</strong></div>${trades}</div>`;
+  const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{},refs=st.reference_setups||stock.reference_setups||{};
+  const r=numberOrNaN(st.r_pct),win=numberOrNaN(bt.win_rate_pct),bo=refs.breakout||{},pb=refs.pullback||{};
+  body.innerHTML=`<div class="score-total"><span>SUPERTREND 10·2 · TRADINGVIEW-COMPATIBLE · WILDER RMA</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
+    <div class="score-row"><div><b>P0</b><small>하락→상승 전환 직전 봉 ST = ST[flip−1]</small></div><strong>${money(st.p0,stock.currency)}</strong></div>
+    <div class="score-row"><div><b>P1</b><small>현재 SuperTrend 가격</small></div><strong>${money(st.p1,stock.currency)}</strong></div>
+    <div class="score-row"><div><b>게이트 경과</b><small>0~3봉만 강한 매수, 이후는 매수</small></div><strong>${st.bars_since_gate??'—'}봉</strong></div>
+    <div class="score-row"><div><b>r / ST 손절폭</b><small>진단용</small></div><strong>${Number.isFinite(r)?r.toFixed(2)+'%':'—'} · ${pct(st.stop_pct)}</strong></div>
+    <div class="score-row"><div><b>돌파매매 참고</b><small>20D 고점 + 거래량</small></div><strong>${escapeHtml(bo.label||'보통')}</strong></div>
+    <div class="score-row"><div><b>눌림목 참고</b><small>ST 추세 + EMA20/50 + RSI14</small></div><strong>${escapeHtml(pb.label||'보통')}</strong></div>
+    <div class="score-row"><div><b>2Y +10% 도달 승률</b><small>강한 매수 다음봉 시가 진입 → 매도 전까지 +10% 고가 도달</small></div><strong>${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</strong></div>
+  </div>`;
 }
 
 function closeModal(){ $('#scoreModal').hidden=true;document.body.classList.remove('modal-open'); }

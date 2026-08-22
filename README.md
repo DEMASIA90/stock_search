@@ -1,32 +1,42 @@
-# DTC · Supertrend Strategy
+# Dongtan Trading Center (DTC) — v13.3 SuperTrend
 
-DTC의 현재 분석 모드는 **Supertrend(기간 10, 곱 2)** 하나만 사용합니다. Quiz mode는 별도로 유지됩니다.
+DTC v13.3은 `SuperTrend(10,2)` 단독 Opinion 엔진과 Quiz mode를 제공합니다.
 
-## 의견 규칙
+## Opinion
 
-- `P0`: 가장 최근 Supertrend 하락→상승 전환 시점의 Supertrend 가격
-- `P1`: 현재 Supertrend 가격
-- 현재 Supertrend가 하락이면 `매도`
-- 현재 Supertrend가 상승이고 `P1 >= P0`일 때 현재 종가와 P0의 차이로 등급 결정
-  - `<2%`: Buy S
-  - `<5%`: Buy A
-  - `<10%`: Buy B
-  - `<20%`: Buy C
-  - 그 외: Hold
-- 그 외의 상승 상태도 Hold
+- **강한 매수**: 현재 ST 상승 + `P1 >= P0`, 그리고 최초 게이트 통과일을 0으로 하여 `bars_since_gate <= 3`
+- **매수**: 현재 ST 상승 + `P1 >= P0`, `bars_since_gate > 3`
+- **Hold**: 상승 상태지만 P0가 없거나 아직 `P1 < P0`
+- **매도**: 현재 ST 하락
 
-정렬은 `Buy S → Buy A → Buy B → Buy C → Hold → 매도`, 동일 의견에서는 시가총액/ETF 규모 내림차순입니다.
+`P0 = ST[flip_idx-1]`, `P1 = current ST`입니다. 기본 정렬은 `강한 매수 → 매수 → Hold → 매도`, 같은 의견에서는 시가총액/ETF 규모 내림차순입니다.
 
-## 백테스트
+## SuperTrend 엔진
 
-최근 2년 동안 포지션이 없을 때 첫 `Buy S` 종가에 진입하고, 보유 중 첫 `매도` 의견 종가에 청산합니다. 완료된 거래의 평균 수익률을 카드와 상세창에 표시합니다.
+- ATR period 10
+- multiplier 2.0
+- Wilder RMA
+- 수정 OHLC
+- TradingView `ta.supertrend(2,10)`의 공개 Pine reference state machine을 직접 옮긴 구현
+- 내부 direction 부호만 `+1=상승`, `-1=하락`으로 사용
+- 차트는 최근 126거래일 일반 OHLC 캔들: 양봉 빨강, 음봉 파랑, ST 상승 빨강, ST 하락 파랑
 
-## 차트
+## Backtest
 
-약 6개월(126 거래일)의 Heikin-Ashi 캔들과 Supertrend(10,2)를 표시합니다. **매매 의견 계산은 일반 OHLC 기준 Supertrend만 사용하며 Heikin-Ashi는 시각화 전용**입니다.
+최근 2년 각 상승 레그의 최초 **강한 매수** 신호 다음 봉 시가에 진입했다고 가정합니다. 다음 매도 신호 전까지 일중 고가가 진입가 대비 **+10% 이상 한 번이라도 도달한 비율**만 백테스트 headline으로 표시합니다. 미청산 레그는 승률 분모에서 제외합니다.
 
-## 테스트
+## 참고 태그
+
+카드의 시총/현재가 아래에 다음 두 값이 `좋음 / 보통 / 나쁨`으로 표시됩니다. 이 값들은 Opinion, 정렬, 백테스트에 절대 반영되지 않습니다.
+
+- 돌파매매: 직전 20일 고점과 당일 거래량/직전20일 평균거래량
+- 눌림목 매매: ST 상승 여부 + EMA20/EMA50 + RSI14 + EMA20 이격
+
+## 실행
 
 ```bash
-python -m unittest -v test_supertrend_strategy.py
+python scanner.py --market ALL --scan-mode FULL
+python test_supertrend_strategy.py
 ```
+
+최초 배포 후에는 `ALL + FULL` 1회를 권장합니다.

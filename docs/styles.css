@@ -67,15 +67,13 @@ main{padding-top:20px}
 
 .opinion-pill{flex:0 0 auto;min-width:78px;height:44px;border-radius:13px;border:1px solid #2b384b;background:#171f2c;color:#edf3fb;font-size:15px;font-weight:900;cursor:pointer;padding:0 10px}
 .opinion-pill:hover{filter:brightness(1.12)}
-.opinion-pill.opinion-buy-s{background:#123b2f;border-color:#2d9a72;color:#baf5da}
-.opinion-pill.opinion-buy-a{background:#16392f;border-color:#328765;color:#c8f4df}
-.opinion-pill.opinion-buy-b{background:#223528;border-color:#627f54;color:#d8edd0}
-.opinion-pill.opinion-buy-c{background:#39331f;border-color:#8b7a42;color:#f1e3a8}
+.opinion-pill.opinion-strong-buy{background:#4b1d20;border-color:#d85f65;color:#ffd7d9}
+.opinion-pill.opinion-buy{background:#3a2b1e;border-color:#b9854e;color:#ffe1b9}
 .opinion-pill.opinion-hold{background:#252b35;border-color:#4b596d;color:#d4deea}
-.opinion-pill.opinion-sell{background:#441f27;border-color:#a64f60;color:#ffd0d8}
-.stock-card.opinion-buy-s{border-color:rgba(65,194,139,.50)}
-.stock-card.opinion-buy-a{border-color:rgba(65,194,139,.30)}
-.stock-card.opinion-sell{border-color:rgba(210,82,102,.34)}
+.opinion-pill.opinion-sell{background:#182b45;border-color:#4f83c9;color:#cfe2ff}
+.stock-card.opinion-strong-buy{border-color:rgba(232,75,82,.52);box-shadow:0 7px 30px rgba(232,75,82,.06)}
+.stock-card.opinion-buy{border-color:rgba(211,151,73,.30)}
+.stock-card.opinion-sell{border-color:rgba(74,126,198,.34)}
 .supertrend-up-line{fill:none;stroke:var(--red);stroke-width:2.2;vector-effect:non-scaling-stroke}
 .supertrend-down-line{fill:none;stroke:var(--blue);stroke-width:2.2;vector-effect:non-scaling-stroke}
 
@@ -87,6 +85,9 @@ main{padding-top:20px}
 .stock-meta-line i{font-style:normal;color:#3f4a5a}
 .stock-meta-line .sector-name{font-size:11.5px;color:#8d99aa}
 .stock-meta-line .market-stat{font-size:14px;font-weight:800;color:#d9e2ee;letter-spacing:-.15px}
+.reference-setups{margin-top:7px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.reference-row{display:flex;align-items:center;gap:5px;padding:3px 6px;border:1px solid rgba(255,255,255,.06);border-radius:7px;background:rgba(255,255,255,.018);font-size:9px;color:#7f8b9d}
+.reference-row span{font-weight:800;color:#aeb9c8}
 .trade-signal-box{margin-top:10px;display:flex;flex-direction:column;gap:5px}
 .trade-signal-row{display:flex;align-items:center;gap:6px;min-width:0;color:#8f9bad;font-size:10.8px;white-space:nowrap}
 .trade-signal-row i{font-style:normal;color:#3f4a5a}

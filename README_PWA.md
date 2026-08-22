@@ -1,11 +1,5 @@
-# DTC v11.9 PWA
+# DTC PWA v13.3
 
-The `docs/` frontend is an installable Progressive Web App and is also used by the Capacitor Android wrapper.
+정적 자산 build key는 `20260823-v13_3_supertrend`이며 서비스워커 캐시는 `dtc-pwa-v13-3-supertrend`입니다.
 
-- UI build: `20260821-v11_9`
-- Service-worker shell cache: `dtc-pwa-v11-9-shell`
-- Market and Quiz data under `/data/` are always fetched fresh rather than stored in the service-worker shell cache.
-- GitHub Pages and Android use the Firebase Hosting data endpoint when appropriate.
-- Quiz mode lazy-loads only the selected 100T+ stock histories rather than downloading the whole historical pool at startup.
-
-Run **ALL + FULL** once after upgrading so the new Quiz data tree exists for all categories.
+SuperTrend 화면은 일반 OHLC 126거래일 차트와 ST(10,2)를 사용합니다. 양봉/상승 ST는 빨강, 음봉/하락 ST는 파랑입니다. Quiz mode는 기존 로직을 유지합니다.
