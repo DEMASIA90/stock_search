@@ -121,18 +121,37 @@ function renderSizeFilters() {
   if (nav) nav.setAttribute('aria-label', mode === 'etf' ? 'ETF 규모 필터' : '시가총액 필터');
 }
 
-function scoreValue(stock) {
-  const f = stock?.forecast || {};
-  if (!f.forecastable) return -1e18;
-  const n = Number(f.score ?? stock?.forecast_score);
+// 'forecast' = Forecast PJT 1 score 순, 'setup' = 기존 셋업 점수(0~10) 순.
+// 예측 모델이 백테스트로 검증되기 전까지는 'setup' 이 안전한 기본값이다.
+const RANK_BY = 'forecast';
+
+function setupValue(stock) {
+  const n = Number(stock?.base_score ?? stock?.score);
   return Number.isFinite(n) ? n : -1e18;
 }
 
-function scoreText(stock) {
+function forecastValue(stock) {
   const f = stock?.forecast || {};
-  if (!f.forecastable) return '—';
+  if (!f.forecastable) return null;
   const n = Number(f.score ?? stock?.forecast_score);
-  return Number.isFinite(n) ? `${n > 0 ? '+' : ''}${(n * 100).toFixed(2)}%` : '—';
+  return Number.isFinite(n) ? n : null;
+}
+
+function scoreValue(stock) {
+  if (RANK_BY === 'setup') return setupValue(stock);
+  const n = forecastValue(stock);
+  // Non-forecastable names sort below any real forecast but keep their setup
+  // ordering among themselves instead of collapsing into one -1e18 bucket.
+  return n === null ? -1e9 + setupValue(stock) : n;
+}
+
+function scoreText(stock) {
+  const n = forecastValue(stock);
+  if (n === null) {
+    const s = setupValue(stock);
+    return s > -1e17 ? `셋업 ${s.toFixed(1)}` : '—';
+  }
+  return `${n > 0 ? '+' : ''}${(n * 100).toFixed(2)}%`;
 }
 
 function heatClass(stock) {
@@ -332,46 +351,93 @@ function chartRows(detail) {
 function drawForecastChart(el, detail) {
   if (!el?.isConnected) return;
   const data = chartRows(detail);
+  if (data.length < 5) { el.innerHTML = '<div class="chart-empty">차트 데이터 없음</div>'; return; }
+
+  // The forecast is an OVERLAY. Candles must render whether or not the payload
+  // carries a usable forecast block - stale data files, newly listed names and
+  // sub-272-session histories all legitimately have no forecast.
   const f = detail?.forecast || {};
-  if (data.length < 20 || !f.forecastable) {
-    el.innerHTML = '<div class="chart-empty">Forecast 데이터 부족</div>';
-    return;
-  }
-  const future = Array.isArray(f.projection) ? f.projection : [];
   const m = Number(f.slope_log_per_day);
   const b = Number(f.intercept_log);
-  const p0 = Number(f.current_price ?? data[data.length-1].close);
+  const p0 = Number(f.current_price ?? data[data.length - 1].close);
   const conf = Number(f.confidence);
-  if (![m,b,p0].every(Number.isFinite)) { el.innerHTML='<div class="chart-empty">Forecast 데이터 부족</div>'; return; }
+  const hasForecast = Boolean(f.forecastable) && [m, b, p0].every(Number.isFinite);
 
-  const fitted = data.map((_, i) => { const tau = i - (data.length - 1); return Math.exp(b + m*tau); });
-  const projection = [{offset:0,price:p0}, ...future.map(x=>({offset:Number(x.offset),price:Number(x.price)})).filter(x=>Number.isFinite(x.offset)&&Number.isFinite(x.price))];
-  const all = data.flatMap(r=>[r.low,r.high]).filter(Number.isFinite).concat(fitted, projection.map(x=>x.price));
-  let lo=Math.min(...all), hi=Math.max(...all);
-  if (!(hi>lo)) { lo*=.99; hi*=1.01; }
-  const pr=(hi-lo)*.08 || Math.abs(hi)*.01 || 1; lo-=pr; hi+=pr;
-  const W=700,H=250,pad={l:12,r:55,t:16,b:25};
-  const totalSlots=data.length+20;
-  const plotW=W-pad.l-pad.r, step=plotW/totalSlots;
-  const X=i=>pad.l+(i+.5)*step;
-  const Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo);
-  let grid='';
-  for(let i=0;i<4;i++){ const y=pad.t+i*(H-pad.t-pad.b)/3; const v=hi-i*(hi-lo)/3; const label=detail.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`; grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+6}" y="${y+4}" class="price-axis">${label}</text>`; }
-  const bodyW=Math.max(1.5,Math.min(4.8,step*.6));
-  let candles='';
-  data.forEach((r,i)=>{ const x=X(i),yo=Y(r.open),yc=Y(r.close),yh=Y(r.high),yl=Y(r.low); const up=r.close>=r.open,klass=up?'chart-candle-up':'chart-candle-down'; const top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo)); candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".4"/>`; });
-  const fitPath=fitted.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
-  const actualEnd=data.length-1;
-  const predPath=projection.map((r,i)=>`${i?'L':'M'}${X(actualEnd+r.offset).toFixed(1)},${Y(r.price).toFixed(1)}`).join(' ');
-  const anchorByDate=new Map(data.map((r,i)=>[r.date,i]));
-  let anchors='';
-  (f.anchors||[]).forEach(a=>{ const i=anchorByDate.get(a.date); if(i==null)return; anchors+=`<circle cx="${X(i)}" cy="${Y(Number(a.close))}" r="4" class="forecast-anchor"><title>${escapeHtml(a.date)} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}</title></circle>`; });
-  const todayX=X(actualEnd); const fitToday=Y(Math.exp(b)); const actualToday=Y(p0);
-  const gap=`<line x1="${todayX}" x2="${todayX}" y1="${fitToday}" y2="${actualToday}" class="forecast-gap-line"/>`;
-  const opacity=Number.isFinite(conf)?Math.max(.15,Math.min(1,conf)):0.15;
-  const dateLabels=`<text x="${X(0)}" y="${H-6}" text-anchor="start" class="date-axis">${escapeHtml(data[0]?.date?.slice(5)||'')}</text><text x="${todayX}" y="${H-6}" text-anchor="middle" class="date-axis">TODAY</text><text x="${X(actualEnd+20)}" y="${H-6}" text-anchor="end" class="date-axis">+20D</text>`;
-  const anchorTitle=(f.anchors||[]).map((a,i)=>`A${i+1} ${a.date} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}`).join(' | ');
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="Forecast PJT 1 20일 예측 차트">${grid}${candles}<path d="${fitPath}" class="forecast-fit-line"/>${anchors}${gap}<line x1="${todayX}" x2="${todayX}" y1="${pad.t}" y2="${H-pad.b}" class="forecast-today-line"/><path d="${predPath}" class="forecast-projection-line" style="opacity:${opacity.toFixed(3)}"/>${dateLabels}</svg><div class="chart-legend"><span>CANDLE</span><span>WLS FIT</span><span title="${escapeHtml(anchorTitle)}">ANCHOR 6</span><span>20D FORECAST</span></div>`;
+  const last = data.length - 1;
+  const fitted = hasForecast ? data.map((_, i) => Math.exp(b + m * (i - last))) : [];
+  const future = hasForecast && Array.isArray(f.projection) ? f.projection : [];
+  const projection = hasForecast
+    ? [{ offset: 0, price: p0 }].concat(future
+        .map((x) => ({ offset: Number(x.offset), price: Number(x.price) }))
+        .filter((x) => Number.isFinite(x.offset) && Number.isFinite(x.price)))
+    : [];
+  const futureSlots = hasForecast ? 20 : 0;
+
+  const bandVals = data.flatMap((r) => [r.mid, r.upper, r.lower]).filter(Number.isFinite);
+  const all = data.flatMap((r) => [r.low, r.high]).filter(Number.isFinite)
+    .concat(bandVals, fitted, projection.map((x) => x.price)).filter(Number.isFinite);
+  if (!all.length) { el.innerHTML = '<div class="chart-empty">차트 데이터 없음</div>'; return; }
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (!(hi > lo)) { lo *= 0.99; hi *= 1.01; }
+  const pr = (hi - lo) * 0.08 || Math.abs(hi) * 0.01 || 1; lo -= pr; hi += pr;
+
+  const W = 700, H = 250, pad = { l: 12, r: 55, t: 16, b: 25 };
+  const totalSlots = data.length + futureSlots;
+  const plotW = W - pad.l - pad.r, step = plotW / totalSlots;
+  const X = (i) => pad.l + (i + 0.5) * step;
+  const Y = (v) => pad.t + (hi - v) * (H - pad.t - pad.b) / (hi - lo);
+
+  let grid = '';
+  for (let i = 0; i < 4; i++) {
+    const y = pad.t + i * (H - pad.t - pad.b) / 3;
+    const v = hi - i * (hi - lo) / 3;
+    const label = detail.currency === 'KRW' ? Math.round(v).toLocaleString('ko-KR') : `$${v.toFixed(Math.abs(v) >= 100 ? 0 : 1)}`;
+    grid += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W - pad.r + 6}" y="${y + 4}" class="price-axis">${label}</text>`;
+  }
+
+  const bandPath = (key) => {
+    const pts = data.map((r, i) => (Number.isFinite(r[key]) ? `${X(i).toFixed(1)},${Y(r[key]).toFixed(1)}` : null)).filter(Boolean);
+    return pts.length > 1 ? `<path d="M${pts.join(' L')}" class="chart-band-line chart-band-${key}"/>` : '';
+  };
+  const bands = bandVals.length ? bandPath('upper') + bandPath('mid') + bandPath('lower') : '';
+
+  const bodyW = Math.max(1.5, Math.min(4.8, step * 0.6));
+  let candles = '';
+  data.forEach((r, i) => {
+    const x = X(i), yo = Y(r.open), yc = Y(r.close), yh = Y(r.high), yl = Y(r.low);
+    const klass = r.close >= r.open ? 'chart-candle-up' : 'chart-candle-down';
+    const top = Math.min(yo, yc), bh = Math.max(1.1, Math.abs(yc - yo));
+    candles += `<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${klass}"/><rect x="${x - bodyW / 2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".4"/>`;
+  });
+
+  const todayX = X(last);
+  let overlay = '';
+  let legendExtra = '';
+  if (hasForecast) {
+    const fitPath = fitted.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+    const predPath = projection.map((r, i) => `${i ? 'L' : 'M'}${X(last + r.offset).toFixed(1)},${Y(r.price).toFixed(1)}`).join(' ');
+    const anchorByDate = new Map(data.map((r, i) => [r.date, i]));
+    let anchors = '';
+    (f.anchors || []).forEach((a) => {
+      const i = anchorByDate.get(a.date);
+      if (i == null) return;
+      anchors += `<circle cx="${X(i)}" cy="${Y(Number(a.close))}" r="4" class="forecast-anchor"><title>${escapeHtml(a.date)} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}</title></circle>`;
+    });
+    const gap = `<line x1="${todayX}" x2="${todayX}" y1="${Y(Math.exp(b))}" y2="${Y(p0)}" class="forecast-gap-line"/>`;
+    const opacity = Number.isFinite(conf) ? Math.max(0.15, Math.min(1, conf)) : 0.15;
+    overlay = `<path d="${fitPath}" class="forecast-fit-line"/>${anchors}${gap}<line x1="${todayX}" x2="${todayX}" y1="${pad.t}" y2="${H - pad.b}" class="forecast-today-line"/><path d="${predPath}" class="forecast-projection-line" style="opacity:${opacity.toFixed(3)}"/>`;
+    const anchorTitle = (f.anchors || []).map((a, i) => `A${i + 1} ${a.date} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}`).join(' | ');
+    legendExtra = `<span>WLS FIT</span><span title="${escapeHtml(anchorTitle)}">ANCHOR 6</span><span>20D FORECAST</span>`;
+  } else {
+    legendExtra = `<span class="legend-muted" title="${escapeHtml(f.reason || 'forecast 데이터 없음')}">FORECAST 없음</span>`;
+  }
+
+  const rightLabel = hasForecast
+    ? `<text x="${X(last + 20)}" y="${H - 6}" text-anchor="end" class="date-axis">+20D</text>`
+    : `<text x="${X(last)}" y="${H - 6}" text-anchor="end" class="date-axis">${escapeHtml(data[last]?.date?.slice(5) || '')}</text>`;
+  const dateLabels = `<text x="${X(0)}" y="${H - 6}" text-anchor="start" class="date-axis">${escapeHtml(data[0]?.date?.slice(5) || '')}</text>${hasForecast ? `<text x="${todayX}" y="${H - 6}" text-anchor="middle" class="date-axis">TODAY</text>` : ''}${rightLabel}`;
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="주가 차트">${grid}${bands}${candles}${overlay}${dateLabels}</svg><div class="chart-legend"><span>CANDLE</span><span>BB</span>${legendExtra}</div>`;
 }
 
 function drawChart(el, detail) {

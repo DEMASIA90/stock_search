@@ -99,7 +99,10 @@ NAVER_HEADERS = {
 }
 NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 100M units (억원)
 
-MIN_TRADING_DAYS = 63  # scanner inclusion; forecast() itself requires 272 sessions
+# Restored to the pre-v12 value. score_at() returns (0.0, {}, {}) below pos=399,
+# so a lower gate admits stocks that cannot produce a setup score or volume
+# profile. Forecast PJT 1 needs only 272 sessions, so 400 never blocks it.
+MIN_TRADING_DAYS = 400
 MIN_PRICE_KRW = 1_000.0
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
 ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
@@ -914,9 +917,12 @@ def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
         "h": [clean(v) for v in chart_h],
         "lo": [clean(v) for v in chart_l],
         "c": [clean(v) for v in chart_c],
-        "m": [clean(v) for v in chart["BB_Mid"]],
-        "u": [clean(v) for v in chart["BB_Upper"]],
-        "l": [clean(v) for v in chart["BB_Lower"]],
+        # Bands are computed on raw Close; scale them with the same factor as the
+        # candles or the two series sit on different price levels for any name
+        # with dividends/splits.
+        "m": [clean(v) for v in pd.to_numeric(chart["BB_Mid"], errors="coerce") * factor],
+        "u": [clean(v) for v in pd.to_numeric(chart["BB_Upper"], errors="coerce") * factor],
+        "l": [clean(v) for v in pd.to_numeric(chart["BB_Lower"], errors="coerce") * factor],
         "profiles": profile_lines,
     }
 
@@ -1516,7 +1522,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     if frame.empty:
         return None, "no_price"
     if len(frame) < MIN_TRADING_DAYS:
-        return None, "listed_lt_63d"
+        return None, "listed_lt_400d"
 
     ind = add_indicators(frame)
     pos = len(frame) - 1

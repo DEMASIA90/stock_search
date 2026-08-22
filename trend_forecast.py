@@ -124,6 +124,9 @@ def _select_anchors(prepared: pd.DataFrame, n_buckets: int) -> tuple[list[dict[s
             & (part["volume"].to_numpy() > 0)
             & np.isfinite(part["rv"].to_numpy())
             & (part["rv"].to_numpy() >= 0)
+            # Today (tau=0) must never become an anchor: conf_z is meant to be an
+            # out-of-sample residual against today's close.
+            & (part["tau"].to_numpy() != 0.0)
         )
         part = part.loc[valid]
         if len(part) < MIN_VALID_PER_BUCKET:

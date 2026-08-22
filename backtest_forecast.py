@@ -99,6 +99,8 @@ class FastForecastSeries:
             vv = self.volume[lo:hi]
             rr = self.rv[lo:hi]
             valid = np.isfinite(pp) & (pp > 0) & np.isfinite(vv) & (vv > 0) & np.isfinite(rr) & (rr >= 0)
+            # Mirror trend_forecast: exclude the evaluation day itself.
+            valid &= (np.arange(lo, hi) != pos)
             if valid.sum() < MIN_VALID_PER_BUCKET:
                 self.anchor_cache[key] = None
                 return None
@@ -188,13 +190,25 @@ def _engines(frames: dict[str, pd.DataFrame]) -> dict[str, FastForecastSeries]:
     return {k: FastForecastSeries.from_frame(v) for k, v in frames.items() if v is not None and not v.empty}
 
 
-def _reference_dates(engines: dict[str, FastForecastSeries], horizon: int) -> list[pd.Timestamp]:
-    if not engines:
-        return []
-    ref = max(engines.values(), key=lambda e: len(e.index))
-    if len(ref.index) < REQUIRED_FORECAST_HISTORY + horizon:
-        return []
-    return [pd.Timestamp(ref.index[i]) for i in range(REQUIRED_FORECAST_HISTORY - 1, len(ref.index) - horizon, SAMPLE_STEP)]
+def _reference_dates(engines: dict[str, FastForecastSeries], markets: dict[str, str],
+                     horizon: int) -> dict[str, list[pd.Timestamp]]:
+    """Sampling dates per market.
+
+    KR and US have different holiday calendars. Driving every market off one
+    reference ticker silently drops the other market's entire cross-section on
+    dates it does not trade, which also breaks that date's market adjustment.
+    """
+    grouped: dict[str, list[FastForecastSeries]] = {}
+    for ticker, e in engines.items():
+        grouped.setdefault(markets.get(ticker, "UNKNOWN"), []).append(e)
+    out: dict[str, list[pd.Timestamp]] = {}
+    for market, series in grouped.items():
+        ref = max(series, key=lambda e: len(e.index))
+        if len(ref.index) < REQUIRED_FORECAST_HISTORY + horizon:
+            continue
+        out[market] = [pd.Timestamp(ref.index[i])
+                       for i in range(REQUIRED_FORECAST_HISTORY - 1, len(ref.index) - horizon, SAMPLE_STEP)]
+    return out
 
 
 def _baseline_12_1(e: FastForecastSeries, pos: int) -> float:
@@ -214,9 +228,14 @@ def _baseline_3m(e: FastForecastSeries, pos: int) -> float:
 def _event_rows(engines: dict[str, FastForecastSeries], markets: dict[str, str], *,
                 half_life: float, n_buckets: int, horizon: int, include_baselines: bool) -> pd.DataFrame:
     rows = []
-    for date in _reference_dates(engines, horizon):
+    by_market: dict[str, list[str]] = {}
+    for ticker in engines:
+        by_market.setdefault(markets.get(ticker, "UNKNOWN"), []).append(ticker)
+    for market, dates in _reference_dates(engines, markets, horizon).items():
+      for date in dates:
         local = []
-        for ticker, e in engines.items():
+        for ticker in by_market.get(market, []):
+            e = engines[ticker]
             pos = e.date_pos.get(date)
             if pos is None or pos < REQUIRED_FORECAST_HISTORY - 1 or pos + horizon >= len(e.price):
                 continue
@@ -226,15 +245,15 @@ def _event_rows(engines: dict[str, FastForecastSeries], markets: dict[str, str],
             score = e.score(pos, n_buckets, half_life, horizon)
             if not np.isfinite(score):
                 continue
-            row = {"date": date, "ticker": ticker, "market": markets.get(ticker, "UNKNOWN"), "score": score, "fwd": p1 / p0 - 1.0}
+            row = {"date": date, "ticker": ticker, "market": market, "score": score, "fwd": p1 / p0 - 1.0}
             if include_baselines:
                 row["mom_12_1"] = _baseline_12_1(e, pos)
                 row["ret_3m"] = _baseline_3m(e, pos)
                 row["no_decay"] = e.score(pos, n_buckets, np.inf, horizon)
             local.append(row)
-        if local:
+        if len(local) >= 4:
             chunk = pd.DataFrame(local)
-            chunk["fwd_adj"] = chunk["fwd"] - chunk.groupby("market")["fwd"].transform("mean")
+            chunk["fwd_adj"] = chunk["fwd"] - chunk["fwd"].mean()
             rows.extend(chunk.to_dict("records"))
     out = pd.DataFrame(rows)
     if not out.empty:
@@ -256,6 +275,14 @@ def _metric_block(events: pd.DataFrame, score_col: str) -> dict:
     d = events[["date", "ticker", "market", "fwd_adj", score_col]].dropna().rename(columns={score_col: "model_score"}).copy()
     if d.empty:
         return {"n_events": 0, "n_dates": 0}
+    # confidence == 0 (or an exactly flat baseline) is an explicit "no opinion".
+    # np.sign(0) never matches +/-1, so leaving these rows in would score every
+    # abstention as a miss and bias the edge downward for this model only.
+    n_all = len(d)
+    d = d[d["model_score"] != 0].copy()
+    coverage = float(len(d) / n_all) if n_all else np.nan
+    if d.empty:
+        return {"n_events": 0, "n_dates": 0, "coverage": coverage}
     d["hit"] = np.sign(d["model_score"]) == np.sign(d["fwd_adj"])
     date_stats, ics, spreads, decparts = [], [], [], []
     for date, g in d.groupby("date", sort=True):
@@ -280,6 +307,7 @@ def _metric_block(events: pd.DataFrame, score_col: str) -> dict:
         deciles = dec.to_dict("records")
     return {
         "n_events": int(len(d)), "n_dates": int(ds.date.nunique()) if not ds.empty else 0,
+        "coverage": coverage,
         "hit_rate": float(d.hit.mean()), "base_rate": float(ds.base_rate.mean()) if not ds.empty else np.nan,
         "edge": float(ds.edge.mean()) if not ds.empty else np.nan, "edge_t": _safe_t(ds.edge) if not ds.empty else np.nan,
         "mean_ic": float(iv.mean()) if len(iv) else np.nan, "std_ic": float(iv.std(ddof=1)) if len(iv)>1 else np.nan,
@@ -339,11 +367,11 @@ def render_markdown(result: dict, sweep: dict|None=None) -> str:
         return "# Forecast PJT 1 백테스트 리포트\n\n**판정 보류 — 유효 백테스트 표본이 없습니다.**\n"
     L=["# Forecast PJT 1 백테스트 리포트","",f"- 표본 기간: **{result['sample_years']:.2f}년**"]
     if result.get("sample_warning"): L.append(f"- ⚠️ **{result['sample_warning']}**")
-    L += ["","## 헤드라인 및 베이스라인 비교","","| 모델 | 적중률 | 기준선 | 엣지 | Edge t | 평균 IC | ICIR | IC t | 상·하위10% 스프레드 |","|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    L += ["","## 헤드라인 및 베이스라인 비교","","| 모델 | 커버리지 | 적중률 | 기준선 | 엣지 | Edge t | 평균 IC | ICIR | IC t | 상·하위10% 스프레드 |","|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     labels={"forecast_pjt_1":"본 모델","momentum_12_1":"12-1 모멘텀","return_3m":"3개월 수익률","no_decay":"감쇠 없음","random":"랜덤"}
     for k in labels:
         m=result["models"].get(k,{})
-        L.append(f"| {labels[k]} | {_pct(m.get('hit_rate',np.nan))} | {_pct(m.get('base_rate',np.nan))} | {_pct(m.get('edge',np.nan))} | {_num(m.get('edge_t',np.nan))} | {_num(m.get('mean_ic',np.nan))} | {_num(m.get('icir',np.nan))} | {_num(m.get('ic_t',np.nan))} | {_pct(m.get('decile_spread',np.nan))} |")
+        L.append(f"| {labels[k]} | {_pct(m.get('coverage',np.nan))} | {_pct(m.get('hit_rate',np.nan))} | {_pct(m.get('base_rate',np.nan))} | {_pct(m.get('edge',np.nan))} | {_num(m.get('edge_t',np.nan))} | {_num(m.get('mean_ic',np.nan))} | {_num(m.get('icir',np.nan))} | {_num(m.get('ic_t',np.nan))} | {_pct(m.get('decile_spread',np.nan))} |")
     L += ["","## 본 모델 10분위 단조성","","| 분위 | 적중률 | 평균 시장조정 수익률 | 표본 |","|---:|---:|---:|---:|"]
     for r in result["models"]["forecast_pjt_1"].get("deciles",[]): L.append(f"| {int(r['decile'])} | {_pct(r['hit_rate'])} | {_pct(r['avg_fwd_adj'])} | {int(r['n'])} |")
     if sweep:
@@ -351,7 +379,13 @@ def render_markdown(result: dict, sweep: dict|None=None) -> str:
         for r in sweep.get("rows",[]): L.append(f"| {r['H']} | {r['N']} | {r['h']} | {_pct(r.get('train_edge',np.nan))} | {_num(r.get('train_ic',np.nan))} | {_pct(r.get('test_edge',np.nan))} | {_num(r.get('test_ic',np.nan))} |")
         if sweep.get("best_train"): 
             b=sweep["best_train"]; L += ["",f"- 전반부 최적: **H={b['H']}, N={b['N']}, h={b['h']}**",f"- 후반부 유지 여부: **{'유지' if sweep.get('holds_in_second_half') else '미유지 — 과적합 가능성'}**"]
-    L += ["","## 최종 판정","",f"**{result['verdict']}**","","> R²는 판정 기준으로 사용하지 않았다. forward return은 각 시점의 KR/US 시장별 횡단면 평균을 차감했다."]
+    L += ["","## 최종 판정","",f"**{result['verdict']}**","","> R²는 판정 기준으로 사용하지 않았다. forward return은 각 시점의 KR/US 시장별 횡단면 평균을 차감했다.",
+        "",
+        "### 표본의 알려진 한계",
+        "",
+        "- **생존편향**: 유니버스를 현재 `summary.json` 구성종목에서 가져오므로 기간 중 상장폐지·탈락 종목이 빠져 있다. 모멘텀 계열 신호는 이 편향으로 과대평가되는 경향이 있으므로 절대 수치보다 모델 간 상대비교로 해석해야 한다.",
+        "- **사후 조정가**: `Adj Close` 는 이후 발생한 배당·분할을 소급 반영한 시계열이므로 엄밀히는 미세한 룩어헤드를 포함한다. 본 모델과 모든 베이스라인·실현수익률에 동일하게 적용되어 상대비교는 공정하다.",
+        "- **커버리지**: confidence=0(의견 없음)인 관측은 적중률 집계에서 제외했다. 커버리지 열이 실제 판정에 사용된 표본 비율이다.",]
     return "\n".join(L)+"\n"
 
 

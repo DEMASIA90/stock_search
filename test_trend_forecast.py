@@ -116,6 +116,31 @@ class TrendForecastTests(unittest.TestCase):
         self.assertAlmostEqual(fast_score, out["score"], places=7)
 
 
+    def test_today_is_never_an_anchor(self):
+        df = synthetic_frame(n=400)
+        # Make the final session the largest relative-volume day in the series.
+        df.iloc[-1, df.columns.get_loc("Volume")] = 5_000_000_000.0
+        out = forecast(df)
+        self.assertTrue(out["forecastable"])
+        self.assertTrue(all(a["tau"] != 0 for a in out["anchors"]))
+        self.assertGreaterEqual(out["last_anchor_gap"], 1)
+
+
+class BacktestAggregationTests(unittest.TestCase):
+    def test_zero_score_is_not_counted_as_a_miss(self):
+        from backtest_forecast import _metric_block
+        rows = []
+        for i in range(20):
+            # Ten confident and perfectly correct calls, ten abstentions.
+            rows.append({"date": "2025-01-02", "ticker": f"A{i}", "market": "KR",
+                         "score": 0.0 if i >= 10 else 0.05,
+                         "fwd_adj": 0.03 if i < 10 else -0.02})
+        ev = pd.DataFrame(rows)
+        m = _metric_block(ev, "score")
+        self.assertAlmostEqual(m["hit_rate"], 1.0)
+        self.assertAlmostEqual(m["coverage"], 0.5)
+        self.assertEqual(m["n_events"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()
