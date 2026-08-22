@@ -13,8 +13,6 @@ const CONFIGURED_DATA_ORIGIN = String(window.DTC_DATA_ORIGIN || '').trim().repla
 const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP)
   ? (CONFIGURED_DATA_ORIGIN || '.')
   : '.';
-const NEWS_PROXY_URL = String(window.BADAK_NEWS_PROXY_URL || '').trim();
-const NEWS_CACHE_MS = 5 * 60 * 1000;
 const DEFAULT_TOP_N = 20;
 const DEFAULT_EQUITY_SIZE_MIN = 100_000_000_000_000;
 const DEFAULT_ETF_SIZE_MIN = 0;
@@ -34,30 +32,24 @@ const CAP_FILTER_PRESETS = {
     [5_000_000_000_000, '5조 이상'],
   ],
 };
-const CHART_TRADING_DAYS = 63;
 const QUIZ_WINDOW_DAYS = 90;
 const QUIZ_HIDDEN_DAYS = 30;
 const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr', 'kr-etf', 'us', 'us-etf'];
 
+const OPINION_ORDER = { BUY_S:0, BUY_A:1, BUY_B:2, BUY_C:3, HOLD:4, SELL:5 };
+const OPINION_TEXT = { BUY_S:'Buy S', BUY_A:'Buy A', BUY_B:'Buy B', BUY_C:'Buy C', HOLD:'Hold', SELL:'매도' };
+
 const state = {
-  mode: 'forecast',
+  mode: 'supertrend',
   category: 'KR',
   data: { KR:null, KR_ETF:null, US:null, US_ETF:null },
   query: '',
   marketSizeMin: { equity: DEFAULT_EQUITY_SIZE_MIN, etf: DEFAULT_ETF_SIZE_MIN },
   filtered: [],
   detailCache: new Map(),
-  newsCache: new Map(),
   cardObserver: null,
-  quiz: {
-    pool: null,
-    detailCache: new Map(),
-    question: null,
-    answered: false,
-    loading: false,
-    number: 0,
-  },
+  quiz: { pool:null, detailCache:new Map(), question:null, answered:false, loading:false, number:0 },
 };
 
 function escapeHtml(value) {
@@ -74,16 +66,16 @@ function dataUrl(path, force=false) {
 function currentData() { return state.data[state.category]; }
 
 function switchAnalysisMode(mode) {
-  const next = ['forecast', 'quiz'].includes(mode) ? mode : 'forecast';
+  const next = ['supertrend', 'quiz'].includes(mode) ? mode : 'supertrend';
   state.mode = next;
-  const forecastView = $('#forecastModeView');
+  const strategyView = $('#supertrendModeView');
   const quizView = $('#quizModeView');
-  if (forecastView) forecastView.hidden = next !== 'forecast';
+  if (strategyView) strategyView.hidden = next !== 'supertrend';
   if (quizView) quizView.hidden = next !== 'quiz';
   const select = $('#analysisMode');
   if (select && select.value !== next) select.value = next;
   document.body.dataset.analysisMode = next;
-  if (next === 'forecast') {
+  if (next === 'supertrend') {
     if (currentData()) { renderMeta(); renderList(); }
     requestAnimationFrame(() => activateLazyCards());
   } else if (state.cardObserver) {
@@ -91,76 +83,24 @@ function switchAnalysisMode(mode) {
   }
 }
 
-function isEtfCategory(category=state.category) {
-  return category === 'KR_ETF' || category === 'US_ETF';
-}
-
-function sizeFilterMode(category=state.category) {
-  return isEtfCategory(category) ? 'etf' : 'equity';
-}
-
+function isEtfCategory(category=state.category) { return category === 'KR_ETF' || category === 'US_ETF'; }
+function sizeFilterMode(category=state.category) { return isEtfCategory(category) ? 'etf' : 'equity'; }
 function currentSizeMin() {
   const mode = sizeFilterMode();
   const value = Number(state.marketSizeMin[mode]);
-  if (Number.isFinite(value) && value >= 0) return value;
-  return mode === 'etf' ? DEFAULT_ETF_SIZE_MIN : DEFAULT_EQUITY_SIZE_MIN;
+  return Number.isFinite(value) && value >= 0 ? value : (mode === 'etf' ? DEFAULT_ETF_SIZE_MIN : DEFAULT_EQUITY_SIZE_MIN);
 }
-
 function renderSizeFilters() {
   const mode = sizeFilterMode();
   const presets = CAP_FILTER_PRESETS[mode];
   const activeValue = currentSizeMin();
-  const buttons = $$('.cap-filter');
-  buttons.forEach((button, i) => {
+  $$('.cap-filter').forEach((button, i) => {
     const [value, label] = presets[i];
     button.dataset.cap = String(value);
     button.textContent = label;
     button.classList.toggle('active', Number(value) === activeValue);
   });
-  const nav = $('#capFilterTabs');
-  if (nav) nav.setAttribute('aria-label', mode === 'etf' ? 'ETF 규모 필터' : '시가총액 필터');
-}
-
-// 'forecast' = Forecast PJT 1 score 순, 'setup' = 기존 셋업 점수(0~10) 순.
-// 예측 모델이 백테스트로 검증되기 전까지는 'setup' 이 안전한 기본값이다.
-const RANK_BY = 'forecast';
-
-function setupValue(stock) {
-  const n = Number(stock?.base_score ?? stock?.score);
-  return Number.isFinite(n) ? n : -1e18;
-}
-
-function forecastValue(stock) {
-  const f = stock?.forecast || {};
-  if (!f.forecastable) return null;
-  const n = Number(f.score ?? stock?.forecast_score);
-  return Number.isFinite(n) ? n : null;
-}
-
-function scoreValue(stock) {
-  if (RANK_BY === 'setup') return setupValue(stock);
-  const n = forecastValue(stock);
-  // Non-forecastable names sort below any real forecast but keep their setup
-  // ordering among themselves instead of collapsing into one -1e18 bucket.
-  return n === null ? -1e9 + setupValue(stock) : n;
-}
-
-function scoreText(stock) {
-  const n = forecastValue(stock);
-  if (n === null) {
-    const s = setupValue(stock);
-    return s > -1e17 ? `셋업 ${s.toFixed(1)}` : '—';
-  }
-  return `${n > 0 ? '+' : ''}${(n * 100).toFixed(2)}%`;
-}
-
-function heatClass(stock) {
-  const n = scoreValue(stock);
-  if (!Number.isFinite(n) || n < -1e10) return '';
-  if (n >= 0.05) return 'heat-80';
-  if (n >= 0.025) return 'heat-70';
-  if (n >= 0.01) return 'heat-60';
-  return '';
+  $('#capFilterTabs')?.setAttribute('aria-label', mode === 'etf' ? 'ETF 규모 필터' : '시가총액 필터');
 }
 
 function money(v, currency) {
@@ -169,7 +109,6 @@ function money(v, currency) {
     ? `₩${Math.round(Number(v)).toLocaleString('ko-KR')}`
     : `$${Number(v).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`;
 }
-
 function marketSize(v) {
   if (v == null || !Number.isFinite(Number(v))) return '—';
   const n = Number(v);
@@ -177,7 +116,6 @@ function marketSize(v) {
   if (n >= 1e8) return `${(n / 1e8).toFixed(0)}억`;
   return Math.round(n).toLocaleString('ko-KR');
 }
-
 function changeText(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '<span class="flat">—</span>';
@@ -185,32 +123,24 @@ function changeText(v) {
   if (n < 0) return `<span class="down">▼${Math.abs(n).toFixed(1)}%</span>`;
   return '<span class="flat">0.0%</span>';
 }
-
-function ratioPct(v, digits=1) {
-  if (v == null || !Number.isFinite(Number(v))) return '—';
-  const n = Number(v) * 100;
-  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
-}
+function marketSizeLabel(stock) { return stock?.market_size_basis === 'total_assets' ? '순자산' : '시총'; }
+function opinionKey(stock) { return String(stock?.opinion || stock?.supertrend?.opinion || 'HOLD'); }
+function opinionText(stock) { const k=opinionKey(stock); return OPINION_TEXT[k] || k; }
+function opinionClass(stock) { return `opinion-${opinionKey(stock).toLowerCase().replace('_','-')}`; }
 
 async function ensureData(category, force=false) {
   if (state.data[category] && !force) return state.data[category];
-  const response = await fetch(dataUrl(`data/${CATEGORY[category].dir}/summary.json`, force), {
-    cache: force ? 'no-store' : 'default',
-  });
+  const response = await fetch(dataUrl(`data/${CATEGORY[category].dir}/summary.json`, force), { cache: force ? 'no-store' : 'default' });
   if (!response.ok) throw new Error(`${category} summary ${response.status}`);
   const data = await response.json();
   state.data[category] = data;
   return data;
 }
-
 async function ensureDetail(stock, force=false) {
   const key = `${stock.category}:${stock.ticker}`;
   if (state.detailCache.has(key) && !force) return state.detailCache.get(key);
   if (!stock.detail_path) throw new Error('detail_path missing');
-  const url = stock.detail_path.startsWith('http')
-    ? (force ? `${stock.detail_path}?ts=${Date.now()}` : stock.detail_path)
-    : dataUrl(stock.detail_path, force);
-  const response = await fetch(url, { cache: force ? 'no-store' : 'default' });
+  const response = await fetch(dataUrl(stock.detail_path, force), { cache: force ? 'no-store' : 'default' });
   if (!response.ok) throw new Error(`detail ${response.status}`);
   const detail = await response.json();
   state.detailCache.set(key, detail);
@@ -221,421 +151,113 @@ function filterItems() {
   const items = currentData()?.items || [];
   const q = state.query.trim().toLowerCase();
   const capMin = currentSizeMin();
-  const capMatched = capMin <= 0 ? items : items.filter((s) => {
-    const cap = Number(s.market_size_krw);
-    return Number.isFinite(cap) && cap >= capMin;
-  });
-  const candidates = q
-    ? capMatched.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.sector || ''}`.toLowerCase().includes(q))
-    : capMatched;
-  const sorted = [...candidates].sort((a, b) => {
-    const diff = scoreValue(b) - scoreValue(a);
-    if (Math.abs(diff) > 1e-12) return diff;
-    const ar = Number(a.rank), br = Number(b.rank);
-    if (Number.isFinite(ar) && Number.isFinite(br)) return ar - br;
-    return String(a.ticker || '').localeCompare(String(b.ticker || ''));
+  const capMatched = capMin <= 0 ? items : items.filter((s) => Number.isFinite(Number(s.market_size_krw)) && Number(s.market_size_krw) >= capMin);
+  const candidates = q ? capMatched.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.sector || ''}`.toLowerCase().includes(q)) : capMatched;
+  const sorted = [...candidates].sort((a,b) => {
+    const la = Number(a.rank_level ?? OPINION_ORDER[opinionKey(a)] ?? 4);
+    const lb = Number(b.rank_level ?? OPINION_ORDER[opinionKey(b)] ?? 4);
+    if (la !== lb) return la-lb;
+    const ca = Number(a.market_size_krw), cb=Number(b.market_size_krw);
+    if (Number.isFinite(ca) || Number.isFinite(cb)) return (Number.isFinite(cb)?cb:-1)-(Number.isFinite(ca)?ca:-1);
+    return String(a.ticker||'').localeCompare(String(b.ticker||''));
   });
   state.filtered = q ? sorted : sorted.slice(0, DEFAULT_TOP_N);
   return { totalCapMatched: capMatched.length };
 }
 
-function marketSizeLabel(stock) {
-  return stock?.market_size_basis === 'total_assets' ? '순자산' : '시총';
-}
-
-function forecastSignalLines(stock) {
-  const f = stock?.forecast || {};
-  if (!f.forecastable) {
-    return `<div class="trade-signal-box"><div class="trade-signal-row"><span class="signal-title">Forecast</span><span>히스토리 부족 또는 앵커 추출 불가</span></div></div>`;
-  }
-  const pred = Number(f.r_pred_20d ?? f.r_pred);
-  const conf = Number(f.confidence);
-  const t = Number(f.t_stat);
-  const slope = Number(f.slope_pct_per_day);
-  const cls = pred > 0 ? 'signal-hot' : pred < 0 ? 'signal-cold' : '';
+function strategyLines(stock) {
+  const st = stock?.supertrend || {};
+  const p0=Number(st.p0), p1=Number(st.p1), dist=Number(st.distance_from_p0_pct);
+  const dir=st.direction === 'UP' ? '상승' : st.direction === 'DOWN' ? '하락' : '—';
   return `<div class="trade-signal-box">
-    <div class="trade-signal-row">
-      <span class="signal-title breakout">20D 예측</span>
-      <span><b class="${cls}">${Number.isFinite(pred) ? `${pred > 0 ? '+' : ''}${(pred*100).toFixed(2)}%` : '—'}</b></span><i>·</i>
-      <span>Confidence <b>${Number.isFinite(conf) ? (conf*100).toFixed(1)+'%' : '—'}</b></span><i>·</i>
-      <span>Score <b>${scoreText(stock)}</b></span>
-    </div>
-    <div class="trade-signal-row">
-      <span class="signal-title pullback">WLS</span>
-      <span>기울기 <b class="${slope>0?'signal-hot':slope<0?'signal-cold':''}">${Number.isFinite(slope)?`${slope>0?'+':''}${slope.toFixed(3)}%/day`:'—'}</b></span><i>·</i>
-      <span>t <b>${Number.isFinite(t)?t.toFixed(2):'—'}</b></span><i>·</i>
-      <span>앵커 6개 · H=84</span>
-    </div>
+    <div class="trade-signal-row"><span class="signal-title breakout">ST 10·2</span><span>현재 신호 <b>${dir}</b></span><i>·</i><span>P1 <b>${money(p1, stock.currency)}</b></span></div>
+    <div class="trade-signal-row"><span class="signal-title pullback">P0</span><span>최근 하락→상승 ST <b>${money(p0, stock.currency)}</b></span><i>·</i><span>현재 종가 거리 <b>${Number.isFinite(dist)?dist.toFixed(2)+'%':'—'}</b></span></div>
   </div>`;
 }
-
 function backtestLine(stock) {
-  const f = stock?.forecast || {};
-  if (!f.forecastable) return 'Forecast PJT 1: <b>예측 불가</b> <small>· 최소 272거래일 필요</small>';
-  const ct=Number(f.conf_t), cz=Number(f.conf_z), gap=Number(f.z_today_gap);
-  return `Forecast PJT 1: <b>방향·상대순위 예측</b> <small>· conf_t ${Number.isFinite(ct)?ct.toFixed(2):'—'} · conf_z ${Number.isFinite(cz)?cz.toFixed(2):'—'} · today gap z ${Number.isFinite(gap)?gap.toFixed(2):'—'}</small>`;
+  const bt=stock?.supertrend?.backtest || {};
+  const avg=Number(bt.avg_return_pct), trades=Number(bt.trades);
+  return `2Y Back test: Buy S→매도 평균 <b>${Number.isFinite(avg)?`${avg>=0?'+':''}${avg.toFixed(2)}%`:'—'}</b> <small>· 완료 ${Number.isFinite(trades)?trades:0}회</small>`;
 }
-
 function stockCard(stock) {
-  const ticker = stock.symbol || stock.ticker || '—';
-  const sector = stock.sector || '—';
-  const key = `${stock.category}:${stock.ticker}`;
-  return `<article class="stock-card ${heatClass(stock)}" data-stock-key="${escapeHtml(key)}" data-ticker="${escapeHtml(stock.ticker)}">
+  const ticker=stock.symbol || stock.ticker || '—';
+  return `<article class="stock-card ${opinionClass(stock)}" data-ticker="${escapeHtml(stock.ticker)}">
     <section class="stock-info-pane">
       <div class="stock-headline-row">
         <h2>${escapeHtml(stock.name)} <span>(${escapeHtml(ticker)})</span></h2>
-        <button class="score-pill ${heatClass(stock)}" type="button" data-score-detail="${escapeHtml(stock.ticker)}" aria-label="Forecast 상세 보기">${scoreText(stock)}</button>
+        <button class="opinion-pill ${opinionClass(stock)}" type="button" data-score-detail="${escapeHtml(stock.ticker)}">${escapeHtml(opinionText(stock))}</button>
       </div>
-      <div class="stock-meta-line">
-        <span class="sector-name">${escapeHtml(sector)}</span><i>·</i>
-        <span class="market-stat">${marketSizeLabel(stock)} ${marketSize(stock.market_size_krw)}</span><i>·</i>
-        <span class="market-stat">현재가 ${money(stock.close, stock.currency)} ${changeText(stock.day_change_pct)}</span>
-      </div>
-      ${forecastSignalLines(stock)}
-      <div class="news-one-line" data-news-line><span class="line-label">NEWS</span><span class="line-placeholder">최신 뉴스 불러오는 중…</span></div>
+      <div class="stock-meta-line"><span class="sector-name">${escapeHtml(stock.sector || '—')}</span><i>·</i><span class="market-stat">${marketSizeLabel(stock)} ${marketSize(stock.market_size_krw)}</span><i>·</i><span class="market-stat">현재가 ${money(stock.close, stock.currency)} ${changeText(stock.day_change_pct)}</span></div>
+      ${strategyLines(stock)}
       <div class="backtest-one-line">${backtestLine(stock)}</div>
     </section>
-    <section class="stock-chart-pane"><div class="inline-chart" data-chart-box><div class="chart-loading">63D + 20D FORECAST</div></div></section>
+    <section class="stock-chart-pane"><div class="inline-chart" data-chart-box><div class="chart-loading">6M HEIKIN ASHI + SUPERTREND</div></div></section>
   </article>`;
 }
-
 function renderList() {
   const { totalCapMatched } = filterItems();
-  const list = $('#stockList');
-  list.innerHTML = state.filtered.length
-    ? state.filtered.map(stockCard).join('')
-    : '<div class="empty-state">선택한 시총 기준의 검색 결과가 없습니다.</div>';
-  $('#resultCount').textContent = state.query
-    ? `${state.filtered.length.toLocaleString()}개`
-    : `TOP ${Math.min(DEFAULT_TOP_N, totalCapMatched).toLocaleString()} / ${totalCapMatched.toLocaleString()}개`;
+  $('#stockList').innerHTML = state.filtered.length ? state.filtered.map(stockCard).join('') : '<div class="empty-state">선택한 조건의 검색 결과가 없습니다.</div>';
+  $('#resultCount').textContent = state.query ? `${state.filtered.length.toLocaleString()}개` : `TOP ${Math.min(DEFAULT_TOP_N,totalCapMatched).toLocaleString()} / ${totalCapMatched.toLocaleString()}개`;
   activateLazyCards();
 }
-
 function renderMeta() {
-  const data = currentData();
-  if (!data) {
-    $('#marketDate').textContent = '—';
-    $('#coverage').textContent = '—';
-    $('#scanStatus').textContent = '—';
-    return;
-  }
-  $('#marketDate').textContent = data.market_date || '—';
-  $('#coverage').textContent = `가격수신 ${Number(data.coverage_pct || 0).toFixed(1)}%`;
-  $('#scanStatus').textContent = `${data.scan_mode === 'QUICK' ? '장중 QUICK' : '종가 확정 FULL'} · Forecast PJT 1 score 순`;
+  const data=currentData();
+  if(!data){ $('#marketDate').textContent='—'; $('#coverage').textContent='—'; $('#scanStatus').textContent='—'; return; }
+  $('#marketDate').textContent=data.market_date || '—';
+  $('#coverage').textContent=`가격수신 ${Number(data.coverage_pct||0).toFixed(1)}%`;
+  $('#scanStatus').textContent=`${data.scan_mode==='QUICK'?'장중 QUICK':'종가 확정 FULL'} · Buy S→A→B→C→Hold→매도 · 동일등급 시총순`;
 }
+function stockByTicker(ticker) { return (currentData()?.items || []).find(x=>x.ticker===ticker) || null; }
 
-function stockByTicker(ticker) {
-  return (currentData()?.items || []).find((x) => x.ticker === ticker) || null;
+function drawSupertrendChart(el, detail) {
+  const rows=detail?.supertrend?.chart || [];
+  if(!el?.isConnected) return;
+  if(rows.length<15){ el.innerHTML='<div class="chart-empty">Supertrend 차트 데이터 부족</div>'; return; }
+  const vals=rows.flatMap(r=>[Number(r.low),Number(r.high),Number(r.supertrend)]).filter(Number.isFinite);
+  let lo=Math.min(...vals), hi=Math.max(...vals); if(!(hi>lo)){lo*=.99;hi*=1.01;} const ext=(hi-lo)*.07||1;lo-=ext;hi+=ext;
+  const W=700,H=250,pad={l:12,r:58,t:14,b:24},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length;
+  const X=i=>pad.l+(i+.5)*step, Y=v=>pad.t+(hi-v)*plotH/(hi-lo);
+  let grid=''; for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=detail.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+6}" y="${y+4}" class="price-axis">${label}</text>`;}
+  const bw=Math.max(1.5,Math.min(4.8,step*.58)); let candles='';
+  rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,k=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${k}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${k}" rx=".4"/>`;});
+  let upPath='',downPath='',upDraw=false,downDraw=false;
+  rows.forEach((r,i)=>{const v=Number(r.supertrend),d=Number(r.direction);if(!Number.isFinite(v)){upDraw=downDraw=false;return;}if(d>0){upPath+=`${upDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;upDraw=true;downDraw=false;}else{downPath+=`${downDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;downDraw=true;upDraw=false;}});
+  const dates=`<text x="${X(0)}" y="${H-6}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-6}" text-anchor="end" class="date-axis">${escapeHtml(rows[rows.length-1].date.slice(5))}</text>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="6개월 하이킨아시와 Supertrend 10,2">${grid}${candles}<path d="${upPath}" class="supertrend-up-line"/><path d="${downPath}" class="supertrend-down-line"/>${dates}</svg><div class="chart-legend"><span>HEIKIN ASHI</span><span>SUPERTREND 10·2</span></div>`;
 }
-
-function chartRows(detail) {
-  const c = detail?.chart || {};
-  const d = c.d || [];
-  return d.map((date, i) => {
-    const close = Number(c.c?.[i]);
-    const open = Number(c.o?.[i]);
-    const high = Number(c.h?.[i]);
-    const low = Number(c.lo?.[i]);
-    return {
-      date, close,
-      open: Number.isFinite(open) ? open : close,
-      high: Number.isFinite(high) ? high : close,
-      low: Number.isFinite(low) ? low : close,
-      mid: Number(c.m?.[i]),
-      upper: Number(c.u?.[i]),
-      lower: Number(c.l?.[i]),
-    };
-  }).filter((x) => Number.isFinite(x.close)).slice(-CHART_TRADING_DAYS);
-}
-
-function drawForecastChart(el, detail) {
-  // Never return silently: any early exit here used to leave the card stuck on
-  // its "63D + 20D FORECAST" placeholder with no indication of why.
-  if (!el) { console.warn('drawForecastChart: no element'); return; }
-  const data = chartRows(detail);
-  if (data.length < 5) {
-    const n = (detail?.chart?.d || []).length;
-    el.innerHTML = `<div class="chart-empty">차트 데이터 없음<br><small>chart.d = ${n}봉</small></div>`;
-    return;
-  }
-
-  // The forecast is an OVERLAY. Candles must render whether or not the payload
-  // carries a usable forecast block - stale data files, newly listed names and
-  // sub-272-session histories all legitimately have no forecast.
-  const f = detail?.forecast || {};
-  const m = Number(f.slope_log_per_day);
-  const b = Number(f.intercept_log);
-  const p0 = Number(f.current_price ?? data[data.length - 1].close);
-  const conf = Number(f.confidence);
-  const hasForecast = Boolean(f.forecastable) && [m, b, p0].every(Number.isFinite);
-
-  const last = data.length - 1;
-  const fitted = hasForecast ? data.map((_, i) => Math.exp(b + m * (i - last))) : [];
-  const future = hasForecast && Array.isArray(f.projection) ? f.projection : [];
-  const projection = hasForecast
-    ? [{ offset: 0, price: p0 }].concat(future
-        .map((x) => ({ offset: Number(x.offset), price: Number(x.price) }))
-        .filter((x) => Number.isFinite(x.offset) && Number.isFinite(x.price)))
-    : [];
-  const futureSlots = 20;
-
-  const bandVals = data.flatMap((r) => [r.mid, r.upper, r.lower]).filter(Number.isFinite);
-  const all = data.flatMap((r) => [r.low, r.high]).filter(Number.isFinite)
-    .concat(bandVals, fitted, projection.map((x) => x.price)).filter(Number.isFinite);
-  if (!all.length) { el.innerHTML = '<div class="chart-empty">차트 데이터 없음</div>'; return; }
-  let lo = Math.min(...all), hi = Math.max(...all);
-  if (!(hi > lo)) { lo *= 0.99; hi *= 1.01; }
-  const pr = (hi - lo) * 0.08 || Math.abs(hi) * 0.01 || 1; lo -= pr; hi += pr;
-
-  const W = 700, H = 250, pad = { l: 12, r: 55, t: 16, b: 25 };
-  const totalSlots = data.length + futureSlots;
-  const plotW = W - pad.l - pad.r, step = plotW / totalSlots;
-  const X = (i) => pad.l + (i + 0.5) * step;
-  const Y = (v) => pad.t + (hi - v) * (H - pad.t - pad.b) / (hi - lo);
-
-  let grid = '';
-  for (let i = 0; i < 4; i++) {
-    const y = pad.t + i * (H - pad.t - pad.b) / 3;
-    const v = hi - i * (hi - lo) / 3;
-    const label = detail.currency === 'KRW' ? Math.round(v).toLocaleString('ko-KR') : `$${v.toFixed(Math.abs(v) >= 100 ? 0 : 1)}`;
-    grid += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W - pad.r + 6}" y="${y + 4}" class="price-axis">${label}</text>`;
-  }
-
-  const bandPath = (key) => {
-    const pts = data.map((r, i) => (Number.isFinite(r[key]) ? `${X(i).toFixed(1)},${Y(r[key]).toFixed(1)}` : null)).filter(Boolean);
-    return pts.length > 1 ? `<path d="M${pts.join(' L')}" class="chart-band-line chart-band-${key}"/>` : '';
-  };
-  const bands = bandVals.length ? bandPath('upper') + bandPath('mid') + bandPath('lower') : '';
-
-  const bodyW = Math.max(1.5, Math.min(4.8, step * 0.6));
-  let candles = '';
-  data.forEach((r, i) => {
-    const x = X(i), yo = Y(r.open), yc = Y(r.close), yh = Y(r.high), yl = Y(r.low);
-    const klass = r.close >= r.open ? 'chart-candle-up' : 'chart-candle-down';
-    const top = Math.min(yo, yc), bh = Math.max(1.1, Math.abs(yc - yo));
-    candles += `<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${klass}"/><rect x="${x - bodyW / 2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".4"/>`;
-  });
-
-  const todayX = X(last);
-  let overlay = '';
-  let legendExtra = '';
-  if (hasForecast) {
-    const fitPath = fitted.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
-    const predPath = projection.map((r, i) => `${i ? 'L' : 'M'}${X(last + r.offset).toFixed(1)},${Y(r.price).toFixed(1)}`).join(' ');
-    const anchorByDate = new Map(data.map((r, i) => [r.date, i]));
-    let anchors = '';
-    (f.anchors || []).forEach((a) => {
-      const i = anchorByDate.get(a.date);
-      if (i == null) return;
-      anchors += `<circle cx="${X(i)}" cy="${Y(Number(a.close))}" r="4" class="forecast-anchor"><title>${escapeHtml(a.date)} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}</title></circle>`;
-    });
-    const gap = `<line x1="${todayX}" x2="${todayX}" y1="${Y(Math.exp(b))}" y2="${Y(p0)}" class="forecast-gap-line"/>`;
-    const opacity = Number.isFinite(conf) ? Math.max(0.15, Math.min(1, conf)) : 0.15;
-    overlay = `<path d="${fitPath}" class="forecast-fit-line"/>${anchors}${gap}<line x1="${todayX}" x2="${todayX}" y1="${pad.t}" y2="${H - pad.b}" class="forecast-today-line"/><path d="${predPath}" class="forecast-projection-line" style="opacity:${opacity.toFixed(3)}"/>`;
-    const anchorTitle = (f.anchors || []).map((a, i) => `A${i + 1} ${a.date} · RV ${Number(a.rel_volume).toFixed(2)} · w ${Number(a.weight).toFixed(3)}`).join(' | ');
-    legendExtra = `<span>WLS REGRESSION</span><span title="${escapeHtml(anchorTitle)}">ANCHOR 6</span><span>20D FORECAST</span>`;
-  } else {
-    legendExtra = `<span class="legend-muted" title="${escapeHtml(f.reason || 'forecast 데이터 없음')}">FORECAST 없음</span>`;
-  }
-
-  const rightLabel = hasForecast
-    ? `<text x="${X(last + 20)}" y="${H - 6}" text-anchor="end" class="date-axis">+20D</text>`
-    : `<text x="${X(last)}" y="${H - 6}" text-anchor="end" class="date-axis">${escapeHtml(data[last]?.date?.slice(5) || '')}</text>`;
-  const dateLabels = `<text x="${X(0)}" y="${H - 6}" text-anchor="start" class="date-axis">${escapeHtml(data[0]?.date?.slice(5) || '')}</text>${hasForecast ? `<text x="${todayX}" y="${H - 6}" text-anchor="middle" class="date-axis">TODAY</text>` : ''}${rightLabel}`;
-
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="주가 차트">${grid}${bands}${candles}${overlay}${dateLabels}</svg><div class="chart-legend"><span>CANDLE</span><span>BB</span>${legendExtra}</div>`;
-}
-
-
-function newsSearchQuery(stock) {
-  const name = String(stock?.name || '').trim();
-  const symbol = String(stock?.symbol || stock?.ticker || '').trim();
-  if (stock?.category === 'KR_ETF') return `${name} ${symbol} ETF`;
-  if (stock?.category === 'KR') return `${name} ${symbol} 주식`;
-  if (stock?.category === 'US_ETF') return `${name} ${symbol} ETF`;
-  return `${name} ${symbol} stock`;
-}
-
-function newsSearchUrl(stock) {
-  const q = encodeURIComponent(newsSearchQuery(stock));
-  return ['KR','KR_ETF'].includes(stock?.category)
-    ? `https://news.google.com/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`
-    : `https://news.google.com/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
-}
-
-function jsonp(url, params={}, timeoutMs=12000) {
-  return new Promise((resolve, reject) => {
-    const callback = `__dtcNews_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const script = document.createElement('script');
-    const query = new URLSearchParams({ ...params, callback });
-    const sep = url.includes('?') ? '&' : '?';
-    let done = false;
-    const cleanup = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      script.remove();
-      try { delete window[callback]; } catch (_) { window[callback] = undefined; }
-    };
-    window[callback] = (payload) => { cleanup(); resolve(payload); };
-    script.onerror = () => { cleanup(); reject(new Error('news proxy load failed')); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error('news proxy timeout')); }, timeoutMs);
-    script.src = `${url}${sep}${query.toString()}`;
-    script.async = true;
-    document.head.appendChild(script);
-  });
-}
-
-async function loadHeadline(stock, card) {
-  const line = $('[data-news-line]', card);
-  if (!line?.isConnected) return;
-  const direct = newsSearchUrl(stock);
-  if (!NEWS_PROXY_URL || NEWS_PROXY_URL.includes('PASTE_YOUR')) {
-    line.innerHTML = `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
-    return;
-  }
-
-  const key = `${stock.category}:${stock.ticker}`;
-  const cached = state.newsCache.get(key);
-  let articles = null;
-  if (cached && Date.now() - cached.at < NEWS_CACHE_MS) {
-    articles = cached.articles;
-  } else {
-    try {
-      const payload = await jsonp(NEWS_PROXY_URL, {
-        q: newsSearchQuery(stock),
-        region: ['KR','KR_ETF'].includes(stock.category) ? 'KR' : 'US',
-        limit: '1',
-      });
-      if (!payload?.ok) throw new Error(payload?.error || 'news proxy error');
-      articles = Array.isArray(payload.articles) ? payload.articles.slice(0, 1) : [];
-      state.newsCache.set(key, { at:Date.now(), articles });
-    } catch (err) {
-      console.error('headline', err);
-      articles = [];
-    }
-  }
-
-  if (!line?.isConnected) return;
-  const article = articles?.[0];
-  line.innerHTML = article?.title && article?.link
-    ? `<span class="line-label">NEWS</span><a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(article.title)}">${escapeHtml(article.title)}</a>`
-    : `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
-}
-
-function drawChart(el, detail) {
-  if (!el) return;
-  try {
-    drawForecastChart(el, detail);
-  } catch (err) {
-    console.error('drawChart', err);
-    el.innerHTML = `<div class="chart-empty">차트 렌더 오류<br><small>${escapeHtml(String(err && err.message || err))}</small></div>`;
-  }
-}
+function drawChart(el, detail) { drawSupertrendChart(el, detail); }
 
 async function hydrateCard(card) {
-  if (!card?.isConnected || card.dataset.hydrated === '1') return;
-  card.dataset.hydrated = '1';
-  const ticker = card.dataset.ticker;
-  const stock = stockByTicker(ticker);
-  if (!stock) return;
-
-  // News and chart are intentionally independent. A news/proxy failure must
-  // never prevent the detail JSON from loading or the forecast chart rendering.
-  Promise.resolve()
-    .then(() => loadHeadline(stock, card))
-    .catch((err) => {
-      console.error('headline hydrate', err);
-      const line = $('[data-news-line]', card);
-      if (line?.isConnected) {
-        const direct = newsSearchUrl(stock);
-        line.innerHTML = `<span class="line-label">NEWS</span><a href="${direct}" target="_blank" rel="noopener noreferrer">최신 뉴스 보기 ↗</a>`;
-      }
-    });
-
-  const chartBox = () => $('[data-chart-box]', card)
-    || $(`.stock-card[data-ticker="${CSS.escape(String(stock.ticker))}"] [data-chart-box]`);
-
-  try {
-    const detail = await ensureDetail(stock);
-    const box = chartBox();
-    if (!box) { console.warn('chart box missing for', stock.ticker); return; }
-    drawChart(box, detail);
-  } catch (err) {
-    console.error('chart detail', stock.ticker, stock.detail_path, err);
-    const box = chartBox();
-    if (box) box.innerHTML = `<div class="chart-empty">차트 로드 실패<br><small>${escapeHtml(String(err && err.message || err))}</small></div>`;
-  }
+  if(!card?.isConnected||card.dataset.hydrated==='1')return; card.dataset.hydrated='1';
+  const stock=stockByTicker(card.dataset.ticker); if(!stock)return;
+  try{const detail=await ensureDetail(stock);drawSupertrendChart($('[data-chart-box]',card),detail);}catch(err){console.error(err);const box=$('[data-chart-box]',card);if(box)box.innerHTML='<div class="chart-empty">차트를 불러오지 못했습니다.</div>';}
 }
-
 function activateLazyCards() {
-  if (state.cardObserver) state.cardObserver.disconnect();
-  state.cardObserver = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      if (!entry.isIntersecting) return;
-      state.cardObserver.unobserve(entry.target);
-      void hydrateCard(entry.target);
-    });
-  }, { rootMargin:'500px 0px' });
-  $$('.stock-card').forEach((card) => state.cardObserver.observe(card));
+  if(state.cardObserver)state.cardObserver.disconnect();
+  state.cardObserver=new IntersectionObserver(entries=>entries.forEach(entry=>{if(!entry.isIntersecting)return;state.cardObserver.unobserve(entry.target);void hydrateCard(entry.target);}),{rootMargin:'500px 0px'});
+  $$('.stock-card').forEach(card=>state.cardObserver.observe(card));
 }
-
 async function openScoreDetail(stock) {
-  const modal=$('#scoreModal'), body=$('#scoreModalBody');
-  $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol || stock.ticker}) · ${scoreText(stock)}`;
-  modal.hidden=false; document.body.classList.add('modal-open');
-  body.innerHTML='<div class="modal-loading">Forecast 상세를 불러오는 중…</div>';
-  let detail=stock; try { detail=await ensureDetail(stock); } catch (_) {}
-  if (modal.hidden) return;
-  const f=detail.forecast || stock.forecast || {};
-  if (!f.forecastable) { body.innerHTML='<div class="empty-state">Forecast 불가: 최소 272거래일 및 각 버킷 5개 이상의 유효 거래일이 필요합니다.</div>'; return; }
-  const rows=[
-    ['20D 예측수익률', `${Number(f.r_pred_20d)*100 >= 0 ? '+' : ''}${(Number(f.r_pred_20d)*100).toFixed(2)}%`],
-    ['Confidence', `${(Number(f.confidence)*100).toFixed(1)}%`],
-    ['기울기', `${Number(f.slope_pct_per_day).toFixed(4)}% / day`],
-    ['t-stat', Number(f.t_stat).toFixed(3)],
-    ['conf_t / conf_z', `${Number(f.conf_t).toFixed(3)} / ${Number(f.conf_z).toFixed(3)}`],
-    ['오늘 괴리 z', Number.isFinite(Number(f.z_today_gap)) ? Number(f.z_today_gap).toFixed(3) : '—'],
-    ['최종 Score', scoreText(stock)],
-  ];
-  const anchors=(f.anchors||[]).map((a,i)=>`<div class="score-row"><div><b>Anchor ${i+1}</b><small>${escapeHtml(a.date)} · τ ${a.tau} · RV ${Number(a.rel_volume).toFixed(2)}</small></div><strong>${money(Number(a.close), stock.currency)}<small>w ${Number(a.weight).toFixed(3)}</small></strong></div>`).join('');
-  body.innerHTML=`<div class="score-total"><span>FORECAST PJT 1</span><b>${scoreText(stock)}</b><small> score</small></div><div class="score-rows">${rows.map(([a,b])=>`<div class="score-row"><div><b>${a}</b></div><strong>${b}</strong></div>`).join('')}${anchors}</div><div class="backtest-one-line" style="margin-top:14px">Ranking = clipped 20D predicted return × confidence · H=84 · 6 relative-volume anchors</div>`;
+  const modal=$('#scoreModal'),body=$('#scoreModalBody'); $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol||stock.ticker}) · ${opinionText(stock)}`;modal.hidden=false;document.body.classList.add('modal-open');body.innerHTML='<div class="modal-loading">Supertrend 상세를 불러오는 중…</div>';
+  let detail=stock;try{detail=await ensureDetail(stock);}catch(_){ }
+  const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{};
+  const avg=Number(bt.avg_return_pct),win=Number(bt.win_rate_pct),dist=Number(st.distance_from_p0_pct);
+  const trades=(bt.recent_trades||[]).map(t=>`<div class="score-row"><div><b>${escapeHtml(t.buy_date)} → ${escapeHtml(t.sell_date)}</b></div><strong>${Number(t.return_pct)>=0?'+':''}${Number(t.return_pct).toFixed(2)}%</strong></div>`).join('');
+  body.innerHTML=`<div class="score-total"><span>SUPERTREND 10·2</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
+    <div class="score-row"><div><b>P0</b><small>최근 하락→상승 전환 Supertrend 가격</small></div><strong>${money(Number(st.p0),stock.currency)}</strong></div>
+    <div class="score-row"><div><b>P1</b><small>현재 Supertrend 가격</small></div><strong>${money(Number(st.p1),stock.currency)}</strong></div>
+    <div class="score-row"><div><b>현재 종가 - P0</b></div><strong>${Number.isFinite(dist)?dist.toFixed(2)+'%':'—'}</strong></div>
+    <div class="score-row"><div><b>2Y 평균 수익률</b><small>Buy S 진입 → 첫 매도 신호 청산</small></div><strong>${Number.isFinite(avg)?`${avg>=0?'+':''}${avg.toFixed(2)}%`:'—'}</strong></div>
+    <div class="score-row"><div><b>완료 거래 / 승률</b></div><strong>${Number(bt.trades||0)}회 · ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</strong></div>${trades}</div>`;
 }
-
-function closeModal() {
-  $('#scoreModal').hidden = true;
-  document.body.classList.remove('modal-open');
-}
+function closeModal(){ $('#scoreModal').hidden=true;document.body.classList.remove('modal-open'); }
 
 async function switchCategory(category, force=false) {
-  if (!CATEGORY[category]) return;
-  state.category = category;
-  state.query = '';
-  $('#searchInput').value = '';
-  if (force) {
-    state.data[category] = null;
-    for (const key of [...state.detailCache.keys()]) if (key.startsWith(`${category}:`)) state.detailCache.delete(key);
-  }
-
-  $$('.market-tab').forEach((b) => b.classList.toggle('active', b.dataset.category === category));
-  renderSizeFilters();
-  $('#status').hidden = false;
-  $('#stockList').hidden = true;
-  $('#status').textContent = '데이터를 불러오는 중입니다.';
-  try {
-    await ensureData(category, force);
-    renderMeta();
-    renderList();
-    $('#status').hidden = true;
-    $('#stockList').hidden = false;
-  } catch (err) {
-    console.error(err);
-    renderMeta();
-    $('#status').hidden = false;
-    $('#status').textContent = '데이터를 불러오지 못했습니다.';
-  }
+  if(!CATEGORY[category])return;state.category=category;state.query='';$('#searchInput').value='';
+  if(force){state.data[category]=null;for(const key of [...state.detailCache.keys()])if(key.startsWith(`${category}:`))state.detailCache.delete(key);}
+  $$('.market-tab').forEach(b=>b.classList.toggle('active',b.dataset.category===category));renderSizeFilters();$('#status').hidden=false;$('#stockList').hidden=true;$('#status').textContent='데이터를 불러오는 중입니다.';
+  try{await ensureData(category,force);renderMeta();renderList();$('#status').hidden=true;$('#stockList').hidden=false;}catch(err){console.error(err);renderMeta();$('#status').hidden=false;$('#status').textContent='데이터를 불러오지 못했습니다.';}
 }
-
 
 // -----------------------------------------------------------------------------
 // Quiz mode
@@ -1255,5 +877,5 @@ window.addEventListener('resize', () => {
   });
 });
 
-switchAnalysisMode('forecast');
+switchAnalysisMode('supertrend');
 void switchCategory('KR');

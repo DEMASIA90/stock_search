@@ -1,63 +1,32 @@
-# DTC · Forecast PJT 1
+# DTC · Supertrend Strategy
 
-DTC PWA는 두 개의 모드만 노출합니다.
+DTC의 현재 분석 모드는 **Supertrend(기간 10, 곱 2)** 하나만 사용합니다. Quiz mode는 별도로 유지됩니다.
 
-- **forecast pjt 1** — 상대거래량 앵커 6개 + 최근성 감쇠 WLS로 향후 20거래일 방향/상대순위를 예측
-- **Quiz mode** — 기존 차트 재구성 퀴즈
+## 의견 규칙
 
-## Forecast PJT 1
+- `P0`: 가장 최근 Supertrend 하락→상승 전환 시점의 Supertrend 가격
+- `P1`: 현재 Supertrend 가격
+- 현재 Supertrend가 하락이면 `매도`
+- 현재 Supertrend가 상승이고 `P1 >= P0`일 때 현재 종가와 P0의 차이로 등급 결정
+  - `<2%`: Buy S
+  - `<5%`: Buy A
+  - `<10%`: Buy B
+  - `<20%`: Buy C
+  - 그 외: Hold
+- 그 외의 상승 상태도 Hold
 
-프로덕션 예측 함수는 `trend_forecast.py::forecast()`에 완전히 분리되어 있습니다.
+정렬은 `Buy S → Buy A → Buy B → Buy C → Hold → 매도`, 동일 의견에서는 시가총액/ETF 규모 내림차순입니다.
 
-```python
-forecast(df, half_life=84, n_buckets=6, horizon=20)
-```
+## 백테스트
 
-주요 규칙:
+최근 2년 동안 포지션이 없을 때 첫 `Buy S` 종가에 진입하고, 보유 중 첫 `매도` 의견 종가에 청산합니다. 완료된 거래의 평균 수익률을 카드와 상세창에 표시합니다.
 
-- 조정종가 사용
-- 최소 272거래일
-- 최근 252일을 기본 6구간(42일씩)으로 분리
-- 각 구간 상대거래량 `Volume / SMA20(Volume)` 최대일을 앵커로 선택
-- `rv × exp(-ln(2)|tau|/H)` 가중치, 최대/최소 비율 4배 cap
-- 로그종가 WLS 1차 적합
-- 20D 예측수익률 ±20% clip
-- `confidence = conf_t × conf_z`
-- `score = r_pred_20d × confidence`
-- scanner/UI 랭킹은 forecast score 내림차순
+## 차트
 
-기존 매물대 현재 셋업 점수 코드는 `scanner.py`에 별도 필드로 유지하지만 UI 모드와 랭킹에는 사용하지 않습니다.
+약 6개월(126 거래일)의 Heikin-Ashi 캔들과 Supertrend(10,2)를 표시합니다. **매매 의견 계산은 일반 OHLC 기준 Supertrend만 사용하며 Heikin-Ashi는 시각화 전용**입니다.
 
 ## 테스트
 
 ```bash
-python -m unittest -v test_trend_forecast.py
+python -m unittest -v test_supertrend_strategy.py
 ```
-
-필수 검증: 기울기 복원, 앵커 선택, 반감기 가중치 작동, 룩어헤드 차단, 실제 P0 레벨 출발, 가중치 4배 cap. 추가로 고속 백테스트 엔진과 프로덕션 score의 일치도 검증합니다.
-
-## 연구 백테스트
-
-정상 FULL 스캔으로 `docs/data/*/summary.json`을 만든 뒤:
-
-```bash
-python backtest_forecast.py \
-  --download-from-summary docs/data \
-  --years 7 \
-  --sweep \
-  --report forecast_backtest_report.md
-```
-
-리포트는 시장조정 20D 수익률을 기준으로 방향 적중률/기준선/엣지, 시점별 edge t값, 횡단면 IC/ICIR, 분위수 스프레드, 10분위 단조성, 12-1/3M/no-decay/random 베이스라인, H×N×h 전반/후반 스윕을 생성합니다.
-
-GitHub Actions 수동 실행의 `run_forecast_backtest=true`도 같은 리포트를 artifact로 생성합니다.
-
-## 배포
-
-Firebase Hosting 변수:
-
-- `FIREBASE_PROJECT_ID=dtc-lab`
-- `FIREBASE_SITE_ID=dtc-lab`
-- Secret: `FIREBASE_SERVICE_ACCOUNT_JSON`
-
-일반 배포는 `.github/workflows/update-and-deploy.yml` 하나만 사용합니다.

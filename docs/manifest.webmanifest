@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "DTC Forecast PJT 1",
+  "name": "DTC Supertrend",
   "short_name": "DTC",
-  "description": "DTC Forecast PJT 1 stock analysis dashboard",
+  "description": "DTC Supertrend(10,2) opinion dashboard",
   "lang": "ko-KR",
   "start_url": "./",
   "scope": "./",

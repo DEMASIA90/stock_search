@@ -9,19 +9,19 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="DTC" />
-  <meta name="dtc-ui-build" content="20260822-v12_2_news_chart_regression" />
+  <meta name="dtc-ui-build" content="20260822-v13_0_supertrend" />
   <title>Dongtan Trading Center (DTC)</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=20260822-v12_2_news_chart_regression" />
+  <link rel="stylesheet" href="./styles.css?v=20260822-v13_0_supertrend" />
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
       <a class="brand" href="./" aria-label="동탄 트레이딩 센터">
         <span class="dtc-mark" aria-hidden="true">
-          <img src="./logo-dtc.svg?v=20260822-v12_2_news_chart_regression" alt="" />
+          <img src="./logo-dtc.svg?v=20260822-v13_0_supertrend" alt="" />
         </span>
         <div class="brand-copy">
           <b>동탄 트레이딩 센터 <span>(Dongtan Trading Center, DTC)</span></b>
@@ -32,7 +32,7 @@
       <label class="mode-switch" for="analysisMode">
         <span>MODE</span>
         <select id="analysisMode" aria-label="분석 모드 선택">
-          <option value="forecast">forecast pjt 1</option>
+          <option value="supertrend">Supertrend</option>
           <option value="quiz">Quiz mode</option>
         </select>
       </label>
@@ -44,7 +44,7 @@
       </div>
     </header>
 
-    <main id="forecastModeView" class="mode-view" aria-label="Forecast PJT 1">
+    <main id="supertrendModeView" class="mode-view" aria-label="Supertrend 전략">
       <section class="sticky-controls" aria-label="시장 및 시가총액 선택">
         <nav class="market-tabs" id="marketTabs" aria-label="시장 선택">
           <button class="market-tab active" data-category="KR">국장</button>
@@ -129,7 +129,7 @@
     <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="scoreModalTitle">
       <header class="modal-head">
         <div>
-          <small>FORECAST DETAIL</small>
+          <small>SUPERTREND DETAIL</small>
           <h2 id="scoreModalTitle">—</h2>
         </div>
         <button class="modal-close" type="button" data-close-modal aria-label="닫기">×</button>
@@ -138,9 +138,9 @@
     </section>
   </div>
 
-  <script src="./runtime-config.js?v=20260822-v12_2_news_chart_regression"></script>
-  <script src="./news-config.js?v=20260822-v12_2_news_chart_regression"></script>
-  <script src="./app.js?v=20260822-v12_2_news_chart_regression"></script>
-  <script src="./pwa.js?v=20260822-v12_2_news_chart_regression"></script>
+  <script src="./runtime-config.js?v=20260822-v13_0_supertrend"></script>
+  <script src="./news-config.js?v=20260822-v13_0_supertrend"></script>
+  <script src="./app.js?v=20260822-v13_0_supertrend"></script>
+  <script src="./pwa.js?v=20260822-v13_0_supertrend"></script>
 </body>
 </html>
