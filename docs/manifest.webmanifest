@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "Dongtan Trading Center",
+  "name": "DTC Forecast PJT 1",
   "short_name": "DTC",
-  "description": "Dongtan Trading Center stock analysis dashboard",
+  "description": "DTC Forecast PJT 1 stock analysis dashboard",
   "lang": "ko-KR",
   "start_url": "./",
   "scope": "./",

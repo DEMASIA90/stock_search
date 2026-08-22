@@ -23,6 +23,7 @@ import requests
 import yfinance as yf
 
 from universe import Stock, fetch_kr_restricted_symbols, fetch_us_halted_symbols, get_universe
+from trend_forecast import forecast as trend_forecast
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -30,7 +31,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v11.9
+# Dongtan Trading Center (DTC) scanner v12.0 · Forecast PJT 1
 # -----------------------------------------------------------------------------
 # Current setup score (0~10):
 #   1) Bollinger lower-band proximity                                       0~1
@@ -74,8 +75,14 @@ PROFILE_GROUPS = {
     "long": (200, 300, 400),
 }
 PROFILE_GROUP_WEIGHT = 3.0
+LOWER_SUPPORT_GROUP_WEIGHT = 1.0
 BOLLINGER_MAX_SCORE = 1.0
-BASE_MAX_SCORE = BOLLINGER_MAX_SCORE + PROFILE_GROUP_WEIGHT * len(PROFILE_GROUPS)
+# Raw profile-analysis score: BB 1 + current-zone concentration 9 + lower-support 3 = 13.
+PROFILE_RAW_MAX_SCORE = (
+    BOLLINGER_MAX_SCORE
+    + PROFILE_GROUP_WEIGHT * len(PROFILE_GROUPS)
+    + LOWER_SUPPORT_GROUP_WEIGHT * len(PROFILE_GROUPS)
+)
 MAX_SCORE = 10.0
 CHART_POINTS = 63  # ~3 trading months
 RSI_WINDOW = 14
@@ -92,7 +99,7 @@ NAVER_HEADERS = {
 }
 NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 100M units (억원)
 
-MIN_TRADING_DAYS = 400
+MIN_TRADING_DAYS = 63  # scanner inclusion; forecast() itself requires 272 sessions
 MIN_PRICE_KRW = 1_000.0
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
 ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
@@ -105,6 +112,21 @@ BACKTEST_MAX_BAND_HALF_WIDTH = 2.0
 BACKTEST_MODEL_GRID_STEP = 0.1
 BACKTEST_MODEL_MAX_AGE_DAYS = 10
 DISPLAY_META_TOP_N = 100
+
+# Gwangju Fortune Teller (광주점쟁이) linear volume-anchor forecast.
+GWANGJU_LOOKBACKS = {
+    "1y": 252,
+    "6m": 126,
+    "3m": 63,
+}
+GWANGJU_WEIGHTS = {
+    "1y": 0.2,
+    "6m": 0.3,
+    "3m": 0.5,
+}
+GWANGJU_HORIZONS = (5, 20, 60)
+GWANGJU_BACKTEST_DAYS = 252
+GWANGJU_BACKTEST_TOP_N = 100
 
 # A symbol that survives the official exchange filters but still has no Yahoo
 # daily data after a healthy FULL scan is temporarily quarantined. This stops
@@ -362,6 +384,11 @@ def _current_price_volume_zone_arrays(
     max_zone_volume = float(np.max(values)) if len(values) else 0.0
     max_share = max_zone_volume / total if total > 0 else 0.0
     relative_to_peak = share / max_share if max_share > 0 else 0.0
+    # New support component: volume strictly below the current price zone / all
+    # ten-zone volume. The current zone is excluded from the numerator but remains
+    # in the denominator, exactly matching the scoring definition.
+    lower_zone_volume = float(np.sum(values[:idx])) if idx > 0 else 0.0
+    lower_volume_ratio = lower_zone_volume / total if total > 0 else 0.0
 
     return {
         "available": True,
@@ -374,6 +401,8 @@ def _current_price_volume_zone_arrays(
         "share": clean(share, 6),
         "max_share": clean(max_share, 6),
         "relative_to_peak": clean(clip(relative_to_peak, 0.0, 1.0), 6),
+        "lower_zone_volume": clean(lower_zone_volume, 0),
+        "lower_volume_ratio": clean(clip(lower_volume_ratio, 0.0, 1.0), 6),
         "bins": PROFILE_BINS,
     }
 
@@ -391,12 +420,14 @@ def score_at(
     pos: int,
     profile_arrays: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> tuple[float, dict, dict]:
-    """Calculate the current 0~10 setup score at one point in time.
+    """Calculate the normalized 0~10 volume-profile setup score.
 
-    Raw ten-bin shares remain in ``metrics.profiles``.  The scoring transform is
-    relative concentration: current-zone share divided by the strongest zone's
-    share for the same lookback. Correlated lookbacks are then averaged inside
-    three horizon groups and each horizon receives an equal 0~3 weight.
+    Raw score (max 13):
+      * Bollinger lower-band proximity: 0~1
+      * Current-zone concentration, grouped short/mid/long: 0~3 each (0~9)
+      * Volume below current zone / all ten zones, grouped short/mid/long: 0~1 each (0~3)
+
+    The raw 0~13 score is finally normalized to 0~10.
     """
     if pos < max(BB_WINDOW - 1, max(PROFILE_LOOKBACKS) - 1) or pos >= len(frame):
         return 0.0, {}, {}
@@ -409,7 +440,8 @@ def score_at(
     s_bb = bollinger_proximity_score(percent_b)
     scores = {"bollinger": s_bb}
     profiles = {}
-    lookback_components: dict[int, float] = {}
+    concentration_components: dict[int, float] = {}
+    lower_support_components: dict[int, float] = {}
 
     if profile_arrays is None:
         profile_arrays = _profile_numpy(frame)
@@ -426,35 +458,383 @@ def score_at(
         )
         profile["days"] = days
         profiles[str(days)] = profile
-        component = finite(profile.get("relative_to_peak"), 0.0) if profile.get("available") else 0.0
-        component = float(clip(component, 0.0, 1.0))
-        lookback_components[days] = component
+        concentration = finite(profile.get("relative_to_peak"), 0.0) if profile.get("available") else 0.0
+        lower_support = finite(profile.get("lower_volume_ratio"), 0.0) if profile.get("available") else 0.0
+        concentration_components[days] = float(clip(concentration, 0.0, 1.0))
+        lower_support_components[days] = float(clip(lower_support, 0.0, 1.0))
 
-    total = s_bb
+    raw_total = s_bb
+    profile_groups = {}
+    lower_support_groups = {}
     for group_name, group_days in PROFILE_GROUPS.items():
-        components = [lookback_components.get(days, 0.0) for days in group_days]
-        group_mean = float(np.mean(components)) if components else 0.0
-        group_score = PROFILE_GROUP_WEIGHT * group_mean
-        scores[f"profile_{group_name}"] = round(group_score, 6)
-        total += group_score
+        concentration_values = [concentration_components.get(days, 0.0) for days in group_days]
+        concentration_mean = float(np.mean(concentration_values)) if concentration_values else 0.0
+        concentration_score = PROFILE_GROUP_WEIGHT * concentration_mean
+        scores[f"profile_{group_name}"] = round(concentration_score, 6)
+        raw_total += concentration_score
 
+        support_values = [lower_support_components.get(days, 0.0) for days in group_days]
+        support_mean = float(np.mean(support_values)) if support_values else 0.0
+        support_score = LOWER_SUPPORT_GROUP_WEIGHT * support_mean
+        scores[f"lower_support_{group_name}"] = round(support_score, 6)
+        raw_total += support_score
+
+        profile_groups[group_name] = {
+            "lookbacks": list(group_days),
+            "mean_relative_to_peak": clean(concentration_mean, 6),
+            "score": scores[f"profile_{group_name}"],
+            "weight": PROFILE_GROUP_WEIGHT,
+        }
+        lower_support_groups[group_name] = {
+            "lookbacks": list(group_days),
+            "mean_lower_volume_ratio": clean(support_mean, 6),
+            "score": scores[f"lower_support_{group_name}"],
+            "weight": LOWER_SUPPORT_GROUP_WEIGHT,
+        }
+
+    normalized = float(clip(raw_total / PROFILE_RAW_MAX_SCORE * MAX_SCORE, 0.0, MAX_SCORE))
     metrics = {
         "percent_b": clean(percent_b, 4),
         "bb_lower": clean(ind["BB_Lower"].iloc[pos]),
         "bb_mid": clean(ind["BB_Mid"].iloc[pos]),
         "bb_upper": clean(ind["BB_Upper"].iloc[pos]),
         "profiles": profiles,
-        "profile_groups": {
-            name: {
-                "lookbacks": list(days),
-                "mean_relative_to_peak": clean(np.mean([lookback_components.get(d, 0.0) for d in days]), 6),
-                "score": scores.get(f"profile_{name}"),
-                "weight": PROFILE_GROUP_WEIGHT,
-            }
-            for name, days in PROFILE_GROUPS.items()
-        },
+        "profile_groups": profile_groups,
+        "lower_support_groups": lower_support_groups,
+        "raw_score": clean(raw_total, 6),
+        "raw_score_max": PROFILE_RAW_MAX_SCORE,
+        "normalized_score": clean(normalized, 6),
     }
-    return round(float(clip(total, 0.0, BASE_MAX_SCORE)), 6), scores, metrics
+    return round(normalized, 6), scores, metrics
+
+
+def _heikin_ashi_frame(ohlc: pd.DataFrame) -> pd.DataFrame:
+    """Build Heikin-Ashi candles from an already-aggregated OHLC frame."""
+    if ohlc is None or ohlc.empty:
+        return pd.DataFrame(columns=["HA_Open", "HA_High", "HA_Low", "HA_Close", "Bullish"], index=[])
+    o = pd.to_numeric(ohlc["Open"], errors="coerce").to_numpy(dtype=float)
+    h = pd.to_numeric(ohlc["High"], errors="coerce").to_numpy(dtype=float)
+    l = pd.to_numeric(ohlc["Low"], errors="coerce").to_numpy(dtype=float)
+    c = pd.to_numeric(ohlc["Close"], errors="coerce").to_numpy(dtype=float)
+    n = len(ohlc)
+    ha_close = (o + h + l + c) / 4.0
+    ha_open = np.empty(n, dtype=float)
+    if n:
+        ha_open[0] = (o[0] + c[0]) / 2.0
+        for i in range(1, n):
+            ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0
+    ha_high = np.maximum.reduce([h, ha_open, ha_close]) if n else np.array([], dtype=float)
+    ha_low = np.minimum.reduce([l, ha_open, ha_close]) if n else np.array([], dtype=float)
+    out = pd.DataFrame({
+        "HA_Open": ha_open,
+        "HA_High": ha_high,
+        "HA_Low": ha_low,
+        "HA_Close": ha_close,
+    }, index=ohlc.index)
+    out["Bullish"] = out["HA_Close"] > out["HA_Open"]
+    return out
+
+
+def _aggregate_ohlc_for_ha(frame: pd.DataFrame, period: str) -> pd.DataFrame:
+    """Aggregate original daily OHLC first, then HA is calculated on that timeframe."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    idx = pd.DatetimeIndex(frame.index)
+    key = idx.to_period(period)
+    tmp = frame[["Open", "High", "Low", "Close"]].copy()
+    tmp["_period"] = key
+    grouped = tmp.groupby("_period", sort=True)
+    out = pd.DataFrame({
+        "Open": grouped["Open"].first(),
+        "High": grouped["High"].max(),
+        "Low": grouped["Low"].min(),
+        "Close": grouped["Close"].last(),
+    })
+    return out.dropna(subset=["Open", "High", "Low", "Close"])
+
+
+def candle_analysis_score(frame: pd.DataFrame, pos: int | None = None) -> tuple[float, dict]:
+    """Heikin-Ashi candle-analysis score, normalized to 0~10.
+
+    Raw max 4:
+      * Weekly + monthly HA both bullish = 1.0; monthly only = 0.5; otherwise 0
+      * Latest daily HA bullish: 3 * bearish count in prior 20 sessions / 20; if latest HA bearish = 0
+    The active current week/month is included because aggregation uses all rows through ``pos``.
+    """
+    if frame is None or frame.empty:
+        return 0.0, {}
+    if pos is None:
+        pos = len(frame) - 1
+    if pos < 20 or pos >= len(frame):
+        return 0.0, {}
+    hist = frame.iloc[: pos + 1][["Open", "High", "Low", "Close"]].copy()
+    daily_ha = _heikin_ashi_frame(hist)
+    if len(daily_ha) < 21:
+        return 0.0, {}
+    today_bullish = bool(daily_ha["Bullish"].iloc[-1])
+    prior20 = daily_ha["Bullish"].iloc[-21:-1]
+    bearish20 = int((~prior20.astype(bool)).sum())
+    daily_raw = (3.0 * bearish20 / 20.0) if today_bullish else 0.0
+
+    weekly_ha = _heikin_ashi_frame(_aggregate_ohlc_for_ha(hist, "W-FRI"))
+    monthly_ha = _heikin_ashi_frame(_aggregate_ohlc_for_ha(hist, "M"))
+    weekly_bullish = bool(weekly_ha["Bullish"].iloc[-1]) if not weekly_ha.empty else False
+    monthly_bullish = bool(monthly_ha["Bullish"].iloc[-1]) if not monthly_ha.empty else False
+    trend_raw = 1.0 if (weekly_bullish and monthly_bullish) else (0.5 if monthly_bullish else 0.0)
+
+    raw_total = trend_raw + daily_raw
+    normalized = float(clip(raw_total / 4.0 * MAX_SCORE, 0.0, MAX_SCORE))
+    metrics = {
+        "weekly_bullish": weekly_bullish,
+        "monthly_bullish": monthly_bullish,
+        "today_daily_bullish": today_bullish,
+        "prior20_bearish_count": bearish20,
+        "trend_raw_score": clean(trend_raw, 4),
+        "daily_raw_score": clean(daily_raw, 4),
+        "raw_score": clean(raw_total, 4),
+        "raw_score_max": 4.0,
+        "normalized_score": clean(normalized, 4),
+    }
+    return round(normalized, 6), metrics
+
+def _gwangju_top2_slope_arrays(
+    closes: np.ndarray,
+    volumes: np.ndarray,
+    dates: pd.DatetimeIndex,
+    pos: int,
+    lookback: int,
+) -> tuple[float, dict]:
+    """Slope through closes of the two highest-volume sessions in a lookback.
+
+    X is the trading-session index, so the slope unit is native price per
+    trading day.  The current session is included when ``pos`` points to it.
+    """
+    start = max(0, pos - lookback + 1)
+    if pos - start + 1 < 2:
+        return np.nan, {}
+    c = closes[start : pos + 1]
+    v = volumes[start : pos + 1]
+    valid = np.isfinite(c) & (c > 0) & np.isfinite(v) & (v >= 0)
+    idx = np.flatnonzero(valid)
+    if idx.size < 2:
+        return np.nan, {}
+    vv = v[idx]
+    if not np.isfinite(vv).any() or float(np.nanmax(vv)) <= 0:
+        return np.nan, {}
+    # argpartition avoids a full sort on every historical evaluation anchor.
+    take = np.argpartition(vv, -2)[-2:]
+    local = idx[take]
+    abs_idx = np.sort(local + start)
+    i1, i2 = int(abs_idx[0]), int(abs_idx[1])
+    if i2 <= i1:
+        return np.nan, {}
+    c1, c2 = float(closes[i1]), float(closes[i2])
+    slope = (c2 - c1) / float(i2 - i1)
+    meta = {
+        "lookback": int(lookback),
+        "first": {
+            "date": pd.Timestamp(dates[i1]).date().isoformat(),
+            "close": clean(c1, 6),
+            "volume": clean(volumes[i1], 0),
+        },
+        "second": {
+            "date": pd.Timestamp(dates[i2]).date().isoformat(),
+            "close": clean(c2, 6),
+            "volume": clean(volumes[i2], 0),
+        },
+        "trading_day_gap": int(i2 - i1),
+        "slope_price_per_day": clean(slope, 8),
+    }
+    return float(slope), meta
+
+
+def gwangju_prediction(frame: pd.DataFrame, pos: int | None = None) -> dict:
+    """Current 광주점쟁이 forecast from three volume-anchor slopes.
+
+    m1: 1Y top-2-volume close slope
+    m2: 6M top-2-volume close slope
+    m3: 3M top-2-volume close slope
+    m0 = 0.2*m1 + 0.3*m2 + 0.5*m3
+
+    The forecast line is re-anchored at the evaluation day's close and extended
+    linearly in trading-day units.  The displayed score is the arithmetic mean
+    of predicted 5D/20D/60D price returns, in percent.
+    """
+    if frame is None or frame.empty:
+        return {"available": False}
+    if pos is None:
+        pos = len(frame) - 1
+    if pos < max(GWANGJU_LOOKBACKS.values()) - 1 or pos >= len(frame):
+        return {"available": False, "reason": "insufficient_history"}
+
+    closes = pd.to_numeric(frame["Close"], errors="coerce").to_numpy(dtype=float)
+    volumes = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    dates = pd.DatetimeIndex(frame.index)
+    anchor = float(closes[pos]) if np.isfinite(closes[pos]) else np.nan
+    if not np.isfinite(anchor) or anchor <= 0:
+        return {"available": False, "reason": "invalid_close"}
+
+    slopes: dict[str, float] = {}
+    anchors: dict[str, dict] = {}
+    for key, lookback in GWANGJU_LOOKBACKS.items():
+        slope, meta = _gwangju_top2_slope_arrays(closes, volumes, dates, pos, lookback)
+        if not np.isfinite(slope):
+            return {"available": False, "reason": f"{key}_slope_unavailable"}
+        slopes[key] = float(slope)
+        anchors[key] = meta
+
+    m1, m2, m3 = slopes["1y"], slopes["6m"], slopes["3m"]
+    m0 = GWANGJU_WEIGHTS["1y"] * m1 + GWANGJU_WEIGHTS["6m"] * m2 + GWANGJU_WEIGHTS["3m"] * m3
+    predicted_prices = {h: anchor + m0 * h for h in GWANGJU_HORIZONS}
+    predicted_returns = {h: (predicted_prices[h] / anchor - 1.0) * 100.0 for h in GWANGJU_HORIZONS}
+    score = float(np.mean([predicted_returns[h] for h in GWANGJU_HORIZONS]))
+    return {
+        "available": True,
+        "anchor_date": pd.Timestamp(dates[pos]).date().isoformat(),
+        "anchor_close": clean(anchor, 6),
+        "m1": clean(m1, 8),
+        "m2": clean(m2, 8),
+        "m3": clean(m3, 8),
+        "m0": clean(m0, 8),
+        "m0_pct_per_day": clean(m0 / anchor * 100.0, 6),
+        "weights": {"m1": 0.2, "m2": 0.3, "m3": 0.5},
+        "volume_anchors": anchors,
+        "predicted_price_5d": clean(predicted_prices[5], 6),
+        "predicted_price_20d": clean(predicted_prices[20], 6),
+        "predicted_price_60d": clean(predicted_prices[60], 6),
+        "predicted_return_5d_pct": clean(predicted_returns[5], 4),
+        "predicted_return_20d_pct": clean(predicted_returns[20], 4),
+        "predicted_return_60d_pct": clean(predicted_returns[60], 4),
+        "score_pct": clean(score, 4),
+        "forecast_horizon_trading_days": 60,
+    }
+
+
+def gwangju_backtest(frame: pd.DataFrame) -> dict:
+    """One-year walk-forward forecast error for the 광주점쟁이 method.
+
+    Every evaluable trading day in the trailing year is an anchor. Each anchor
+    uses only information available on that date. Error is prediction minus
+    actual close-to-close return; MAE is reported in percentage points.
+    """
+    if frame is None or frame.empty:
+        return {"available": False}
+    n = len(frame)
+    max_h = max(GWANGJU_HORIZONS)
+    min_pos = max(GWANGJU_LOOKBACKS.values()) - 1
+    last_anchor = n - max_h - 1
+    if last_anchor < min_pos:
+        return {"available": False, "reason": "insufficient_history"}
+    first_anchor = max(min_pos, last_anchor - GWANGJU_BACKTEST_DAYS + 1)
+
+    closes = pd.to_numeric(frame["Close"], errors="coerce").to_numpy(dtype=float)
+    volumes = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    dates = pd.DatetimeIndex(frame.index)
+    errors = {h: [] for h in GWANGJU_HORIZONS}
+    preds = {h: [] for h in GWANGJU_HORIZONS}
+    actuals = {h: [] for h in GWANGJU_HORIZONS}
+    anchor_count = 0
+
+    for pos in range(first_anchor, last_anchor + 1):
+        anchor = closes[pos]
+        if not np.isfinite(anchor) or anchor <= 0:
+            continue
+        parts = []
+        valid = True
+        for key, lookback in GWANGJU_LOOKBACKS.items():
+            slope, _ = _gwangju_top2_slope_arrays(closes, volumes, dates, pos, lookback)
+            if not np.isfinite(slope):
+                valid = False
+                break
+            parts.append((key, slope))
+        if not valid:
+            continue
+        slope_map = dict(parts)
+        m0 = (
+            GWANGJU_WEIGHTS["1y"] * slope_map["1y"]
+            + GWANGJU_WEIGHTS["6m"] * slope_map["6m"]
+            + GWANGJU_WEIGHTS["3m"] * slope_map["3m"]
+        )
+        ok = True
+        local = {}
+        for h in GWANGJU_HORIZONS:
+            future = closes[pos + h]
+            if not np.isfinite(future) or future <= 0:
+                ok = False
+                break
+            pred = (m0 * h / anchor) * 100.0
+            actual = (future / anchor - 1.0) * 100.0
+            local[h] = (pred, actual, pred - actual)
+        if not ok:
+            continue
+        anchor_count += 1
+        for h, (pred, actual, err) in local.items():
+            preds[h].append(pred)
+            actuals[h].append(actual)
+            errors[h].append(err)
+
+    if anchor_count == 0:
+        return {"available": False, "reason": "no_valid_anchors"}
+
+    out = {
+        "available": True,
+        "method": "walk_forward_daily_close",
+        "anchor_count": int(anchor_count),
+        "window_trading_days": GWANGJU_BACKTEST_DAYS,
+        "error_definition": "predicted_return_pct - actual_return_pct",
+        "return_basis": "Close",
+    }
+    maes = []
+    for h in GWANGJU_HORIZONS:
+        e = np.asarray(errors[h], dtype=float)
+        p = np.asarray(preds[h], dtype=float)
+        a = np.asarray(actuals[h], dtype=float)
+        mae = float(np.mean(np.abs(e)))
+        maes.append(mae)
+        out[f"mae_{h}d_pctp"] = clean(mae, 4)
+        out[f"bias_{h}d_pctp"] = clean(np.mean(e), 4)
+        out[f"pred_avg_{h}d_pct"] = clean(np.mean(p), 4)
+        out[f"actual_avg_{h}d_pct"] = clean(np.mean(a), 4)
+    out["mean_mae_pctp"] = clean(float(np.mean(maes)), 4)
+    return out
+
+
+def _load_cached_gwangju_backtests(category: str) -> dict[str, dict]:
+    path = DATA_DIR / CATEGORY_DIR[category] / "summary.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        out = {}
+        for row in payload.get("items") or []:
+            ticker = str(row.get("ticker") or "")
+            bt = row.get("gwangju_backtest") or {}
+            if ticker and bt.get("available"):
+                out[ticker] = bt
+        return out
+    except Exception:
+        return {}
+
+
+def attach_gwangju_backtests(items: list[dict], frames: dict[str, pd.DataFrame]) -> None:
+    """Compute walk-forward error only for the strongest current forecasts.
+
+    This keeps QUICK/FULL runtime bounded while fully covering the default TOP20
+    and a large search buffer. Current forecasts are still calculated for every
+    eligible item and therefore ranking itself is complete.
+    """
+    ranked = sorted(
+        items,
+        key=lambda x: -finite((x.get("gwangju_prediction") or {}).get("score_pct"), -1e18),
+    )
+    for item in items:
+        item["gwangju_backtest"] = {"available": False, "reason": "not_in_backtest_top_buffer"}
+    for item in ranked[:GWANGJU_BACKTEST_TOP_N]:
+        frame = frames.get(item.get("ticker"))
+        if frame is None or frame.empty:
+            continue
+        item["gwangju_backtest"] = gwangju_backtest(frame)
+
 
 def thresholds_for(category: str, usdkrw: float | None) -> dict:
     if category in {"KR", "KR_ETF"}:
@@ -503,7 +883,19 @@ def fetch_usdkrw() -> tuple[float, str]:
 
 
 def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
-    chart = ind.dropna(subset=["BB_Mid", "BB_Upper", "BB_Lower"]).tail(CHART_POINTS)
+    chart = ind.dropna(subset=["BB_Mid", "BB_Upper", "BB_Lower"]).tail(CHART_POINTS).copy()
+    # Forecast PJT 1 uses adjusted prices. Scale OHLC by AdjClose/Close when the
+    # adjusted series is available so the visible candle level matches the model.
+    if "Adj Close" in chart.columns:
+        raw_close = pd.to_numeric(chart["Close"], errors="coerce")
+        adj_close = pd.to_numeric(chart["Adj Close"], errors="coerce")
+        factor = (adj_close / raw_close.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    else:
+        factor = pd.Series(1.0, index=chart.index)
+    chart_o = pd.to_numeric(chart["Open"], errors="coerce") * factor
+    chart_h = pd.to_numeric(chart["High"], errors="coerce") * factor
+    chart_l = pd.to_numeric(chart["Low"], errors="coerce") * factor
+    chart_c = pd.to_numeric(chart["Close"], errors="coerce") * factor
     profile_lines = []
     for days in PROFILE_LOOKBACKS:
         p = profiles.get(str(days)) or {}
@@ -518,10 +910,10 @@ def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
             })
     return {
         "d": [pd.Timestamp(i).date().isoformat() for i in chart.index],
-        "o": [clean(v) for v in chart["Open"]],
-        "h": [clean(v) for v in chart["High"]],
-        "lo": [clean(v) for v in chart["Low"]],
-        "c": [clean(v) for v in chart["Close"]],
+        "o": [clean(v) for v in chart_o],
+        "h": [clean(v) for v in chart_h],
+        "lo": [clean(v) for v in chart_l],
+        "c": [clean(v) for v in chart_c],
         "m": [clean(v) for v in chart["BB_Mid"]],
         "u": [clean(v) for v in chart["BB_Upper"]],
         "l": [clean(v) for v in chart["BB_Lower"]],
@@ -1124,7 +1516,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     if frame.empty:
         return None, "no_price"
     if len(frame) < MIN_TRADING_DAYS:
-        return None, "listed_lt_400d"
+        return None, "listed_lt_63d"
 
     ind = add_indicators(frame)
     pos = len(frame) - 1
@@ -1151,6 +1543,9 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
 
     profile_arrays = _profile_numpy(frame)
     score, scores, metrics = score_at(frame, ind, pos, profile_arrays=profile_arrays)
+    # Forecast PJT 1 is intentionally isolated in trend_forecast.py. Existing
+    # setup-score computation above is retained unchanged as a separate field.
+    forecast_data = trend_forecast(frame)
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
 
@@ -1168,6 +1563,8 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "base_score": round(score, 4),
         "score": round(score, 4),
         "display_score": round(score, 2),
+        "forecast": forecast_data,
+        "forecast_score": clean(forecast_data.get("score"), 8) if forecast_data.get("forecastable") else None,
         "scores": scores,
         "trade_signals": trade_signal_metrics(frame, ind, pos),
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
@@ -1493,6 +1890,8 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "base_score": item.get("base_score"),
         "score": item["score"],
         "display_score": item.get("display_score", item["score"]),
+        "forecast": {k: v for k, v in (item.get("forecast") or {}).items() if k not in {"anchors", "projection", "fit_window"}},
+        "forecast_score": item.get("forecast_score"),
         "scores": item.get("scores") or {},
         "trade_signals": item.get("trade_signals") or {},
         "sector": item.get("sector") or "—",
@@ -1692,8 +2091,9 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v11.9 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
-    print("score = BB 0~1 + grouped relative volume-profile concentration (short/mid/long 0~3 each) = max 10")
+    print(f"DTC v12.0 Forecast PJT 1 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print("profile score raw = BB 1 + current-zone concentration 9 + lower-support ratio 3 = 13; normalized to 10")
+    print("candle score raw = weekly/monthly HA 1 + daily HA reversal 3 = 4; normalized to 10")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1885,34 +2285,22 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Rank by the current setup itself. Historical performance is pooled and
-    # attached only as a reference statistic; it has zero influence on order.
+    # Forecast PJT 1 is the only scanner ranking model exposed in the UI.
+    # Legacy setup scores remain in each item, but their historical backtests and
+    # the removed Gwangju/Candle modes are no longer recomputed.
     unsorted_items = list(results.values())
-    backtest_refreshed = True
-    backtest_model = None
-    if scan_mode == "QUICK":
-        cached_model = _load_backtest_model(category)
-        if cached_model:
-            print(f"[{category}] QUICK: reusing latest FULL pooled backtest model (no historical rescoring)")
-            unsorted_items, backtest_diagnostics = _attach_cached_backtest_model(unsorted_items, cached_model)
-            backtest_refreshed = False
-        else:
-            print(f"[{category}] QUICK: no cached FULL backtest model; building fallback reference once")
-            unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
-                unsorted_items, frames, scan_mode=scan_mode
-            )
-    else:
-        print(f"[{category}] pooled non-overlap 60D reference backtest: {len(unsorted_items):,} eligible items")
-        unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
-            unsorted_items, frames, scan_mode=scan_mode
-        )
-        _atomic_write_text(
-            _backtest_model_path(category),
-            json.dumps(backtest_model, ensure_ascii=False, separators=(",", ":")),
-        )
+    backtest_refreshed = False
+    backtest_diagnostics = {
+        "disabled": True,
+        "reason": "legacy_setup_backtest_not_used_by_forecast_pjt_1",
+        "forecast_backtest": "run backtest_forecast.py on 3y+ (recommended 5y+) historical OHLCV",
+    }
 
     def _rank_key(item: dict):
-        return (-finite(item.get("score"), 0.0), item.get("symbol", ""))
+        f = item.get("forecast") or {}
+        if not f.get("forecastable"):
+            return (1, 0.0, item.get("symbol", ""))
+        return (0, -finite(f.get("score"), -1e18), item.get("symbol", ""))
 
     items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
@@ -1951,7 +2339,7 @@ def scan_category(
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Dongtan Trading Center",
-        "strategy": "DTC_V11_7_BB_GROUPED_PROFILE_POOLED_BACKTEST",
+        "strategy": "FORECAST_PJT_1_RELATIVE_VOLUME_ANCHOR_WLS",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1978,6 +2366,17 @@ def scan_category(
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "max_score": MAX_SCORE,
+        "forecast_model": {
+            "name": "Forecast PJT 1",
+            "window": 252,
+            "relative_volume_sma": 20,
+            "anchors": 6,
+            "half_life": 84,
+            "horizon": 20,
+            "ranking": "forecast.score = clipped_20d_predicted_return * confidence",
+            "minimum_history": 272,
+            "price_basis": "Adj Close when available",
+        },
         "score_model": {
             "score_max": MAX_SCORE,
             "bollinger": {
@@ -1993,24 +2392,27 @@ def scan_category(
                 "lookbacks": list(PROFILE_LOOKBACKS),
                 "groups": {name: list(days) for name, days in PROFILE_GROUPS.items()},
                 "group_weight": PROFILE_GROUP_WEIGHT,
+                "lower_support_group_weight": LOWER_SUPPORT_GROUP_WEIGHT,
                 "bins": PROFILE_BINS,
                 "raw_share_formula": "volume_in_current_price_zone / total_volume_across_10_zones",
                 "normalized_component": "current_zone_share / largest_zone_share",
                 "group_formula": "3 * mean(normalized_component_of_group_lookbacks)",
+                "lower_support_formula": "volume_in_zones_strictly_below_current_zone / total_volume_across_10_zones",
+                "lower_support_group_formula": "1 * mean(lower_support_ratio_of_group_lookbacks)",
+                "raw_score_max": PROFILE_RAW_MAX_SCORE,
+                "final_normalization": "raw_score / 13 * 10",
                 "allocation": "daily_volume_distributed_by_low_high_overlap",
             },
         },
-        "backtest_model": {
-            "pool": "all_eligible_stocks_in_category",
-            "sampling": f"one observation every {BACKTEST_NON_OVERLAP_STEP} trading sessions per stock",
-            "forward_days": BACKTEST_FORWARD_DAYS,
-            "return_basis": "Adj Close when available (dividend-adjusted total return proxy)",
-            "score_band": "start +/-0.5 points; widen until target sample count or +/-2.0",
-            "target_pool_samples": BACKTEST_TARGET_POOL_SAMPLES,
-            "historical_equity_size_filter": "current market cap scaled by historical/current close as point-in-time proxy; exact historical shares unavailable",
-            "rank_by": "current_setup_score_desc",
-            "rank_influence": "none",
-            "diagnostics": backtest_diagnostics,
+        "forecast_backtest_model": {
+            "script": "backtest_forecast.py",
+            "sampling": "20-trading-day non-overlapping evaluation dates",
+            "market_adjustment": "KR/US cross-sectional mean forward return removed at each date",
+            "headline": "direction hit/base-rate/edge + date-level edge t-stat",
+            "ranking_metric": "cross-sectional Spearman IC",
+            "baselines": ["12-1 momentum", "3-month return", "no decay", "deterministic shuffled score"],
+            "parameter_sweep": {"H": [42,63,84,105,126,"inf"], "N": [4,6,8], "h": [10,20,40]},
+            "normal_scan_influence": "none; long-history research backtest is opt-in",
         },
     }
 

@@ -1,0 +1,249 @@
+--- /mnt/data/forecast_pjt1_work/scanner.py	2026-08-22 08:53:56.000000000 +0000
++++ scanner.py	2026-08-22 10:01:43.750488985 +0000
+@@ -23,6 +23,7 @@
+ import yfinance as yf
+ 
+ from universe import Stock, fetch_kr_restricted_symbols, fetch_us_halted_symbols, get_universe
++from trend_forecast import forecast as trend_forecast
+ 
+ BASE_DIR = Path(__file__).resolve().parent
+ DATA_DIR = BASE_DIR / "docs" / "data"
+@@ -30,7 +31,7 @@
+ FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
+ 
+ # -----------------------------------------------------------------------------
+-# Dongtan Trading Center (DTC) scanner v11.13
++# Dongtan Trading Center (DTC) scanner v12.0 · Forecast PJT 1
+ # -----------------------------------------------------------------------------
+ # Current setup score (0~10):
+ #   1) Bollinger lower-band proximity                                       0~1
+@@ -98,7 +99,7 @@
+ }
+ NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 100M units (억원)
+ 
+-MIN_TRADING_DAYS = 400
++MIN_TRADING_DAYS = 63  # scanner inclusion; forecast() itself requires 272 sessions
+ MIN_PRICE_KRW = 1_000.0
+ MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
+ ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
+@@ -882,7 +883,19 @@
+ 
+ 
+ def _make_chart(ind: pd.DataFrame, profiles: dict) -> dict:
+-    chart = ind.dropna(subset=["BB_Mid", "BB_Upper", "BB_Lower"]).tail(CHART_POINTS)
++    chart = ind.dropna(subset=["BB_Mid", "BB_Upper", "BB_Lower"]).tail(CHART_POINTS).copy()
++    # Forecast PJT 1 uses adjusted prices. Scale OHLC by AdjClose/Close when the
++    # adjusted series is available so the visible candle level matches the model.
++    if "Adj Close" in chart.columns:
++        raw_close = pd.to_numeric(chart["Close"], errors="coerce")
++        adj_close = pd.to_numeric(chart["Adj Close"], errors="coerce")
++        factor = (adj_close / raw_close.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
++    else:
++        factor = pd.Series(1.0, index=chart.index)
++    chart_o = pd.to_numeric(chart["Open"], errors="coerce") * factor
++    chart_h = pd.to_numeric(chart["High"], errors="coerce") * factor
++    chart_l = pd.to_numeric(chart["Low"], errors="coerce") * factor
++    chart_c = pd.to_numeric(chart["Close"], errors="coerce") * factor
+     profile_lines = []
+     for days in PROFILE_LOOKBACKS:
+         p = profiles.get(str(days)) or {}
+@@ -897,10 +910,10 @@
+             })
+     return {
+         "d": [pd.Timestamp(i).date().isoformat() for i in chart.index],
+-        "o": [clean(v) for v in chart["Open"]],
+-        "h": [clean(v) for v in chart["High"]],
+-        "lo": [clean(v) for v in chart["Low"]],
+-        "c": [clean(v) for v in chart["Close"]],
++        "o": [clean(v) for v in chart_o],
++        "h": [clean(v) for v in chart_h],
++        "lo": [clean(v) for v in chart_l],
++        "c": [clean(v) for v in chart_c],
+         "m": [clean(v) for v in chart["BB_Mid"]],
+         "u": [clean(v) for v in chart["BB_Upper"]],
+         "l": [clean(v) for v in chart["BB_Lower"]],
+@@ -1503,7 +1516,7 @@
+     if frame.empty:
+         return None, "no_price"
+     if len(frame) < MIN_TRADING_DAYS:
+-        return None, "listed_lt_400d"
++        return None, "listed_lt_63d"
+ 
+     ind = add_indicators(frame)
+     pos = len(frame) - 1
+@@ -1530,8 +1543,9 @@
+ 
+     profile_arrays = _profile_numpy(frame)
+     score, scores, metrics = score_at(frame, ind, pos, profile_arrays=profile_arrays)
+-    candle_score, candle_metrics = candle_analysis_score(frame, pos)
+-    gwangju = gwangju_prediction(frame, pos)
++    # Forecast PJT 1 is intentionally isolated in trend_forecast.py. Existing
++    # setup-score computation above is retained unchanged as a separate field.
++    forecast_data = trend_forecast(frame)
+     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
+     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
+ 
+@@ -1549,12 +1563,8 @@
+         "base_score": round(score, 4),
+         "score": round(score, 4),
+         "display_score": round(score, 2),
+-        "candle_score": round(candle_score, 4),
+-        "candle_display_score": round(candle_score, 2),
+-        "candle_metrics": candle_metrics,
+-        "gwangju_prediction": gwangju,
+-        "gwangju_score_pct": clean(gwangju.get("score_pct")) if gwangju.get("available") else None,
+-        "gwangju_backtest": {},
++        "forecast": forecast_data,
++        "forecast_score": clean(forecast_data.get("score"), 8) if forecast_data.get("forecastable") else None,
+         "scores": scores,
+         "trade_signals": trade_signal_metrics(frame, ind, pos),
+         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
+@@ -1880,12 +1890,8 @@
+         "base_score": item.get("base_score"),
+         "score": item["score"],
+         "display_score": item.get("display_score", item["score"]),
+-        "candle_score": item.get("candle_score"),
+-        "candle_display_score": item.get("candle_display_score", item.get("candle_score")),
+-        "candle_metrics": item.get("candle_metrics") or {},
+-        "gwangju_prediction": item.get("gwangju_prediction") or {},
+-        "gwangju_score_pct": item.get("gwangju_score_pct"),
+-        "gwangju_backtest": item.get("gwangju_backtest") or {},
++        "forecast": {k: v for k, v in (item.get("forecast") or {}).items() if k not in {"anchors", "projection", "fit_window"}},
++        "forecast_score": item.get("forecast_score"),
+         "scores": item.get("scores") or {},
+         "trade_signals": item.get("trade_signals") or {},
+         "sector": item.get("sector") or "—",
+@@ -2085,7 +2091,7 @@
+         _refresh_kr_etf_size_cache_from_naver(size_cache)
+ 
+     print("=" * 76)
+-    print(f"DTC v11.13 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
++    print(f"DTC v12.0 Forecast PJT 1 | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+     print("profile score raw = BB 1 + current-zone concentration 9 + lower-support ratio 3 = 13; normalized to 10")
+     print("candle score raw = weekly/monthly HA 1 + daily HA reversal 3 = 4; normalized to 10")
+     if category in ETF_CATEGORIES:
+@@ -2279,49 +2285,22 @@
+     else:
+         size_coverage = np.nan
+ 
+-    # Rank by the current setup itself. Historical performance is pooled and
+-    # attached only as a reference statistic; it has zero influence on order.
++    # Forecast PJT 1 is the only scanner ranking model exposed in the UI.
++    # Legacy setup scores remain in each item, but their historical backtests and
++    # the removed Gwangju/Candle modes are no longer recomputed.
+     unsorted_items = list(results.values())
+-    if scan_mode == "QUICK":
+-        cached_gwangju = _load_cached_gwangju_backtests(category)
+-        if cached_gwangju:
+-            for item in unsorted_items:
+-                item["gwangju_backtest"] = cached_gwangju.get(
+-                    item.get("ticker"),
+-                    {"available": False, "reason": "not_in_cached_full_top_buffer"},
+-                )
+-            print(f"[{category}] QUICK: reusing FULL Gwangju backtests ({len(cached_gwangju):,} symbols)")
+-        else:
+-            print(f"[{category}] QUICK: no FULL Gwangju backtest cache; building top {min(GWANGJU_BACKTEST_TOP_N, len(unsorted_items)):,}")
+-            attach_gwangju_backtests(unsorted_items, frames)
+-    else:
+-        print(f"[{category}] Gwangju forecast backtest: top {min(GWANGJU_BACKTEST_TOP_N, len(unsorted_items)):,} current forecasts")
+-        attach_gwangju_backtests(unsorted_items, frames)
+-    backtest_refreshed = True
+-    backtest_model = None
+-    if scan_mode == "QUICK":
+-        cached_model = _load_backtest_model(category)
+-        if cached_model:
+-            print(f"[{category}] QUICK: reusing latest FULL pooled backtest model (no historical rescoring)")
+-            unsorted_items, backtest_diagnostics = _attach_cached_backtest_model(unsorted_items, cached_model)
+-            backtest_refreshed = False
+-        else:
+-            print(f"[{category}] QUICK: no cached FULL backtest model; building fallback reference once")
+-            unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
+-                unsorted_items, frames, scan_mode=scan_mode
+-            )
+-    else:
+-        print(f"[{category}] pooled non-overlap 60D reference backtest: {len(unsorted_items):,} eligible items")
+-        unsorted_items, backtest_diagnostics, backtest_model = build_pooled_backtests(
+-            unsorted_items, frames, scan_mode=scan_mode
+-        )
+-        _atomic_write_text(
+-            _backtest_model_path(category),
+-            json.dumps(backtest_model, ensure_ascii=False, separators=(",", ":")),
+-        )
++    backtest_refreshed = False
++    backtest_diagnostics = {
++        "disabled": True,
++        "reason": "legacy_setup_backtest_not_used_by_forecast_pjt_1",
++        "forecast_backtest": "run backtest_forecast.py on 3y+ (recommended 5y+) historical OHLCV",
++    }
+ 
+     def _rank_key(item: dict):
+-        return (-finite(item.get("score"), 0.0), item.get("symbol", ""))
++        f = item.get("forecast") or {}
++        if not f.get("forecastable"):
++            return (1, 0.0, item.get("symbol", ""))
++        return (0, -finite(f.get("score"), -1e18), item.get("symbol", ""))
+ 
+     items = sorted(unsorted_items, key=_rank_key)
+     for rank, item in enumerate(items, 1):
+@@ -2360,7 +2339,7 @@
+     market_date = max((x["date"] for x in items if x.get("date")), default=None)
+     payload_meta = {
+         "app": "Dongtan Trading Center",
+-        "strategy": "DTC_V11_13_PROFILE_CANDLE_GWANGJU_FORECAST",
++        "strategy": "FORECAST_PJT_1_RELATIVE_VOLUME_ANCHOR_WLS",
+         "category": category,
+         "category_label": CATEGORY_LABEL[category],
+         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+@@ -2387,6 +2366,17 @@
+         "thresholds": thresholds,
+         "filter_counts": dict(sorted(rejection.items())),
+         "max_score": MAX_SCORE,
++        "forecast_model": {
++            "name": "Forecast PJT 1",
++            "window": 252,
++            "relative_volume_sma": 20,
++            "anchors": 6,
++            "half_life": 84,
++            "horizon": 20,
++            "ranking": "forecast.score = clipped_20d_predicted_return * confidence",
++            "minimum_history": 272,
++            "price_basis": "Adj Close when available",
++        },
+         "score_model": {
+             "score_max": MAX_SCORE,
+             "bollinger": {
+@@ -2413,25 +2403,16 @@
+                 "final_normalization": "raw_score / 13 * 10",
+                 "allocation": "daily_volume_distributed_by_low_high_overlap",
+             },
+-            "candle_analysis": {
+-                "raw_score_max": 4,
+-                "final_normalization": "raw_score / 4 * 10",
+-                "weekly_monthly": "both HA bullish=1; monthly only=0.5; otherwise=0",
+-                "daily": "if latest daily HA bullish: 3 * prior20_HA_bearish_count / 20; else 0",
+-                "active_period_included": True,
+-            },
+         },
+-        "backtest_model": {
+-            "pool": "all_eligible_stocks_in_category",
+-            "sampling": f"one observation every {BACKTEST_NON_OVERLAP_STEP} trading sessions per stock",
+-            "forward_days": BACKTEST_FORWARD_DAYS,
+-            "return_basis": "Adj Close when available (dividend-adjusted total return proxy)",
+-            "score_band": "start +/-0.5 points; widen until target sample count or +/-2.0",
+-            "target_pool_samples": BACKTEST_TARGET_POOL_SAMPLES,
+-            "historical_equity_size_filter": "current market cap scaled by historical/current close as point-in-time proxy; exact historical shares unavailable",
+-            "rank_by": "current_setup_score_desc",
+-            "rank_influence": "none",
+-            "diagnostics": backtest_diagnostics,
++        "forecast_backtest_model": {
++            "script": "backtest_forecast.py",
++            "sampling": "20-trading-day non-overlapping evaluation dates",
++            "market_adjustment": "KR/US cross-sectional mean forward return removed at each date",
++            "headline": "direction hit/base-rate/edge + date-level edge t-stat",
++            "ranking_metric": "cross-sectional Spearman IC",
++            "baselines": ["12-1 momentum", "3-month return", "no decay", "deterministic shuffled score"],
++            "parameter_sweep": {"H": [42,63,84,105,126,"inf"], "N": [4,6,8], "h": [10,20,40]},
++            "normal_scan_influence": "none; long-history research backtest is opt-in",
+         },
+     }
+ 

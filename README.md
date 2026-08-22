@@ -1,64 +1,63 @@
-# DTC v11.11 · PWA
+# DTC · Forecast PJT 1
 
-Dongtan Trading Center stock scanner with Firebase/GitHub deployment, installable PWA, and chart-reconstruction Quiz mode.
+DTC PWA는 두 개의 모드만 노출합니다.
 
-## Scanner v11.9
+- **forecast pjt 1** — 상대거래량 앵커 6개 + 최근성 감쇠 WLS로 향후 20거래일 방향/상대순위를 예측
+- **Quiz mode** — 기존 차트 재구성 퀴즈
 
-- Current setup score: **0~10** and ranking is by this current setup score only.
-- Bollinger proximity: upper band or above = 0, lower band or below = 1, linearly interpolated in between.
-- Volume profile: each lookback is split into **10 equal price zones**.
-- Lookbacks are grouped to reduce duplicated information:
-  - Short: 20 / 40 / 60 trading days
-  - Medium: 80 / 100 / 150 trading days
-  - Long: 200 / 300 / 400 trading days
-- Each lookback keeps the raw current-zone volume share, but scoring uses `current-zone share / largest-zone share`.
-- Each horizon group contributes `3 × mean(normalized lookback values)`, so Bollinger 1 + short 3 + medium 3 + long 3 = **10**.
-- Historical 60-session results are **reference-only** and never determine rank.
-- Historical samples are spaced by 60 trading sessions within each stock to avoid overlapping 60-day return labels, then pooled across the current market category.
-- 60-day historical return uses `Adj Close` when available so dividends are reflected.
-- The pooled reference expands the score band from ±0.5 up to ±2.0 only when more samples are needed.
-- Historical delisted constituents are not available from the free current-universe data source; this survivorship limitation is recorded in output metadata and is one reason the reference backtest is not used for ranking.
+## Forecast PJT 1
 
-## Quiz mode
+프로덕션 예측 함수는 `trend_forecast.py::forecast()`에 완전히 분리되어 있습니다.
 
-- Quiz universe: stocks/ETFs with market cap or AUM of at least **KRW 100 trillion**.
-- One question displays a random **90-trading-day** candlestick chart with Bollinger Bands and a 10-zone volume profile.
-- One randomly selected 30-day third of the chart is hidden.
-- Four answer charts show possible close-price shapes.
-- The correct answer is the real hidden close series.
-- Distractors are based on real 30-day market patterns and volatility-matched. Middle-third questions bridge both edges; first/last-third questions anchor only the visible-side edge so the unknown endpoint is not leaked.
-- Quiz data is stored as lightweight manifests plus lazy-loaded per-stock OHLCV JSON files. The browser only downloads the few stock histories needed for the current question and reuses them in an in-memory cache.
+```python
+forecast(df, half_life=84, n_buckets=6, horizon=20)
+```
 
-## UI
+주요 규칙:
 
-- Modes: 매물대 분석 / 캔들 분석 / Quiz.
-- Market tabs: 국장 / 국장 ETF / 미장 / 미장 ETF.
-- Equity market-cap filters: 10 / 50 / 100 / 500 / 1000조 이상, default 100조 이상.
-- ETF size filters: 전체 / 0.1 / 0.5 / 1 / 5조 이상.
-- Card signals: pullback = Bollinger %B + RSI(14); breakout = distance vs prior 20-day high + current volume / prior 20-day average volume.
-- RSI warm-up remains NaN until enough observations exist.
+- 조정종가 사용
+- 최소 272거래일
+- 최근 252일을 기본 6구간(42일씩)으로 분리
+- 각 구간 상대거래량 `Volume / SMA20(Volume)` 최대일을 앵커로 선택
+- `rv × exp(-ln(2)|tau|/H)` 가중치, 최대/최소 비율 4배 cap
+- 로그종가 WLS 1차 적합
+- 20D 예측수익률 ±20% clip
+- `confidence = conf_t × conf_z`
+- `score = r_pred_20d × confidence`
+- scanner/UI 랭킹은 forecast score 내림차순
 
-## v11.9 scan acceleration
+기존 매물대 현재 셋업 점수 코드는 `scanner.py`에 별도 필드로 유지하지만 UI 모드와 랭킹에는 사용하지 않습니다.
 
-- KR: compare the KIND universe with the official KRX daily market-cap snapshot before Yahoo download. Stale/delisted KIND rows are removed before they can produce repeated `.KQ/.KS` 404s.
-- KR: because the app already has a hard KRW 10T equity rule, official KRX market cap is used to remove sub-10T equities before historical OHLC download rather than after it.
-- US: best-effort Yahoo bulk screener preselects equities above an 8T-KRW buffer, then intersects that set with the Nasdaq Trader common-equity universe. The exact 10T rule is still applied after prices are loaded. If the screener fails or looks incomplete, scanning automatically falls back to the full official universe.
-- Yahoo price download: batch 24→48, worker 4→8, and successful-request throttling occurs every four batches instead of every batch. Retry paths remain slower and use backoff.
-- QUICK: history window 1050→720 calendar days, reuses the latest FULL pooled-backtest grid, and reuses the FULL Quiz shard. Current setup scores still refresh from live/intraday prices.
-- FULL: rebuilds the pooled backtest grid and Quiz pool once after close.
-- Repeated Yahoo-missing symbols from an otherwise healthy FULL scan are quarantined for 20 hours; mass Yahoo failures are never quarantined.
-- GitHub Actions restores the prior `docs/data` snapshot from Actions cache before trying Firebase/GitHub Pages downloads, eliminating redundant hydration network work on normal repeated runs.
+## 테스트
 
-## Reliability changes
+```bash
+python -m unittest -v test_trend_forecast.py
+```
 
-- Korean equities use a best-effort KRX bulk market-cap snapshot before Yahoo per-symbol fallback.
-- Korean ETFs use Naver ETF market size as the bulk primary source.
-- Yahoo size lookup retries apply exponential backoff even when metadata returns `None` instead of raising.
-- US ETF whitelist cache no longer overwrites the full Nasdaq Trader ETF fallback cache.
-- USD/KRW records its source; FULL scans refuse the fixed 1400 fallback when live/recent cached FX is unavailable.
-- Category files are published atomically with `summary.json` replaced last so clients do not see references to incomplete detail files.
-- Every successful workflow uploads a 14-day `docs/data` snapshot artifact as a second copy of generated market data.
+필수 검증: 기울기 복원, 앵커 선택, 반감기 가중치 작동, 룩어헤드 차단, 실제 P0 레벨 출발, 가중치 4배 cap. 추가로 고속 백테스트 엔진과 프로덕션 score의 일치도 검증합니다.
 
-## Recommended first run
+## 연구 백테스트
 
-After deploying v11.9, run GitHub Actions with **`ALL + FULL` once**. This rebuilds all four market categories, the new score model, pooled backtest references, and all Quiz manifests/details.
+정상 FULL 스캔으로 `docs/data/*/summary.json`을 만든 뒤:
+
+```bash
+python backtest_forecast.py \
+  --download-from-summary docs/data \
+  --years 7 \
+  --sweep \
+  --report forecast_backtest_report.md
+```
+
+리포트는 시장조정 20D 수익률을 기준으로 방향 적중률/기준선/엣지, 시점별 edge t값, 횡단면 IC/ICIR, 분위수 스프레드, 10분위 단조성, 12-1/3M/no-decay/random 베이스라인, H×N×h 전반/후반 스윕을 생성합니다.
+
+GitHub Actions 수동 실행의 `run_forecast_backtest=true`도 같은 리포트를 artifact로 생성합니다.
+
+## 배포
+
+Firebase Hosting 변수:
+
+- `FIREBASE_PROJECT_ID=dtc-lab`
+- `FIREBASE_SITE_ID=dtc-lab`
+- Secret: `FIREBASE_SERVICE_ACCOUNT_JSON`
+
+일반 배포는 `.github/workflows/update-and-deploy.yml` 하나만 사용합니다.
