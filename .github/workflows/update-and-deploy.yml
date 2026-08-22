@@ -18,18 +18,13 @@ on:
           - US_GROUP
           - UI_ONLY
       scan_mode:
-        description: FULL/QUICK refresh Forecast PJT 1 and quiz data
+        description: FULL/QUICK refresh Supertrend opinions and quiz data
         required: true
         default: FULL
         type: choice
         options:
           - FULL
           - QUICK
-      run_forecast_backtest:
-        description: Run long-history Forecast PJT 1 research backtest/report (manual runs only; slower)
-        required: true
-        default: false
-        type: boolean
 
   schedule:
     # Korea intraday QUICK scans (current unfinished daily bar included)
@@ -39,7 +34,7 @@ on:
       timezone: "Asia/Seoul"
     - cron: "50 14 * * 1-5"
       timezone: "Asia/Seoul"
-    # Korea post-close FULL scan + pooled backtest / quiz refresh
+    # Korea post-close FULL scan + quiz refresh
     - cron: "10 16 * * 1-5"
       timezone: "Asia/Seoul"
 
@@ -50,7 +45,7 @@ on:
       timezone: "America/New_York"
     - cron: "30 15 * * 1-5"
       timezone: "America/New_York"
-    # US post-close FULL scan + pooled backtest / quiz refresh
+    # US post-close FULL scan + quiz refresh
     - cron: "20 16 * * 1-5"
       timezone: "America/New_York"
 
@@ -95,10 +90,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v12.0 Forecast PJT 1 scanner + retained support files..."
+          echo "Checking DTC v13.0 Supertrend scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' scanner.py || {
-            echo "::error::scanner.py is not DTC v12.0 Forecast PJT 1"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "13.0"' scanner.py || {
+            echo "::error::scanner.py is not DTC v13.0 Supertrend"
             exit 1
           }
 
@@ -122,7 +117,7 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: Forecast PJT 1 / v12.0"
+          echo "scanner.py: Supertrend / v13.0"
           echo "hydrate_data.py: compatible"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
@@ -168,8 +163,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Validate Forecast PJT 1 tests
-        run: python -m unittest -v test_trend_forecast.py
+      - name: Validate Supertrend tests
+        run: python -m unittest -v test_supertrend_strategy.py
 
       - name: Validate Firebase repository settings
         shell: bash
@@ -252,7 +247,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v12.0 Forecast PJT 1 FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v13.0 Supertrend FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -260,26 +255,6 @@ jobs:
       - name: Skip market scan for UI-only deploy
         if: steps.market.outputs.market == 'UI_ONLY'
         run: echo "UI_ONLY selected — existing live market snapshots will be redeployed with the new UI."
-
-      - name: Run Forecast PJT 1 long-history backtest
-        if: github.event_name == 'workflow_dispatch' && inputs.run_forecast_backtest == true && steps.market.outputs.market != 'UI_ONLY'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python backtest_forecast.py \
-            --download-from-summary docs/data \
-            --years 7 \
-            --sweep \
-            --report forecast_backtest_report.md
-
-      - name: Upload Forecast PJT 1 backtest report
-        if: github.event_name == 'workflow_dispatch' && inputs.run_forecast_backtest == true && steps.market.outputs.market != 'UI_ONLY'
-        uses: actions/upload-artifact@v7
-        with:
-          name: forecast-pjt1-backtest-${{ github.run_id }}
-          path: forecast_backtest_report.md
-          retention-days: 30
-          if-no-files-found: error
 
       - name: Remove scanner-only root caches
         run: rm -f docs/data/universe_kr.json docs/data/universe_kr_etf.json docs/data/universe_us.json docs/data/universe_us_etf.json docs/data/universe_us_etf_selected.json
@@ -351,14 +326,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260822-v12_2_news_chart_regression",
+            "ui_build": "20260822-v13_0_supertrend",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260822-v12_2_news_chart_regression"
+          echo "UI build: 20260822-v13_0_supertrend"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint
