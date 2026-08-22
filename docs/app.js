@@ -38,7 +38,7 @@ const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr', 'kr-etf', 'us', 'us-etf'];
 
 const OPINION_ORDER = { BUY_S:0, BUY_A:1, BUY_B:2, BUY_C:3, HOLD:4, SELL:5 };
-const OPINION_TEXT = { BUY_S:'Buy S', BUY_A:'Buy A', BUY_B:'Buy B', BUY_C:'Buy C', HOLD:'Hold', SELL:'매도' };
+const OPINION_TEXT = { BUY_S:'매수S', BUY_A:'매수A', BUY_B:'매수B', BUY_C:'매수C', HOLD:'Hold', SELL:'매도' };
 
 const state = {
   mode: 'supertrend',
@@ -47,6 +47,8 @@ const state = {
   query: '',
   marketSizeMin: { equity: DEFAULT_EQUITY_SIZE_MIN, etf: DEFAULT_ETF_SIZE_MIN },
   filtered: [],
+  sellItems: [],
+  sortMode: 'default',
   detailCache: new Map(),
   cardObserver: null,
   quiz: { pool:null, detailCache:new Map(), question:null, answered:false, loading:false, number:0 },
@@ -109,6 +111,11 @@ function money(v, currency) {
     ? `₩${Math.round(Number(v)).toLocaleString('ko-KR')}`
     : `$${Number(v).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`;
 }
+function numberOrNaN(v) {
+  if (v === null || v === undefined || v === '') return Number.NaN;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
 function marketSize(v) {
   if (v == null || !Number.isFinite(Number(v))) return '—';
   const n = Number(v);
@@ -124,7 +131,7 @@ function changeText(v) {
   return '<span class="flat">0.0%</span>';
 }
 function marketSizeLabel(stock) { return stock?.market_size_basis === 'total_assets' ? '순자산' : '시총'; }
-function opinionKey(stock) { return String(stock?.opinion || stock?.supertrend?.opinion || 'HOLD'); }
+function opinionKey(stock) { return String(stock?.opinion_code || stock?.supertrend?.opinion_code || 'HOLD'); }
 function opinionText(stock) { const k=opinionKey(stock); return OPINION_TEXT[k] || k; }
 function opinionClass(stock) { return `opinion-${opinionKey(stock).toLowerCase().replace('_','-')}`; }
 
@@ -147,37 +154,81 @@ async function ensureDetail(stock, force=false) {
   return detail;
 }
 
+function numericSortValue(stock, key) {
+  const raw = stock?.[key] ?? stock?.supertrend?.[key];
+  if (raw === null || raw === undefined || raw === '') return Number.POSITIVE_INFINITY;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : Number.POSITIVE_INFINITY;
+}
+function defaultOpinionCompare(a,b) {
+  const la = Number(a.rank_level ?? OPINION_ORDER[opinionKey(a)] ?? 4);
+  const lb = Number(b.rank_level ?? OPINION_ORDER[opinionKey(b)] ?? 4);
+  if (la !== lb) return la-lb;
+  if (la === OPINION_ORDER.SELL) {
+    const na = a.new_sell ? 0 : 1, nb = b.new_sell ? 0 : 1;
+    if (na !== nb) return na-nb;
+  }
+  const ca = Number(a.market_size_krw), cb = Number(b.market_size_krw);
+  if (Number.isFinite(ca) || Number.isFinite(cb)) return (Number.isFinite(cb)?cb:-1)-(Number.isFinite(ca)?ca:-1);
+  return String(a.ticker||'').localeCompare(String(b.ticker||''));
+}
+function activeSortCompare(a,b) {
+  if (state.sortMode === 'r_pct') {
+    const d = numericSortValue(a,'r_pct') - numericSortValue(b,'r_pct');
+    return d || defaultOpinionCompare(a,b);
+  }
+  if (state.sortMode === 'stop_pct') {
+    const d = numericSortValue(a,'stop_pct') - numericSortValue(b,'stop_pct');
+    return d || defaultOpinionCompare(a,b);
+  }
+  if (state.sortMode === 'bars_since_gate') {
+    const d = numericSortValue(a,'bars_since_gate') - numericSortValue(b,'bars_since_gate');
+    return d || defaultOpinionCompare(a,b);
+  }
+  return defaultOpinionCompare(a,b);
+}
 function filterItems() {
   const items = currentData()?.items || [];
   const q = state.query.trim().toLowerCase();
   const capMin = currentSizeMin();
   const capMatched = capMin <= 0 ? items : items.filter((s) => Number.isFinite(Number(s.market_size_krw)) && Number(s.market_size_krw) >= capMin);
   const candidates = q ? capMatched.filter((s) => `${s.name} ${s.symbol} ${s.ticker} ${s.sector || ''}`.toLowerCase().includes(q)) : capMatched;
-  const sorted = [...candidates].sort((a,b) => {
-    const la = Number(a.rank_level ?? OPINION_ORDER[opinionKey(a)] ?? 4);
-    const lb = Number(b.rank_level ?? OPINION_ORDER[opinionKey(b)] ?? 4);
-    if (la !== lb) return la-lb;
-    const ca = Number(a.market_size_krw), cb=Number(b.market_size_krw);
-    if (Number.isFinite(ca) || Number.isFinite(cb)) return (Number.isFinite(cb)?cb:-1)-(Number.isFinite(ca)?ca:-1);
-    return String(a.ticker||'').localeCompare(String(b.ticker||''));
+  const sorted = [...candidates].sort(activeSortCompare);
+  const nonSell = sorted.filter((s) => opinionKey(s) !== 'SELL');
+  const sells = sorted.filter((s) => opinionKey(s) === 'SELL').sort((a,b) => {
+    const na=a.new_sell?0:1, nb=b.new_sell?0:1;
+    if (na !== nb) return na-nb;
+    return activeSortCompare(a,b);
   });
-  state.filtered = q ? sorted : sorted.slice(0, DEFAULT_TOP_N);
-  return { totalCapMatched: capMatched.length };
+  state.filtered = q ? nonSell : nonSell.slice(0, DEFAULT_TOP_N);
+  state.sellItems = sells;
+  return { totalCapMatched: capMatched.length, nonSellCount: nonSell.length, sellCount: sells.length };
 }
 
+function pct(v, digits=2) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n=Number(v); return Number.isFinite(n) ? `${n>=0?'+':''}${n.toFixed(digits)}%` : '—';
+}
 function strategyLines(stock) {
   const st = stock?.supertrend || {};
-  const p0=Number(st.p0), p1=Number(st.p1), dist=Number(st.distance_from_p0_pct);
+  const p0Raw=st.p0 ?? stock.p0, p1Raw=st.p1 ?? stock.p1;
+  const p0=numberOrNaN(p0Raw), p1=numberOrNaN(p1Raw), r=numberOrNaN(st.r_pct ?? stock.r_pct);
+  const stop=numberOrNaN(st.stop_pct ?? stock.stop_pct), atr=numberOrNaN(st.atr_pct ?? stock.atr_pct);
+  const bars=numberOrNaN(st.bars_since_gate ?? stock.bars_since_gate);
   const dir=st.direction === 'UP' ? '상승' : st.direction === 'DOWN' ? '하락' : '—';
+  const reason=String(st.hold_reason ?? stock.hold_reason ?? '');
+  const reasonText={BELOW_GATE:'게이트 미통과',OVEREXTENDED:'20% 이상 진행',NO_FLIP:'전환점 없음'}[reason] || '';
   return `<div class="trade-signal-box">
-    <div class="trade-signal-row"><span class="signal-title breakout">ST 10·2</span><span>현재 신호 <b>${dir}</b></span><i>·</i><span>P1 <b>${money(p1, stock.currency)}</b></span></div>
-    <div class="trade-signal-row"><span class="signal-title pullback">P0</span><span>최근 하락→상승 ST <b>${money(p0, stock.currency)}</b></span><i>·</i><span>현재 종가 거리 <b>${Number.isFinite(dist)?dist.toFixed(2)+'%':'—'}</b></span></div>
+    <div class="trade-signal-row"><span class="signal-title breakout">ST 10·2</span><span>현재 <b>${dir}</b></span><i>·</i><span>P1 <b>${money(p1Raw, stock.currency)}</b></span>${stock.new_sell?'<span class="new-sell-tag">신규매도</span>':''}</div>
+    <div class="trade-signal-row"><span class="signal-title pullback">P0</span><span>전환 직전 ST <b>${money(p0Raw, stock.currency)}</b></span><i>·</i><span>r <b>${Number.isFinite(r)?r.toFixed(2)+'%':'—'}</b></span>${reasonText?`<i>·</i><span>${reasonText}</span>`:''}</div>
+    <div class="trade-signal-row"><span class="signal-title risk">RISK</span><span>ST 거리 <b>${Number.isFinite(stop)?stop.toFixed(2)+'%':'—'}</b></span><i>·</i><span>ATR <b>${Number.isFinite(atr)?atr.toFixed(2)+'%':'—'}</b></span><i>·</i><span>Gate +<b>${Number.isFinite(bars)?Math.max(0,Math.trunc(bars)):'—'}</b>봉</span></div>
   </div>`;
 }
 function backtestLine(stock) {
   const bt=stock?.supertrend?.backtest || {};
-  const avg=Number(bt.avg_return_pct), trades=Number(bt.trades);
-  return `2Y Back test: Buy S→매도 평균 <b>${Number.isFinite(avg)?`${avg>=0?'+':''}${avg.toFixed(2)}%`:'—'}</b> <small>· 완료 ${Number.isFinite(trades)?trades:0}회</small>`;
+  const comp=bt.completed || {};
+  const avg=numberOrNaN(comp.avg_return_pct), trades=numberOrNaN(comp.trades), win=numberOrNaN(comp.win_rate_pct);
+  return `2Y Back test: S→매도 평균 <b>${Number.isFinite(avg)?pct(avg):'—'}</b> <small>· 완료 ${Number.isFinite(trades)?trades:0}회 · 승률 ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</small>`;
 }
 function stockCard(stock) {
   const ticker=stock.symbol || stock.ticker || '—';
@@ -191,15 +242,20 @@ function stockCard(stock) {
       ${strategyLines(stock)}
       <div class="backtest-one-line">${backtestLine(stock)}</div>
     </section>
-    <section class="stock-chart-pane"><div class="inline-chart" data-chart-box><div class="chart-loading">6M HEIKIN ASHI + SUPERTREND</div></div></section>
+    <section class="stock-chart-pane"><div class="inline-chart" data-chart-box><div class="chart-loading">6M CANDLE + SUPERTREND</div></div></section>
   </article>`;
 }
 function renderList() {
-  const { totalCapMatched } = filterItems();
-  $('#stockList').innerHTML = state.filtered.length ? state.filtered.map(stockCard).join('') : '<div class="empty-state">선택한 조건의 검색 결과가 없습니다.</div>';
-  $('#resultCount').textContent = state.query ? `${state.filtered.length.toLocaleString()}개` : `TOP ${Math.min(DEFAULT_TOP_N,totalCapMatched).toLocaleString()} / ${totalCapMatched.toLocaleString()}개`;
+  const { totalCapMatched, nonSellCount, sellCount } = filterItems();
+  const mainHtml = state.filtered.map(stockCard).join('');
+  const sellHtml = sellCount ? `<details class="sell-group" ${state.query?'open':''}><summary><span>매도</span><b>${sellCount.toLocaleString()}개</b><small>최근 5봉 신규매도 우선 · 기본 접힘</small></summary><div class="sell-group-list">${state.sellItems.map(stockCard).join('')}</div></details>` : '';
+  $('#stockList').innerHTML = (mainHtml || sellHtml) ? `${mainHtml}${sellHtml}` : '<div class="empty-state">선택한 조건의 검색 결과가 없습니다.</div>';
+  $('#resultCount').textContent = state.query
+    ? `${(state.filtered.length+sellCount).toLocaleString()}개`
+    : `TOP ${Math.min(DEFAULT_TOP_N,nonSellCount).toLocaleString()} / ${nonSellCount.toLocaleString()} · 매도 ${sellCount.toLocaleString()}`;
   activateLazyCards();
 }
+
 function renderMeta() {
   const data=currentData();
   if(!data){ $('#marketDate').textContent='—'; $('#coverage').textContent='—'; $('#scanStatus').textContent='—'; return; }
@@ -213,18 +269,24 @@ function drawSupertrendChart(el, detail) {
   const rows=detail?.supertrend?.chart || [];
   if(!el?.isConnected) return;
   if(rows.length<15){ el.innerHTML='<div class="chart-empty">Supertrend 차트 데이터 부족</div>'; return; }
-  const vals=rows.flatMap(r=>[Number(r.low),Number(r.high),Number(r.supertrend)]).filter(Number.isFinite);
+  const vals=rows.flatMap(r=>[numberOrNaN(r.low),numberOrNaN(r.high),numberOrNaN(r.supertrend),numberOrNaN(r.p0_line)]).filter(Number.isFinite);
   let lo=Math.min(...vals), hi=Math.max(...vals); if(!(hi>lo)){lo*=.99;hi*=1.01;} const ext=(hi-lo)*.07||1;lo-=ext;hi+=ext;
   const W=700,H=250,pad={l:12,r:58,t:14,b:24},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length;
   const X=i=>pad.l+(i+.5)*step, Y=v=>pad.t+(hi-v)*plotH/(hi-lo);
   let grid=''; for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=detail.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+6}" y="${y+4}" class="price-axis">${label}</text>`;}
   const bw=Math.max(1.5,Math.min(4.8,step*.58)); let candles='';
-  rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,k=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${k}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${k}" rx=".4"/>`;});
+  rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,k=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${k}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${k}" rx=".4"><title>${escapeHtml(r.date)} O ${o} H ${h} L ${l} C ${c}</title></rect>`;});
   let upPath='',downPath='',upDraw=false,downDraw=false;
-  rows.forEach((r,i)=>{const v=Number(r.supertrend),d=Number(r.direction);if(!Number.isFinite(v)){upDraw=downDraw=false;return;}if(d>0){upPath+=`${upDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;upDraw=true;downDraw=false;}else{downPath+=`${downDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;downDraw=true;upDraw=false;}});
+  rows.forEach((r,i)=>{const v=numberOrNaN(r.supertrend),d=numberOrNaN(r.direction);if(!Number.isFinite(v)){upDraw=downDraw=false;return;}if(d>0){upPath+=`${upDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;upDraw=true;downDraw=false;}else{downPath+=`${downDraw?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;downDraw=true;upDraw=false;}});
+  const p0Start=rows.findIndex(r=>Number.isFinite(numberOrNaN(r.p0_line)));
+  let p0Svg='';
+  if(p0Start>=0){const p0=numberOrNaN(rows[p0Start].p0_line),y=Y(p0);p0Svg=`<line x1="${X(p0Start)}" x2="${X(rows.length-1)}" y1="${y}" y2="${y}" class="p0-guide"><title>P0 ${p0}</title></line><text x="${X(p0Start)+4}" y="${y-5}" class="p0-label">P0</text>`;}
+  let markerSvg='';
+  rows.forEach((r,i)=>{const x=X(i),h=numberOrNaN(r.high),stv=numberOrNaN(r.supertrend);if(r.is_flip&&Number.isFinite(h)){const y=Y(h)-7;markerSvg+=`<path d="M ${x-4} ${y-5} L ${x+4} ${y-5} L ${x} ${y+2} Z" class="flip-marker"><title>상승 전환 ${escapeHtml(r.date)}</title></path>`;}if(r.is_gate&&Number.isFinite(stv)){const y=Y(stv);markerSvg+=`<circle cx="${x}" cy="${y}" r="4.2" class="gate-marker"><title>게이트 통과 ${escapeHtml(r.date)}</title></circle>`;}});
   const dates=`<text x="${X(0)}" y="${H-6}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-6}" text-anchor="end" class="date-axis">${escapeHtml(rows[rows.length-1].date.slice(5))}</text>`;
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="6개월 하이킨아시와 Supertrend 10,2">${grid}${candles}<path d="${upPath}" class="supertrend-up-line"/><path d="${downPath}" class="supertrend-down-line"/>${dates}</svg><div class="chart-legend"><span>HEIKIN ASHI</span><span>SUPERTREND 10·2</span></div>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="6개월 일반 일봉과 Supertrend 10,2">${grid}${candles}${p0Svg}<path d="${upPath}" class="supertrend-up-line"/><path d="${downPath}" class="supertrend-down-line"/>${markerSvg}${dates}</svg><div class="chart-legend"><span>일반 CANDLE · 상승 빨강 / 하락 파랑</span><span>ST 상승 빨강 / 하락 파랑</span><span>P0 점선</span></div>`;
 }
+
 function drawChart(el, detail) { drawSupertrendChart(el, detail); }
 
 async function hydrateCard(card) {
@@ -240,16 +302,20 @@ function activateLazyCards() {
 async function openScoreDetail(stock) {
   const modal=$('#scoreModal'),body=$('#scoreModalBody'); $('#scoreModalTitle').textContent=`${stock.name} (${stock.symbol||stock.ticker}) · ${opinionText(stock)}`;modal.hidden=false;document.body.classList.add('modal-open');body.innerHTML='<div class="modal-loading">Supertrend 상세를 불러오는 중…</div>';
   let detail=stock;try{detail=await ensureDetail(stock);}catch(_){ }
-  const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{};
-  const avg=Number(bt.avg_return_pct),win=Number(bt.win_rate_pct),dist=Number(st.distance_from_p0_pct);
-  const trades=(bt.recent_trades||[]).map(t=>`<div class="score-row"><div><b>${escapeHtml(t.buy_date)} → ${escapeHtml(t.sell_date)}</b></div><strong>${Number(t.return_pct)>=0?'+':''}${Number(t.return_pct).toFixed(2)}%</strong></div>`).join('');
-  body.innerHTML=`<div class="score-total"><span>SUPERTREND 10·2</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
-    <div class="score-row"><div><b>P0</b><small>최근 하락→상승 전환 Supertrend 가격</small></div><strong>${money(Number(st.p0),stock.currency)}</strong></div>
-    <div class="score-row"><div><b>P1</b><small>현재 Supertrend 가격</small></div><strong>${money(Number(st.p1),stock.currency)}</strong></div>
-    <div class="score-row"><div><b>현재 종가 - P0</b></div><strong>${Number.isFinite(dist)?dist.toFixed(2)+'%':'—'}</strong></div>
-    <div class="score-row"><div><b>2Y 평균 수익률</b><small>Buy S 진입 → 첫 매도 신호 청산</small></div><strong>${Number.isFinite(avg)?`${avg>=0?'+':''}${avg.toFixed(2)}%`:'—'}</strong></div>
-    <div class="score-row"><div><b>완료 거래 / 승률</b></div><strong>${Number(bt.trades||0)}회 · ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</strong></div>${trades}</div>`;
+  const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{},comp=bt.completed||{},inc=bt.including_open||{};
+  const avg=numberOrNaN(comp.avg_return_pct),win=numberOrNaN(comp.win_rate_pct),r=numberOrNaN(st.r_pct);
+  const trades=(bt.recent_trades||[]).map(t=>`<div class="score-row"><div><b>${escapeHtml(t.buy_date)} → ${escapeHtml(t.sell_date)}</b></div><strong>${pct(t.return_pct)}</strong></div>`).join('');
+  body.innerHTML=`<div class="score-total"><span>SUPERTREND 10·2 · WILDER RMA</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
+    <div class="score-row"><div><b>P0</b><small>하락→상승 전환 직전 봉의 ST = ST[flip−1]</small></div><strong>${money(st.p0,stock.currency)}</strong></div>
+    <div class="score-row"><div><b>P1</b><small>현재 Supertrend 가격</small></div><strong>${money(st.p1,stock.currency)}</strong></div>
+    <div class="score-row"><div><b>r</b><small>(현재 종가 − P0) / P0 · 등급의 유일한 근거</small></div><strong>${Number.isFinite(r)?r.toFixed(2)+'%':'—'}</strong></div>
+    <div class="score-row"><div><b>ST 손절폭</b><small>(Close − P1) / Close</small></div><strong>${pct(st.stop_pct)}</strong></div>
+    <div class="score-row"><div><b>ATR% / g_ATR / d_ATR</b><small>진단 전용 · 의견 판정에 미사용</small></div><strong>${pct(st.atr_pct)} · ${Number.isFinite(numberOrNaN(st.g_atr))?numberOrNaN(st.g_atr).toFixed(2):'—'} · ${Number.isFinite(numberOrNaN(st.d_atr))?numberOrNaN(st.d_atr).toFixed(2):'—'}</strong></div>
+    <div class="score-row"><div><b>레그 / 게이트 경과</b></div><strong>${st.bars_since_flip??'—'}봉 · ${st.bars_since_gate??'—'}봉</strong></div>
+    <div class="score-row"><div><b>2Y 완료거래 평균 / 승률</b><small>S 최초 신호 다음 시가 → 매도전환 다음 시가</small></div><strong>${Number.isFinite(avg)?pct(avg):'—'} · ${Number.isFinite(win)?win.toFixed(1)+'%':'—'}</strong></div>
+    <div class="score-row"><div><b>완료 / 미청산 포함</b></div><strong>${Number(comp.trades||0)}회 · ${Number(inc.trades||0)}회</strong></div>${trades}</div>`;
 }
+
 function closeModal(){ $('#scoreModal').hidden=true;document.body.classList.remove('modal-open'); }
 
 async function switchCategory(category, force=false) {
@@ -818,6 +884,11 @@ $('#capFilterTabs').addEventListener('click', (e) => {
   renderList();
 });
 
+$('#sortMode')?.addEventListener('change', (e) => {
+  state.sortMode = ['default','r_pct','stop_pct','bars_since_gate'].includes(e.target.value) ? e.target.value : 'default';
+  renderList();
+});
+
 let searchTimer;
 $('#searchInput').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
@@ -866,6 +937,10 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#scoreModal').hidden) closeModal();
 });
+
+document.addEventListener('toggle', (e) => {
+  if (e.target?.classList?.contains('sell-group') && e.target.open) requestAnimationFrame(() => activateLazyCards());
+}, true);
 
 window.addEventListener('resize', () => {
   $$('.stock-card[data-hydrated="1"]').forEach(async (card) => {

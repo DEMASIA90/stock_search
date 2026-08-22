@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "13.0"
+MORNING_INVEST_COMPONENT_VERSION = "13.2"
 
 import numpy as np
 import pandas as pd
@@ -31,24 +31,23 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v13.0 · Supertrend Strategy
+# Dongtan Trading Center (DTC) scanner v13.2 · Supertrend Strategy
 # -----------------------------------------------------------------------------
 # Opinion engine: Supertrend(period=10, multiplier=2) only.
-#   P0 = Supertrend value at the latest DOWN -> UP transition
+#   P0 = Supertrend value on the bar immediately BEFORE the latest DOWN -> UP transition
 #   P1 = current Supertrend value
 #   SELL = current Supertrend direction DOWN
 #   BUY  = current direction UP and P1 >= P0, graded by current Close vs P0
 #          S <2%, A <5%, B <10%, C <20%; otherwise HOLD.
 # Ranking: Buy S -> Buy A -> Buy B -> Buy C -> Hold -> Sell, then market size.
-# Backtest: during the last ~2 trading years, enter first Buy S while flat and
-# exit at first Sell; report the average return of completed trades.
-# Chart: ~6 months Heikin-Ashi candles + Supertrend(10,2).
+# Backtest: 2Y, first Buy S per rising leg, next-open entry/exit, costs + grade diagnostics.
+# Chart: ~6 months adjusted real OHLC candles + Supertrend(10,2).
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1120
-# QUICK does not rebuild the historical model when a recent FULL model exists,
-# so only enough history for the current 400-session setup score is required.
-QUICK_HISTORY_CALENDAR_DAYS = 820
+# Both FULL and QUICK need >=604 valid sessions: 2Y backtest (~504) + 100-bar
+# post-ATR warm-up discard. 980 calendar days leaves a holiday buffer.
+QUICK_HISTORY_CALENDAR_DAYS = 980
 BATCH_SIZE = 48
 RETRY_BATCH_SIZE = 8
 DOWNLOAD_THREADS = 8
@@ -70,7 +69,7 @@ NAVER_HEADERS = {
 }
 NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 100M units (억원)
 
-MIN_TRADING_DAYS = 63  # enough for a current Supertrend opinion; 2Y backtest may have fewer completed trades
+MIN_TRADING_DAYS = 604  # required by SuperTrend spec: ~504 test bars + 100 discarded warm-up bars
 DISPLAY_META_TOP_N = 100
 MIN_PRICE_KRW = 1_000.0
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
@@ -157,6 +156,13 @@ def _numeric_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     if "Adj Close" in out.columns:
         out["Adj Close"] = pd.to_numeric(out["Adj Close"], errors="coerce")
+        # Defensive fallback for any non-auto-adjusted source: scale O/H/L/C by
+        # Adj Close / Close so splits/dividends cannot distort historical ST.
+        raw_close = out["Close"].replace(0, np.nan)
+        factor = (out["Adj Close"] / raw_close).replace([np.inf, -np.inf], np.nan)
+        if factor.notna().any():
+            for col in ("Open", "High", "Low", "Close"):
+                out[col] = out[col] * factor
     if "Volume" in out.columns:
         out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
     else:
@@ -769,7 +775,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
     if frame.empty:
         return None, "no_price"
     if len(frame) < MIN_TRADING_DAYS:
-        return None, "listed_lt_63d"
+        return None, "history_lt_604"
 
     pos = len(frame) - 1
     close = finite(frame["Close"].iloc[pos])
@@ -790,7 +796,8 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
             return None, "market_size_lt_10t"
 
     # The opinion engine intentionally uses one indicator only: Supertrend(10, 2).
-    st_data = analyze_supertrend(frame, period=10, multiplier=2.0)
+    st_data = analyze_supertrend(frame, period=10, multiplier=2.0, market=stock.category)
+    st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
 
@@ -806,11 +813,26 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "day_change_pct": clean(day_change, 2),
         "rank": None,
         "supertrend": st_data,
-        "opinion": st_data.get("opinion", "HOLD"),
+        "_supertrend_research": st_research,
+        "opinion": st_data.get("opinion", "Hold"),
+        "opinion_code": st_data.get("opinion_code", "HOLD"),
         "opinion_label": st_data.get("opinion_label", "Hold"),
+        "hold_reason": st_data.get("hold_reason"),
+        "r_pct": clean(st_data.get("r_pct"), 4),
+        "p0": clean(st_data.get("p0")),
+        "p1": clean(st_data.get("p1")),
+        "stop_pct": clean(st_data.get("stop_pct"), 4),
+        "atr_pct": clean(st_data.get("atr_pct"), 4),
+        "g_atr": clean(st_data.get("g_atr"), 4),
+        "d_atr": clean(st_data.get("d_atr"), 4),
+        "bars_since_flip": st_data.get("bars_since_flip"),
+        "bars_since_gate": st_data.get("bars_since_gate"),
+        "r_at_gate": clean(st_data.get("r_at_gate"), 4),
+        "new_sell": bool(st_data.get("new_sell", False)),
         "rank_level": int(st_data.get("rank_level", OPINION_ORDER["HOLD"])),
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
+        "market_cap": clean(market_size_krw, 0),
         "market_size_basis": market_size_basis,
         "metrics": {
             "market_size_native": clean(market_size_native, 0),
@@ -846,7 +868,7 @@ def download_batch(tickers: list[str], scan_mode: str = "FULL", timeout=40) -> p
         end=end.isoformat(),
         interval="1d",
         group_by="ticker",
-        auto_adjust=False,
+        auto_adjust=True,
         actions=False,
         progress=False,
         threads=min(DOWNLOAD_THREADS, max(1, len(tickers))),
@@ -897,12 +919,26 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "close": item["close"],
         "day_change_pct": item["day_change_pct"],
         "rank": item["rank"],
-        "opinion": item.get("opinion", "HOLD"),
+        "opinion": item.get("opinion", "Hold"),
+        "opinion_code": item.get("opinion_code", "HOLD"),
         "opinion_label": item.get("opinion_label", "Hold"),
+        "hold_reason": item.get("hold_reason"),
+        "r_pct": item.get("r_pct"),
+        "p0": item.get("p0"),
+        "p1": item.get("p1"),
+        "stop_pct": item.get("stop_pct"),
+        "atr_pct": item.get("atr_pct"),
+        "g_atr": item.get("g_atr"),
+        "d_atr": item.get("d_atr"),
+        "bars_since_flip": item.get("bars_since_flip"),
+        "bars_since_gate": item.get("bars_since_gate"),
+        "r_at_gate": item.get("r_at_gate"),
+        "new_sell": bool(item.get("new_sell", False)),
         "rank_level": item.get("rank_level", OPINION_ORDER["HOLD"]),
         "supertrend": st,
         "sector": item.get("sector") or "—",
         "market_size_krw": item.get("market_size_krw"),
+        "market_cap": item.get("market_cap", item.get("market_size_krw")),
         "market_size_basis": item.get("market_size_basis"),
         "detail_path": detail_path,
     }
@@ -920,6 +956,315 @@ def _atomic_copy(src: Path, dst: Path) -> None:
     tmp = dst.with_name(f".{dst.name}.tmp-{os.getpid()}-{random.randint(1000, 9999)}")
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
+
+
+def _aggregate_trade_stats(trades: list[dict]) -> dict:
+    returns = np.array([finite(t.get("return_pct")) for t in trades], dtype=float)
+    returns = returns[np.isfinite(returns)]
+    holds = np.array([finite(t.get("holding_bars")) for t in trades], dtype=float)
+    holds = holds[np.isfinite(holds)]
+    if not len(returns):
+        return {
+            "trades": 0,
+            "win_rate_pct": None,
+            "avg_return_pct": None,
+            "median_return_pct": None,
+            "avg_gain_pct": None,
+            "avg_loss_pct": None,
+            "payoff_ratio": None,
+            "avg_holding_bars": None,
+            "max_gain_pct": None,
+            "max_loss_pct": None,
+        }
+    gains = returns[returns > 0]
+    losses = returns[returns < 0]
+    avg_gain = float(np.mean(gains)) if len(gains) else None
+    avg_loss = float(np.mean(losses)) if len(losses) else None
+    payoff = avg_gain / abs(avg_loss) if avg_gain is not None and avg_loss not in (None, 0.0) else None
+    return {
+        "trades": int(len(returns)),
+        "win_rate_pct": clean(np.mean(returns > 0) * 100.0, 2),
+        "avg_return_pct": clean(np.mean(returns), 3),
+        "median_return_pct": clean(np.median(returns), 3),
+        "avg_gain_pct": clean(avg_gain, 3),
+        "avg_loss_pct": clean(avg_loss, 3),
+        "payoff_ratio": clean(payoff, 3),
+        "avg_holding_bars": clean(np.mean(holds), 2) if len(holds) else None,
+        "max_gain_pct": clean(np.max(returns), 3),
+        "max_loss_pct": clean(np.min(returns), 3),
+    }
+
+
+def _distribution_stats(values) -> dict:
+    arr = np.array([finite(x) for x in values], dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if not len(arr):
+        return {"count": 0, "mean": None, "median": None, "p25": None, "p75": None}
+    return {
+        "count": int(len(arr)),
+        "mean": clean(np.mean(arr), 4),
+        "median": clean(np.median(arr), 4),
+        "p25": clean(np.percentile(arr, 25), 4),
+        "p75": clean(np.percentile(arr, 75), 4),
+    }
+
+
+def _grade_validation_table(samples: list[dict]) -> list[dict]:
+    order = ["BUY_S", "BUY_A", "BUY_B", "BUY_C", "HOLD_OVEREXTENDED"]
+    out = []
+    for grade in order:
+        rows = [r for r in samples if r.get("grade") == grade]
+        legs = {(str(r.get("ticker")), int(r.get("leg_id"))) for r in rows if r.get("leg_id") is not None}
+        row = {"grade": grade, "samples": len(rows), "legs": len(legs)}
+        for key in ("fwd_5d_pct", "fwd_20d_pct", "fwd_60d_pct", "to_sell_pct"):
+            vals = [finite(r.get(key)) for r in rows]
+            vals = [v for v in vals if np.isfinite(v)]
+            row[f"{key}_n"] = len(vals)
+            row[f"{key}_avg"] = clean(np.mean(vals), 3) if vals else None
+            row[f"{key}_median"] = clean(np.median(vals), 3) if vals else None
+        out.append(row)
+    return out
+
+
+def _gate_histogram(gate_events: list[dict]) -> list[dict]:
+    # Fine enough to diagnose whether S (<2%) is structurally rare while still
+    # keeping the JSON/report compact.
+    edges = [0, 1, 2, 3, 5, 10, 20, 40, float("inf")]
+    labels = ["0~1", "1~2", "2~3", "3~5", "5~10", "10~20", "20~40", "40+"]
+    counts = [0] * len(labels)
+    for event in gate_events:
+        v = finite(event.get("r_at_gate"))
+        if not np.isfinite(v):
+            continue
+        for i in range(len(labels)):
+            if edges[i] <= v < edges[i + 1]:
+                counts[i] += 1
+                break
+    total = sum(counts)
+    return [
+        {"bin_pct": labels[i], "count": counts[i], "share_pct": clean(counts[i] / total * 100.0, 2) if total else None}
+        for i in range(len(labels))
+    ]
+
+
+def _daily_opinion_distribution(items: list[dict]) -> list[dict]:
+    by_date: dict[str, Counter] = {}
+    for item in items:
+        research = item.get("_supertrend_research") or {}
+        for row in research.get("daily_opinions") or []:
+            date = str(row.get("date") or "")
+            code = str(row.get("opinion_code") or "HOLD")
+            if not date:
+                continue
+            by_date.setdefault(date, Counter())[code] += 1
+    rows = []
+    for date in sorted(by_date)[-60:]:
+        c = by_date[date]
+        rows.append({
+            "date": date,
+            "BUY_S": int(c["BUY_S"]),
+            "BUY_A": int(c["BUY_A"]),
+            "BUY_B": int(c["BUY_B"]),
+            "BUY_C": int(c["BUY_C"]),
+            "HOLD": int(c["HOLD"]),
+            "SELL": int(c["SELL"]),
+            "total": int(sum(c.values())),
+        })
+    return rows
+
+
+_BENCHMARK_CACHE: dict[str, dict] = {}
+
+
+def _index_benchmark(category: str) -> dict:
+    group = "KR" if category.startswith("KR") else "US"
+    if group in _BENCHMARK_CACHE:
+        return _BENCHMARK_CACHE[group]
+    ticker = "^KS200" if group == "KR" else "^GSPC"
+    label = "KOSPI200" if group == "KR" else "S&P500"
+    try:
+        end = datetime.now(timezone.utc).date() + timedelta(days=1)
+        start = end - timedelta(days=760)
+        raw = yf.download(
+            ticker,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            interval="1d",
+            auto_adjust=True,
+            actions=False,
+            progress=False,
+            threads=False,
+            timeout=30,
+        )
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw = raw.xs(ticker, axis=1, level=-1) if ticker in set(map(str, raw.columns.get_level_values(-1))) else raw.droplevel(-1, axis=1)
+        frame = _numeric_ohlc(raw)
+        if len(frame) >= 2:
+            last_ts = pd.Timestamp(frame.index[-1])
+            cutoff = last_ts - pd.DateOffset(years=2)
+            w = frame.loc[frame.index >= cutoff]
+            if len(w) >= 2:
+                ret = (finite(w["Close"].iloc[-1]) / finite(w["Close"].iloc[0]) - 1.0) * 100.0
+                result = {"ticker": ticker, "label": label, "return_pct": clean(ret, 3), "available": True}
+                _BENCHMARK_CACHE[group] = result
+                return result
+    except Exception as exc:
+        print(f"[{category}] benchmark {ticker} unavailable: {type(exc).__name__}: {exc}")
+    result = {"ticker": ticker, "label": label, "return_pct": None, "available": False}
+    _BENCHMARK_CACHE[group] = result
+    return result
+
+
+def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
+    completed_trades: list[dict] = []
+    open_trades: list[dict] = []
+    grade_samples: list[dict] = []
+    first_grade_samples: list[dict] = []
+    gate_events: list[dict] = []
+    buy_hold = []
+
+    for item in items:
+        ticker = item.get("ticker")
+        st = item.get("supertrend") or {}
+        bt = st.get("backtest") or {}
+        bh = finite(bt.get("buy_hold_return_pct"))
+        if np.isfinite(bh):
+            buy_hold.append(bh)
+        research = item.get("_supertrend_research") or {}
+        for t in research.get("trades") or []:
+            completed_trades.append({**t, "ticker": ticker})
+        for t in research.get("open_trades") or []:
+            open_trades.append({**t, "ticker": ticker})
+        for row in research.get("grade_samples") or []:
+            grade_samples.append({**row, "ticker": ticker})
+        for row in research.get("first_grade_samples") or []:
+            first_grade_samples.append({**row, "ticker": ticker})
+        for row in research.get("gate_events") or []:
+            gate_events.append({**row, "ticker": ticker})
+
+    completed_stats = _aggregate_trade_stats(completed_trades)
+    including_open_stats = _aggregate_trade_stats(completed_trades + open_trades)
+    grade_all = _grade_validation_table(grade_samples)
+    grade_first = _grade_validation_table(first_grade_samples)
+    atr_by_grade = []
+    for grade in ["BUY_S", "BUY_A", "BUY_B", "BUY_C", "HOLD_OVEREXTENDED"]:
+        vals = [r.get("atr_pct") for r in grade_samples if r.get("grade") == grade]
+        atr_by_grade.append({"grade": grade, **_distribution_stats(vals)})
+
+    # Monotonicity diagnostic for the four buy grades. This is diagnostic only;
+    # it never changes the fixed 2/5/10/20 thresholds.
+    monotonic = {}
+    for metric in ("fwd_5d_pct_avg", "fwd_20d_pct_avg", "fwd_60d_pct_avg", "to_sell_pct_avg"):
+        vals = []
+        for grade in ["BUY_S", "BUY_A", "BUY_B", "BUY_C"]:
+            row = next((x for x in grade_first if x["grade"] == grade), None)
+            vals.append(row.get(metric) if row else None)
+        comparable = all(v is not None and np.isfinite(finite(v)) for v in vals)
+        monotonic[metric] = bool(comparable and vals[0] >= vals[1] >= vals[2] >= vals[3]) if comparable else None
+
+    latest_dist = _daily_opinion_distribution(items)
+    s_counts = [row["BUY_S"] for row in latest_dist]
+    s_warning = None
+    if s_counts:
+        if max(s_counts) == 0:
+            s_warning = "최근 60거래일 매수S가 0건: S 임계값 표본 부족 가능성"
+        elif np.mean(s_counts) > max(5, np.mean([r["total"] for r in latest_dist]) * 0.20):
+            s_warning = "최근 60거래일 매수S 비중이 높음: 등급 과다 분류 여부 점검 필요"
+
+    return {
+        "model": "SUPER_TREND_10_2_V13_2",
+        "window": "last 2 calendar years",
+        "execution": "signal at close; trade next bar open; max 1 entry per rising leg",
+        "completed": completed_stats,
+        "including_open": including_open_stats,
+        "open_trades": int(len(open_trades)),
+        "open_mark_returns": _distribution_stats([t.get("return_pct") for t in open_trades]),
+        "same_stock_buy_hold": _distribution_stats(buy_hold),
+        "index_benchmark": _index_benchmark(category),
+        "grade_validation_all_post_gate_bars": grade_all,
+        "grade_validation_first_grade_per_leg": grade_first,
+        "grade_monotonicity_first_per_leg": monotonic,
+        "r_at_gate_histogram": _gate_histogram(gate_events),
+        "gate_events": int(len(gate_events)),
+        "atr_pct_by_grade": atr_by_grade,
+        "daily_opinion_distribution_60d": latest_dist,
+        "distribution_warning": s_warning,
+        "cost_note": "KR sell tax 0.18%, fee 0.015%/side, slippage 0.10%/side; US sell tax 0; FX excluded",
+        "bias_note": "Current-universe historical test contains survivorship bias. Interpret 2Y absolute return versus buy-and-hold/index benchmark.",
+    }
+
+
+def _fmt_pct(value) -> str:
+    v = finite(value)
+    return "—" if not np.isfinite(v) else f"{v:+.2f}%"
+
+
+def _supertrend_report_markdown(category: str, diag: dict) -> str:
+    comp = diag.get("completed") or {}
+    inc = diag.get("including_open") or {}
+    bench = diag.get("index_benchmark") or {}
+    bh = diag.get("same_stock_buy_hold") or {}
+    lines = [
+        f"# DTC SuperTrend(10,2) 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        "",
+        f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        "",
+        "## 메인 백테스트",
+        "",
+        "- 진입: 상승 레그에서 최초 매수S 신호의 다음 봉 시가",
+        "- 청산: 상승→하락 전환 신호의 다음 봉 시가",
+        "- 레그당 최대 1회 진입",
+        "- 비용: KR 매도세 0.18%, 수수료 편도 0.015%, 슬리피지 편도 0.10%; US 매도세 0; 환율 미반영",
+        "",
+        "| 구분 | 거래수 | 승률 | 평균 | 중앙값 | 평균이익 | 평균손실 | 손익비 | 평균보유봉 | 최대이익 | 최대손실 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        f"| 완료 거래 | {comp.get('trades',0)} | {_fmt_pct(comp.get('win_rate_pct'))} | {_fmt_pct(comp.get('avg_return_pct'))} | {_fmt_pct(comp.get('median_return_pct'))} | {_fmt_pct(comp.get('avg_gain_pct'))} | {_fmt_pct(comp.get('avg_loss_pct'))} | {comp.get('payoff_ratio') if comp.get('payoff_ratio') is not None else '—'} | {comp.get('avg_holding_bars') if comp.get('avg_holding_bars') is not None else '—'} | {_fmt_pct(comp.get('max_gain_pct'))} | {_fmt_pct(comp.get('max_loss_pct'))} |",
+        f"| 미청산 평가 포함 | {inc.get('trades',0)} | {_fmt_pct(inc.get('win_rate_pct'))} | {_fmt_pct(inc.get('avg_return_pct'))} | {_fmt_pct(inc.get('median_return_pct'))} | {_fmt_pct(inc.get('avg_gain_pct'))} | {_fmt_pct(inc.get('avg_loss_pct'))} | {inc.get('payoff_ratio') if inc.get('payoff_ratio') is not None else '—'} | {inc.get('avg_holding_bars') if inc.get('avg_holding_bars') is not None else '—'} | {_fmt_pct(inc.get('max_gain_pct'))} | {_fmt_pct(inc.get('max_loss_pct'))} |",
+        "",
+        f"미청산 거래: **{diag.get('open_trades',0)}건** · 미청산 평가손익 평균: **{_fmt_pct((diag.get('open_mark_returns') or {}).get('mean'))}** · 동일 종목 2Y Buy&Hold 평균: **{_fmt_pct(bh.get('mean'))}** · {bench.get('label','지수')} 2Y: **{_fmt_pct(bench.get('return_pct'))}**",
+        "",
+        "## 등급 검증 — 게이트 이후 모든 봉",
+        "",
+        "| 등급 | 표본 | 레그 | +5D 평균 | +20D 평균 | +60D 평균 | 매도신호까지 평균 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in diag.get("grade_validation_all_post_gate_bars") or []:
+        lines.append(f"| {row['grade']} | {row['samples']} | {row['legs']} | {_fmt_pct(row.get('fwd_5d_pct_avg'))} | {_fmt_pct(row.get('fwd_20d_pct_avg'))} | {_fmt_pct(row.get('fwd_60d_pct_avg'))} | {_fmt_pct(row.get('to_sell_pct_avg'))} |")
+    lines += [
+        "",
+        "## 등급 검증 — 레그당 각 등급 최초 발생 봉",
+        "",
+        "| 등급 | 표본 | 레그 | +5D 평균 | +20D 평균 | +60D 평균 | 매도신호까지 평균 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in diag.get("grade_validation_first_grade_per_leg") or []:
+        lines.append(f"| {row['grade']} | {row['samples']} | {row['legs']} | {_fmt_pct(row.get('fwd_5d_pct_avg'))} | {_fmt_pct(row.get('fwd_20d_pct_avg'))} | {_fmt_pct(row.get('fwd_60d_pct_avg'))} | {_fmt_pct(row.get('to_sell_pct_avg'))} |")
+    lines += ["", "## r_at_gate 히스토그램", "", "| r 구간(%) | 건수 | 비중 |", "|---|---:|---:|"]
+    for row in diag.get("r_at_gate_histogram") or []:
+        lines.append(f"| {row['bin_pct']} | {row['count']} | {_fmt_pct(row.get('share_pct'))} |")
+    lines += ["", "## 등급별 ATR% 분포", "", "| 등급 | n | 평균 | 중앙값 | P25 | P75 |", "|---|---:|---:|---:|---:|---:|"]
+    for row in diag.get("atr_pct_by_grade") or []:
+        lines.append(f"| {row['grade']} | {row['count']} | {_fmt_pct(row.get('mean'))} | {_fmt_pct(row.get('median'))} | {_fmt_pct(row.get('p25'))} | {_fmt_pct(row.get('p75'))} |")
+    lines += [
+        "",
+        "## 최근 60거래일 의견 분포",
+        "",
+        "| 날짜 | 매수S | 매수A | 매수B | 매수C | Hold | 매도 | 합계 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in diag.get("daily_opinion_distribution_60d") or []:
+        lines.append(f"| {row['date']} | {row['BUY_S']} | {row['BUY_A']} | {row['BUY_B']} | {row['BUY_C']} | {row['HOLD']} | {row['SELL']} | {row['total']} |")
+    lines += [
+        "",
+        "## 해석 한계",
+        "",
+        "- 현재 유니버스로 과거를 재구성하므로 상장폐지·편출 종목이 빠지는 **생존 편향**이 존재합니다.",
+        "- 최근 2년은 시장 국면 편향이 있으므로 절대수익보다 동일종목 Buy&Hold 및 KOSPI200/S&P500 대비로 해석해야 합니다.",
+        "- 등급 진단값(ATR%, g_atr, d_atr 등)은 판정에 사용하지 않습니다.",
+    ]
+    if diag.get("distribution_warning"):
+        lines += ["", f"> 경고: {diag['distribution_warning']}"]
+    return "\n".join(lines) + "\n"
 
 
 def _write_quiz_shard(category: str, items: list[dict], frames: dict[str, pd.DataFrame]) -> int:
@@ -1060,6 +1405,9 @@ def _write_category_site(category: str, payload_meta: dict, items: list[dict], s
             zf.write(quarantine_file, "yahoo-unavailable.json")
         if universe_snapshot.is_file():
             zf.write(universe_snapshot, "universe.json")
+        report_file = category_dir / "supertrend_backtest_report.md"
+        if report_file.is_file():
+            zf.write(report_file, "supertrend_backtest_report.md")
         for detail_file in sorted(stocks_dir.glob("*.json")):
             if detail_file.name not in live_detail_names:
                 continue
@@ -1101,7 +1449,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v13.0 Supertrend | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v13.2 Supertrend | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1294,21 +1642,17 @@ def scan_category(
         size_coverage = np.nan
 
     # Supertrend strategy ranking: Buy S -> Buy A -> Buy B -> Buy C -> Hold -> Sell.
-    # Within the same opinion level, larger market capitalization / ETF size ranks first.
+    # Same-level default is market cap/AUM descending. SELL is the one documented
+    # exception: recent (<5 bars) UP->DOWN flips are placed first inside SELL.
     unsorted_items = list(results.values())
     backtest_refreshed = True
-    backtest_diagnostics = {
-        "model": "SUPER_TREND_10_2_BUY_S_TO_SELL",
-        "window": "last 2 calendar years",
-        "entry": "first Buy S while flat, at that day's close",
-        "exit": "first Sell while holding, at that day's close",
-        "metric": "mean completed-trade return",
-    }
+    backtest_diagnostics = _aggregate_supertrend_backtest(category, unsorted_items)
 
     def _rank_key(item: dict):
         level = int(item.get("rank_level", OPINION_ORDER["HOLD"]))
         cap = finite(item.get("market_size_krw"), -1.0)
-        return (level, -cap, item.get("symbol", ""))
+        sell_recent_key = 0 if (item.get("opinion_code") == "SELL" and item.get("new_sell")) else 1
+        return (level, sell_recent_key if level == OPINION_ORDER["SELL"] else 0, -cap, item.get("symbol", ""))
 
     items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
@@ -1378,20 +1722,33 @@ def scan_category(
             "period": 10,
             "multiplier": 2.0,
             "opinion_order": ["BUY_S", "BUY_A", "BUY_B", "BUY_C", "HOLD", "SELL"],
+            "p0_definition": "ST[flip_idx-1] (last DOWN bar upper-band ST), never ST[flip_idx]",
+            "p1_definition": "current ST",
+            "atr": "Wilder RMA(10)",
+            "warmup_discard_bars": 100,
             "buy_condition": "current Supertrend is UP and P1 >= P0",
             "grades": {
-                "BUY_S": "current close is <2% above P0",
-                "BUY_A": "current close is <5% above P0",
-                "BUY_B": "current close is <10% above P0",
-                "BUY_C": "current close is <20% above P0",
+                "BUY_S": "0% <= r < 2%",
+                "BUY_A": "2% <= r < 5%",
+                "BUY_B": "5% <= r < 10%",
+                "BUY_C": "10% <= r < 20%",
             },
             "sell_condition": "current Supertrend direction is DOWN",
             "otherwise": "HOLD",
-            "ranking": "opinion level first, then market size descending",
-            "chart": "~6 months Heikin-Ashi + Supertrend(10,2)",
+            "ranking": "opinion level first, then market size descending; recent SELL flips first inside SELL",
+            "chart": "126 sessions adjusted real OHLC + Supertrend(10,2), P0/flip/gate markers",
+            "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue",
             "backtest": backtest_diagnostics,
+            "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },
     }
+
+    category_out = DATA_DIR / CATEGORY_DIR[category]
+    _atomic_write_text(category_out / "supertrend_backtest_report.md", _supertrend_report_markdown(category, backtest_diagnostics))
+    # Research samples are used only to build the aggregate report; never publish
+    # the large internal arrays in per-stock JSON.
+    for item in items:
+        item.pop("_supertrend_research", None)
 
     out_dir, detail_count = _write_category_site(category, payload_meta, items, size_cache, scan_mode)
     bundle_mb = (out_dir / "bundle.zip").stat().st_size / (1024 * 1024)

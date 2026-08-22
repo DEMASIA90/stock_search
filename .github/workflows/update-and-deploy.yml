@@ -90,10 +90,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v13.0 Supertrend scanner + retained support files..."
+          echo "Checking DTC v13.2 Supertrend scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "13.0"' scanner.py || {
-            echo "::error::scanner.py is not DTC v13.0 Supertrend"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "13.2"' scanner.py || {
+            echo "::error::scanner.py is not DTC v13.2 Supertrend"
             exit 1
           }
 
@@ -117,7 +117,7 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: Supertrend / v13.0"
+          echo "scanner.py: Supertrend / v13.2"
           echo "hydrate_data.py: compatible"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
@@ -247,7 +247,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v13.0 Supertrend FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v13.2 Supertrend FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -326,14 +326,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260822-v13_0_supertrend",
+            "ui_build": "20260823-v13_2_supertrend",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260822-v13_0_supertrend"
+          echo "UI build: 20260823-v13_2_supertrend"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint
