@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 SUPER_TREND_PERIOD = 10
-SUPER_TREND_MULTIPLIER = 2.0
+SUPER_TREND_MULTIPLIER = 3.0
 WARMUP_DISCARD_BARS = 100
 BACKTEST_YEARS = 2
 BACKTEST_SESSIONS = 504
@@ -14,7 +14,6 @@ MIN_REQUIRED_BARS = 604
 CHART_SESSIONS = 126
 NEW_SELL_WINDOW_BARS = 5
 STRONG_BUY_GATE_BARS = 3  # gate bar=0, then +1/+2/+3 trading bars
-TARGET_RETURN_PCT = 10.0
 
 OPINION_ORDER = {
     "STRONG_BUY": 0,
@@ -397,21 +396,31 @@ def reference_setups(ohlc: pd.DataFrame, current_direction: float | None) -> dic
     }
 
 
-def backtest_target_10pct(
+def backtest_strong_buy_stats(
     df: pd.DataFrame,
     signals: pd.DataFrame | None = None,
     sessions: int = BACKTEST_SESSIONS,
-    target_pct: float = TARGET_RETURN_PCT,
 ) -> dict[str, Any]:
-    """2Y signal quality: after first gate/Strong-Buy entry, did price hit +10% before Sell?
+    """2Y Strong-Buy diagnostics.
 
-    Entry is next-bar open. A win means any subsequent daily High reaches +10%
-    from the entry price before the UP->DOWN sell signal. Only completed legs are
-    used in the win-rate denominator; open legs are excluded.
+    For each rising leg, only the first STRONG_BUY signal is sampled. Entry is
+    the next-bar open. Two headline metrics are produced:
+      1) median of each trade's maximum gross return before the next Sell signal
+      2) 20-session win rate, where Close[entry+20] > entry open is a win
+
+    Recent samples without a completed Sell can still contribute to the 20-day
+    metric when 20 future sessions exist, but are excluded from max-return median.
     """
     signals = signal_series(df) if signals is None else signals
     if signals.empty or len(signals) < MIN_REQUIRED_BARS:
-        return {"available": False, "reason": "insufficient_history_lt_604", "target_pct": target_pct, "trades": 0, "wins": 0, "win_rate_pct": None}
+        return {
+            "available": False,
+            "reason": "insufficient_history_lt_604",
+            "max_return_median_pct": None,
+            "win_rate_20d_pct": None,
+            "max_return_samples": 0,
+            "win_20d_samples": 0,
+        }
 
     n = len(signals)
     dates = pd.DatetimeIndex(signals.index)
@@ -428,58 +437,86 @@ def backtest_target_10pct(
     leg_ids = signals["leg_id"].to_numpy(float)
     opens = signals["Open"].to_numpy(float)
     highs = signals["High"].to_numpy(float)
-    trades: list[dict[str, Any]] = []
+    closes = signals["Close"].to_numpy(float)
+
+    # Resolve the first Strong-Buy entry per rising leg.
+    entries: list[dict[str, Any]] = []
     entered_legs: set[int] = set()
-    holding: dict[str, Any] | None = None
-
     for i in range(n):
-        # Sell signal is known at close i; complete the event at next open.
-        if holding is not None and i > 0 and np.isfinite(direction[i - 1]) and np.isfinite(direction[i]) and direction[i - 1] > 0 and direction[i] < 0:
-            if i + 1 < n and np.isfinite(opens[i + 1]) and opens[i + 1] > 0:
-                seg = highs[holding["entry_pos"] : i + 1]
-                max_high = float(np.nanmax(seg)) if len(seg) and np.isfinite(seg).any() else np.nan
-                threshold = holding["entry_price"] * (1.0 + target_pct / 100.0)
-                hit = bool(np.isfinite(max_high) and max_high >= threshold)
-                trades.append({
-                    **holding,
-                    "sell_signal_date": dates[i].date().isoformat(),
-                    "sell_date": dates[i + 1].date().isoformat(),
-                    "target_hit": hit,
-                    "max_high": max_high if np.isfinite(max_high) else None,
-                })
-            holding = None
+        if not in_window[i] or opinions[i] != "STRONG_BUY" or not np.isfinite(leg_ids[i]):
+            continue
+        leg = int(leg_ids[i])
+        if leg in entered_legs or i + 1 >= n or not (np.isfinite(opens[i + 1]) and opens[i + 1] > 0):
+            continue
+        entered_legs.add(leg)
+        entries.append({
+            "leg_id": leg,
+            "signal_pos": int(i),
+            "entry_pos": int(i + 1),
+            "signal_date": dates[i].date().isoformat(),
+            "entry_date": dates[i + 1].date().isoformat(),
+            "entry_price": float(opens[i + 1]),
+        })
 
-        if holding is None and in_window[i] and opinions[i] == "STRONG_BUY" and np.isfinite(leg_ids[i]):
-            leg = int(leg_ids[i])
-            if leg in entered_legs or i + 1 >= n or not (np.isfinite(opens[i + 1]) and opens[i + 1] > 0):
-                continue
-            entered_legs.add(leg)
-            holding = {
-                "leg_id": leg,
-                "buy_signal_date": dates[i].date().isoformat(),
-                "buy_date": dates[i + 1].date().isoformat(),
-                "entry_price": float(opens[i + 1]),
-                "entry_pos": int(i + 1),
-            }
+    max_returns: list[float] = []
+    win20_flags: list[bool] = []
+    trades: list[dict[str, Any]] = []
 
-    wins = sum(1 for t in trades if t.get("target_hit"))
+    for entry in entries:
+        ep = int(entry["entry_pos"])
+        entry_price = float(entry["entry_price"])
+
+        # First UP->DOWN transition after entry; max return is measured only to
+        # that Sell signal bar, consistent with the strategy life-cycle.
+        sell_pos = None
+        for j in range(max(ep, 1), n):
+            if (
+                np.isfinite(direction[j - 1]) and np.isfinite(direction[j])
+                and direction[j - 1] > 0 and direction[j] < 0
+            ):
+                sell_pos = j
+                break
+
+        max_return_pct = None
+        if sell_pos is not None and sell_pos >= ep:
+            seg = highs[ep : sell_pos + 1]
+            if len(seg) and np.isfinite(seg).any():
+                max_high = float(np.nanmax(seg))
+                max_return_pct = (max_high / entry_price - 1.0) * 100.0
+                if np.isfinite(max_return_pct):
+                    max_returns.append(float(max_return_pct))
+
+        win20 = None
+        pos20 = ep + 20
+        if pos20 < n and np.isfinite(closes[pos20]) and closes[pos20] > 0:
+            win20 = bool(closes[pos20] > entry_price)
+            win20_flags.append(win20)
+
+        trades.append({
+            **entry,
+            "sell_signal_date": dates[sell_pos].date().isoformat() if sell_pos is not None else None,
+            "max_return_pct": float(max_return_pct) if max_return_pct is not None else None,
+            "return_20d_pct": float((closes[pos20] / entry_price - 1.0) * 100.0) if pos20 < n and np.isfinite(closes[pos20]) else None,
+            "win_20d": win20,
+        })
+
     daily = []
     valid_positions = np.flatnonzero(signals["decision_valid"].fillna(False).to_numpy(bool))
     for i in valid_positions[-60:]:
         daily.append({"date": dates[i].date().isoformat(), "opinion_code": str(opinions[i])})
+
     return {
         "available": True,
         "window": "last 2 calendar years",
-        "target_pct": float(target_pct),
-        "trades": int(len(trades)),
-        "wins": int(wins),
-        "win_rate_pct": float(wins / len(trades) * 100.0) if trades else None,
-        "entry_rule": "first Strong Buy (gate day) per rising leg; next bar open",
-        "success_rule": f"daily High reaches +{target_pct:g}% before next Sell signal",
-        "open_trade_excluded": bool(holding is not None),
+        "max_return_median_pct": float(np.median(max_returns)) if max_returns else None,
+        "win_rate_20d_pct": float(np.mean(win20_flags) * 100.0) if win20_flags else None,
+        "max_return_samples": int(len(max_returns)),
+        "win_20d_samples": int(len(win20_flags)),
+        "entry_rule": "first Strong Buy per rising leg; next bar open",
+        "max_return_rule": "maximum daily High return from entry until next Sell signal",
+        "win_20d_rule": "Close 20 sessions after entry is above entry open",
         "_research": {"trades": trades, "daily_opinions": daily},
     }
-
 
 def _safe_float(value: Any) -> float | None:
     try:
@@ -533,15 +570,12 @@ def analyze(
     hold_reason = str(hold_reason_raw) if opinion_code == "HOLD" and isinstance(hold_reason_raw, str) and hold_reason_raw else None
     new_sell = bool(row.get("new_sell", False)) if opinion_code == "SELL" else False
 
-    backtest = backtest_target_10pct(ohlc, signals=signals)
+    backtest = backtest_strong_buy_stats(ohlc, signals=signals)
     research = dict(backtest.pop("_research", {}) or {})
     refs = reference_setups(ohlc, direction)
 
     chart_start = max(0, len(signals) - CHART_SESSIONS)
     chart = []
-    current_flip = int(row["flip_pos"]) if np.isfinite(row.get("flip_pos", np.nan)) else None
-    current_gate = int(row["gate_pos"]) if np.isfinite(row.get("gate_pos", np.nan)) else None
-    current_p0 = p0 if direction is not None and direction > 0 else None
     for pos in range(chart_start, len(signals)):
         idx = signals.index[pos]
         sr = signals.iloc[pos]
@@ -556,9 +590,6 @@ def analyze(
             "open": o, "high": h, "low": l, "close": c,
             "supertrend": stv,
             "direction": d,
-            "p0_line": float(current_p0) if current_p0 is not None and current_flip is not None and pos >= current_flip else None,
-            "is_flip": bool(current_flip is not None and pos == current_flip),
-            "is_gate": bool(current_gate is not None and pos == current_gate),
         })
 
     bars_since_sell_flip = None
@@ -579,21 +610,9 @@ def analyze(
         "opinion_label": opinion_label,
         "hold_reason": hold_reason,
         "rank_level": int(OPINION_ORDER.get(opinion_code, OPINION_ORDER["HOLD"])),
-        "p0": p0,
-        "p1": p1,
         "current_close": close,
-        "r_pct": _safe_float(row.get("r_pct")),
-        "stop_pct": _safe_float(row.get("stop_pct")),
-        "atr_pct": _safe_float(row.get("atr_pct")),
-        "g_atr": _safe_float(row.get("g_atr")),
-        "d_atr": _safe_float(row.get("d_atr")),
-        "bars_since_flip": int(row["bars_since_flip"]) if np.isfinite(row.get("bars_since_flip", np.nan)) else None,
-        "bars_since_gate": int(row["bars_since_gate"]) if np.isfinite(row.get("bars_since_gate", np.nan)) else None,
-        "r_at_gate": _safe_float(row.get("r_at_gate")),
         "new_sell": new_sell,
         "bars_since_sell_flip": bars_since_sell_flip,
-        "flip_date": pd.Timestamp(signals.index[int(row["flip_pos"])]).date().isoformat() if np.isfinite(row.get("flip_pos", np.nan)) else None,
-        "gate_date": pd.Timestamp(signals.index[int(row["gate_pos"])]).date().isoformat() if np.isfinite(row.get("gate_pos", np.nan)) else None,
         "reference_setups": refs,
         "backtest": backtest,
         "chart": chart,

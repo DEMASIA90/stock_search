@@ -6,7 +6,7 @@ import pandas as pd
 from supertrend_strategy import (
     _opinion_for,
     analyze,
-    backtest_target_10pct,
+    backtest_strong_buy_stats,
     reference_setups,
     signal_series,
     supertrend,
@@ -24,7 +24,7 @@ def frame_from_close(values, wick=0.01, volume=None):
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": vol}, index=idx)
 
 
-def tradingview_reference(df, period=10, multiplier=2.0):
+def tradingview_reference(df, period=10, multiplier=3.0):
     """Direct translation of TradingView's documented pine_supertrend()."""
     high = df["High"].to_numpy(float)
     low = df["Low"].to_numpy(float)
@@ -136,16 +136,49 @@ class SupertrendTests(unittest.TestCase):
         self.assertIn(refs["breakout"]["label"], {"좋음", "보통", "나쁨"})
         self.assertIn(refs["pullback"]["label"], {"좋음", "보통", "나쁨"})
 
-    def test_backtest_target_hit_rate_is_deterministic(self):
+    def test_backtest_summary_is_deterministic(self):
         c = 100 + 15 * np.sin(np.linspace(0, 24 * np.pi, 800)) + np.linspace(0, 30, 800)
         df = frame_from_close(c, wick=0.025)
         sig = signal_series(df)
-        a = backtest_target_10pct(df, signals=sig)
-        b = backtest_target_10pct(df, signals=sig)
+        a = backtest_strong_buy_stats(df, signals=sig)
+        b = backtest_strong_buy_stats(df, signals=sig)
         self.assertEqual(a, b)
-        if a["win_rate_pct"] is not None:
-            self.assertGreaterEqual(a["win_rate_pct"], 0)
-            self.assertLessEqual(a["win_rate_pct"], 100)
+        if a["win_rate_20d_pct"] is not None:
+            self.assertGreaterEqual(a["win_rate_20d_pct"], 0)
+            self.assertLessEqual(a["win_rate_20d_pct"], 100)
+        if a["max_return_median_pct"] is not None:
+            self.assertTrue(np.isfinite(a["max_return_median_pct"]))
+
+    def test_backtest_metrics_exact_fixture(self):
+        n = 620
+        idx = pd.bdate_range("2023-01-02", periods=n)
+        base = pd.DataFrame(index=idx)
+        base["Open"] = 100.0
+        base["High"] = 100.0
+        base["Low"] = 99.0
+        base["Close"] = 100.0
+        base["Volume"] = 1_000_000.0
+
+        sig = base.copy()
+        sig["decision_valid"] = True
+        sig["direction"] = -1.0
+        sig["leg_id"] = np.nan
+        sig["opinion_code"] = "SELL"
+
+        # One rising leg: Strong Buy at 150, entry at 151 open=100, Sell at 180.
+        sig.iloc[140:180, sig.columns.get_loc("direction")] = 1.0
+        sig.iloc[140:180, sig.columns.get_loc("leg_id")] = 1.0
+        sig.iloc[140:180, sig.columns.get_loc("opinion_code")] = "BUY"
+        sig.iloc[150, sig.columns.get_loc("opinion_code")] = "STRONG_BUY"
+        sig.iloc[151:181, sig.columns.get_loc("High")] = 105.0
+        sig.iloc[160, sig.columns.get_loc("High")] = 120.0
+        sig.iloc[171, sig.columns.get_loc("Close")] = 101.0
+
+        bt = backtest_strong_buy_stats(base, signals=sig)
+        self.assertAlmostEqual(bt["max_return_median_pct"], 20.0, places=10)
+        self.assertAlmostEqual(bt["win_rate_20d_pct"], 100.0, places=10)
+        self.assertEqual(bt["max_return_samples"], 1)
+        self.assertEqual(bt["win_20d_samples"], 1)
 
 
 if __name__ == "__main__":

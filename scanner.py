@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "13.3"
+MORNING_INVEST_COMPONENT_VERSION = "13.4"
 
 import numpy as np
 import pandas as pd
@@ -31,18 +31,18 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v13.3 · Supertrend Strategy
+# Dongtan Trading Center (DTC) scanner v13.4 · Supertrend Strategy
 # -----------------------------------------------------------------------------
-# Opinion engine: TradingView-compatible Supertrend(period=10, multiplier=2) only.
+# Opinion engine: TradingView-compatible Supertrend(period=10, multiplier=3) only.
 #   P0 = Supertrend value on the bar immediately BEFORE the latest DOWN -> UP transition
 #   P1 = current Supertrend value
 #   SELL = current Supertrend direction DOWN
 #   STRONG BUY = current direction UP, P1 >= P0, and gate age 0..3 trading bars
 #   BUY = same gate passed, but gate age >3; otherwise HOLD.
 # Ranking: Strong Buy -> Buy -> Hold -> Sell, then market size.
-# Backtest: 2Y, first Strong Buy per rising leg; +10% target-hit rate before Sell only.
+# Backtest: 2Y, first Strong Buy per rising leg; max-return median + 20D positive-return win rate.
 # Reference-only tags: breakout and pullback quality; never used by opinion/ranking.
-# Chart: ~6 months adjusted real OHLC candles + Supertrend(10,2).
+# Chart: ~6 months adjusted real OHLC candles + Supertrend(10,3).
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1120
@@ -796,8 +796,8 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if market_size_krw < MIN_MARKET_SIZE_KRW:
             return None, "market_size_lt_10t"
 
-    # The opinion engine intentionally uses one indicator only: Supertrend(10, 2).
-    st_data = analyze_supertrend(frame, period=10, multiplier=2.0, market=stock.category)
+    # The opinion engine intentionally uses one indicator only: Supertrend(10, 3).
+    st_data = analyze_supertrend(frame, period=10, multiplier=3.0, market=stock.category)
     st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
@@ -819,16 +819,6 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "opinion_code": st_data.get("opinion_code", "HOLD"),
         "opinion_label": st_data.get("opinion_label", "Hold"),
         "hold_reason": st_data.get("hold_reason"),
-        "r_pct": clean(st_data.get("r_pct"), 4),
-        "p0": clean(st_data.get("p0")),
-        "p1": clean(st_data.get("p1")),
-        "stop_pct": clean(st_data.get("stop_pct"), 4),
-        "atr_pct": clean(st_data.get("atr_pct"), 4),
-        "g_atr": clean(st_data.get("g_atr"), 4),
-        "d_atr": clean(st_data.get("d_atr"), 4),
-        "bars_since_flip": st_data.get("bars_since_flip"),
-        "bars_since_gate": st_data.get("bars_since_gate"),
-        "r_at_gate": clean(st_data.get("r_at_gate"), 4),
         "new_sell": bool(st_data.get("new_sell", False)),
         "reference_setups": st_data.get("reference_setups") or {},
         "rank_level": int(st_data.get("rank_level", OPINION_ORDER["HOLD"])),
@@ -925,16 +915,6 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "opinion_code": item.get("opinion_code", "HOLD"),
         "opinion_label": item.get("opinion_label", "Hold"),
         "hold_reason": item.get("hold_reason"),
-        "r_pct": item.get("r_pct"),
-        "p0": item.get("p0"),
-        "p1": item.get("p1"),
-        "stop_pct": item.get("stop_pct"),
-        "atr_pct": item.get("atr_pct"),
-        "g_atr": item.get("g_atr"),
-        "d_atr": item.get("d_atr"),
-        "bars_since_flip": item.get("bars_since_flip"),
-        "bars_since_gate": item.get("bars_since_gate"),
-        "r_at_gate": item.get("r_at_gate"),
         "new_sell": bool(item.get("new_sell", False)),
         "reference_setups": item.get("reference_setups") or st.get("reference_setups") or {},
         "rank_level": item.get("rank_level", OPINION_ORDER["HOLD"]),
@@ -992,38 +972,42 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
         for t in research.get("trades") or []:
             trades.append({**t, "ticker": ticker})
 
-    wins = sum(1 for t in trades if bool(t.get("target_hit")))
-    n = len(trades)
+    max_returns = [finite(t.get("max_return_pct")) for t in trades]
+    max_returns = [float(x) for x in max_returns if np.isfinite(x)]
+    win20 = [t.get("win_20d") for t in trades if t.get("win_20d") is not None]
     latest_dist = _daily_opinion_distribution(items)
     return {
-        "model": "SUPER_TREND_10_2_V13_3",
+        "model": "SUPER_TREND_10_3_V13_4",
         "window": "last 2 calendar years",
-        "target_pct": 10.0,
-        "trades": int(n),
-        "wins": int(wins),
-        "win_rate_pct": clean(wins / n * 100.0, 2) if n else None,
-        "entry": "first Strong Buy (gate day) per rising leg, next bar open",
-        "success": "daily High reaches +10% from entry before the next Sell signal",
+        "max_return_median_pct": clean(float(np.median(max_returns)), 2) if max_returns else None,
+        "win_rate_20d_pct": clean(float(np.mean([bool(x) for x in win20]) * 100.0), 2) if win20 else None,
+        "max_return_samples": int(len(max_returns)),
+        "win_20d_samples": int(len(win20)),
+        "entry": "first Strong Buy per rising leg, next bar open",
+        "max_return": "maximum daily High return from entry until next Sell signal",
+        "win_20d": "Close 20 sessions after entry > entry open",
         "daily_opinion_distribution_60d": latest_dist,
-        "note": "Only the +10% target-hit rate is a backtest headline metric. Breakout/pullback tags are reference-only.",
+        "note": "Only max-return median and 20-session positive-return win rate are headline metrics. Breakout/pullback tags are reference-only.",
     }
 
 
 def _supertrend_report_markdown(category: str, diag: dict) -> str:
-    rate = diag.get("win_rate_pct")
-    rate_text = "—" if rate is None else f"{float(rate):.2f}%"
+    med = diag.get("max_return_median_pct")
+    win = diag.get("win_rate_20d_pct")
+    med_text = "—" if med is None else f"{float(med):.2f}%"
+    win_text = "—" if win is None else f"{float(win):.2f}%"
     lines = [
-        f"# DTC SuperTrend(10,2) +10% 도달 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        f"# DTC SuperTrend(10,3) 백테스트 — {CATEGORY_LABEL.get(category, category)}",
         "",
         f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
         "## 결과",
         "",
-        f"- **+10% 도달 승률: {rate_text}**",
-        f"- 표본: {diag.get('trades', 0)}회 / 성공: {diag.get('wins', 0)}회",
+        f"- **최고 수익률 중위값: {med_text}** (표본 {diag.get('max_return_samples', 0)}회)",
+        f"- **20거래일 뒤 승률: {win_text}** (표본 {diag.get('win_20d_samples', 0)}회)",
         "- 진입: 각 상승 레그 최초 강한 매수 신호 다음 봉 시가",
-        "- 성공: 다음 매도 신호가 나오기 전 일중 고가가 진입가 대비 +10% 이상 도달",
-        "- 미청산 레그는 승률 분모에서 제외",
+        "- 최고 수익률: 진입 후 다음 매도 신호가 발생할 때까지의 일중 최고가 기준 수익률",
+        "- 20D 승: 진입 20거래일 뒤 종가가 진입가보다 조금이라도 높으면 승",
         "",
         "## 최근 60거래일 의견 분포",
         "",
@@ -1040,7 +1024,6 @@ def _supertrend_report_markdown(category: str, diag: dict) -> str:
         "- 돌파매매/눌림목매매 평가는 참고 태그이며 SuperTrend 의견과 백테스트에 영향을 주지 않습니다.",
     ]
     return "\n".join(lines) + "\n"
-
 
 def _write_quiz_shard(category: str, items: list[dict], frames: dict[str, pd.DataFrame]) -> int:
     """Publish a lazy-loaded quiz manifest plus per-stock compact OHLCV files."""
@@ -1224,7 +1207,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v13.3 Supertrend | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v13.4 Supertrend | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1495,21 +1478,18 @@ def scan_category(
         "strategy_model": {
             "name": "Supertrend",
             "period": 10,
-            "multiplier": 2.0,
+            "multiplier": 3.0,
             "opinion_order": ["STRONG_BUY", "BUY", "HOLD", "SELL"],
-            "p0_definition": "ST[flip_idx-1] (last DOWN bar upper-band ST), never ST[flip_idx]",
-            "p1_definition": "current ST",
             "engine": "TradingView ta.supertrend-compatible state machine",
             "atr": "Wilder RMA(10)",
             "warmup_discard_bars": 100,
-            "gate": "current Supertrend is UP and P1 >= P0",
-            "strong_buy": "gate day through +3 trading bars (bars_since_gate <= 3)",
-            "buy": "gate passed and bars_since_gate > 3",
+            "strong_buy": "internal trend-confirmation point through +3 trading bars",
+            "buy": "confirmed rising trend after the Strong Buy window",
             "sell_condition": "current Supertrend direction is DOWN",
             "otherwise": "HOLD",
             "ranking": "Strong Buy -> Buy -> Hold -> Sell; same level market size descending; recent SELL flips first inside SELL",
             "reference_setups": "breakout/pullback labels are reference-only and never affect opinion/ranking",
-            "chart": "126 sessions adjusted real OHLC + Supertrend(10,2), P0/flip/gate markers",
+            "chart": "126 sessions adjusted real OHLC + Supertrend(10,3)",
             "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
