@@ -1,14 +1,14 @@
-const CACHE_NAME = 'dtc-pwa-v13-3-1-tvchart';
+const CACHE_NAME = 'dtc-pwa-v14-1-prevdown-toss5';
 const SHELL_FILES = [
   './',
   './index.html',
-  './styles.css?v=20260823-v13_3_1_tvchart',
-  './runtime-config.js?v=20260823-v13_3_1_tvchart',
-  './app.js?v=20260823-v13_3_1_tvchart',
-  './news-config.js?v=20260823-v13_3_1_tvchart',
-  './pwa.js?v=20260823-v13_3_1_tvchart',
+  './styles.css?v=20260823-v14_1_prevdown_toss5',
+  './runtime-config.js?v=20260823-v14_1_prevdown_toss5',
+  './app.js?v=20260823-v14_1_prevdown_toss5',
+  './news-config.js?v=20260823-v14_1_prevdown_toss5',
+  './pwa.js?v=20260823-v14_1_prevdown_toss5',
   './manifest.webmanifest',
-  './logo-dtc.svg?v=20260823-v13_3_1_tvchart',
+  './logo-dtc.svg?v=20260823-v14_1_prevdown_toss5',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-512-maskable.png'

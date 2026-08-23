@@ -1,42 +1,26 @@
-# Dongtan Trading Center (DTC) — v13.3 SuperTrend
+# Dongtan Trading Center (DTC) — v14.1 Supertrad Index
 
-DTC v13.3은 `SuperTrend(10,2)` 단독 Opinion 엔진과 Quiz mode를 제공합니다.
+DTC Local **v1.14.2 PrevDownSTGate** 규칙을 웹/PWA 스캐너에 이식한 버전입니다.
 
-## Opinion
+## 현재 알고리즘
+- SuperTrend: 14,2
+- ADX: DI 14 / smoothing 14
+- ADX >= 70: STRONG SELL
+- 40 <= ADX < 70: SELL
+- ST 상승 + 25 <= ADX < 30: BUY
+- ST 상승 + 20 <= ADX < 25: STRONG BUY 후보
+- STRONG BUY gate의 P0는 **하락→상승 전환 직전 마지막 DOWN ST 값**
+- 전환봉 자체(age 0)는 STRONG BUY 제외
+- 다음 UP 봉부터 현재 ST >= P0일 때 STRONG BUY
+- 그 외 HOLD
 
-- **강한 매수**: 현재 ST 상승 + `P1 >= P0`, 그리고 최초 게이트 통과일을 0으로 하여 `bars_since_gate <= 3`
-- **매수**: 현재 ST 상승 + `P1 >= P0`, `bars_since_gate > 3`
-- **Hold**: 상승 상태지만 P0가 없거나 아직 `P1 < P0`
-- **매도**: 현재 ST 하락
+백테스트는 최근 2년 BUY→SELL cycle 최고수익률 중위값을 사용합니다.
 
-`P0 = ST[flip_idx-1]`, `P1 = current ST`입니다. 기본 정렬은 `강한 매수 → 매수 → Hold → 매도`, 같은 의견에서는 시가총액/ETF 규모 내림차순입니다.
+## 차트
+- DTC 자체 6개월 일반 일봉 + ST(14,2) + ADX(14,14)
+- 차트 클릭 시 TradingView가 아니라 **토스증권 WTS 종목 차트**를 새 탭으로 엽니다.
+- 국내 종목은 Toss product code를 직접 구성합니다.
+- 미국 종목은 스캔 시 Toss WTS 검색 결과를 캐시하여 가능한 경우 종목 페이지로 바로 연결합니다. 코드가 아직 없는 종목은 토스증권 홈을 열고 티커를 클립보드에 복사합니다.
 
-## SuperTrend 엔진
-
-- ATR period 10
-- multiplier 2.0
-- Wilder RMA
-- 수정 OHLC
-- TradingView `ta.supertrend(2,10)`의 공개 Pine reference state machine을 직접 옮긴 구현
-- 내부 direction 부호만 `+1=상승`, `-1=하락`으로 사용
-- 차트는 최근 126거래일 일반 OHLC 캔들: 양봉 빨강, 음봉 파랑, ST 상승 빨강, ST 하락 파랑
-
-## Backtest
-
-최근 2년 각 상승 레그의 최초 **강한 매수** 신호 다음 봉 시가에 진입했다고 가정합니다. 다음 매도 신호 전까지 일중 고가가 진입가 대비 **+10% 이상 한 번이라도 도달한 비율**만 백테스트 headline으로 표시합니다. 미청산 레그는 승률 분모에서 제외합니다.
-
-## 참고 태그
-
-카드의 시총/현재가 아래에 다음 두 값이 `좋음 / 보통 / 나쁨`으로 표시됩니다. 이 값들은 Opinion, 정렬, 백테스트에 절대 반영되지 않습니다.
-
-- 돌파매매: 직전 20일 고점과 당일 거래량/직전20일 평균거래량
-- 눌림목 매매: ST 상승 여부 + EMA20/EMA50 + RSI14 + EMA20 이격
-
-## 실행
-
-```bash
-python scanner.py --market ALL --scan-mode FULL
-python test_supertrend_strategy.py
-```
-
-최초 배포 후에는 `ALL + FULL` 1회를 권장합니다.
+## Quiz
+한 세션은 **5문제**입니다. 5번째 제출 후 정답 수를 표시하고 새 5문제 세션을 시작할 수 있습니다.

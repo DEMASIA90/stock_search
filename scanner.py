@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "13.4"
+MORNING_INVEST_COMPONENT_VERSION = "14.1"
 
 import numpy as np
 import pandas as pd
@@ -29,20 +29,30 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_FILE = DATA_DIR / "fx_usdkrw.json"
+TOSS_SYMBOL_CACHE_FILE = DATA_DIR / "toss_symbol_cache.json"
+TOSS_SEARCH_API = "https://wts-info-api.tossinvest.com/api/v1/search-all/wts-auto-complete"
+TOSS_BROWSER_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Content-Type": "application/json",
+    "Origin": "https://www.tossinvest.com",
+    "Referer": "https://www.tossinvest.com/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+}
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v13.4 · Supertrend Strategy
+# Dongtan Trading Center (DTC) scanner v14.1 · Supertrad Index
 # -----------------------------------------------------------------------------
-# Opinion engine: TradingView-compatible Supertrend(period=10, multiplier=3) only.
-#   P0 = Supertrend value on the bar immediately BEFORE the latest DOWN -> UP transition
-#   P1 = current Supertrend value
-#   SELL = current Supertrend direction DOWN
-#   STRONG BUY = current direction UP, P1 >= P0, and gate age 0..3 trading bars
-#   BUY = same gate passed, but gate age >3; otherwise HOLD.
-# Ranking: Strong Buy -> Buy -> Hold -> Sell, then market size.
-# Backtest: 2Y, first Strong Buy per rising leg; max-return median + 20D positive-return win rate.
-# Reference-only tags: breakout and pullback quality; never used by opinion/ranking.
-# Chart: ~6 months adjusted real OHLC candles + Supertrend(10,3).
+# Opinion engine: DTC Local v1.14.2 PrevDownSTGate Supertrad Index.
+#   SuperTrend(14,2) + ADX(DI 14, smoothing 14).
+#   ADX >=70 -> STRONG SELL; 40<=ADX<70 -> SELL.
+#   ST UP + 25<=ADX<30 -> BUY.
+#   ST UP + 20<=ADX<25 + current ST >= previous DOWN ST before flip (flip bar excluded) -> STRONG BUY.
+#   Otherwise HOLD.
+# Ranking: Strong Buy -> Buy -> Hold -> Sell -> Strong Sell, then market size.
+# Backtest: 2Y explicit BUY/STRONG BUY -> SELL/STRONG SELL cycles;
+# signal-close entry/exit, completed-cycle peak-return median.
+# Chart: ~6 months adjusted real OHLC + ST(14,2) + ADX(14,14) + cycle markers.
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1120
@@ -584,6 +594,103 @@ def enrich_display_metadata(stock: Stock, item: dict, thresholds: dict, size_cac
 
 
 
+def _load_toss_symbol_cache() -> dict:
+    if not TOSS_SYMBOL_CACHE_FILE.is_file():
+        return {"updated_at": None, "symbols": {}}
+    try:
+        data = json.loads(TOSS_SYMBOL_CACHE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("invalid Toss symbol cache")
+        data.setdefault("symbols", {})
+        return data
+    except Exception:
+        return {"updated_at": None, "symbols": {}}
+
+
+def _save_toss_symbol_cache(data: dict) -> None:
+    data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _atomic_write_text(TOSS_SYMBOL_CACHE_FILE, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+
+def _direct_toss_product_code(item: dict) -> str:
+    existing = str(item.get("toss_product_code") or "").strip().upper()
+    if existing:
+        return existing
+    ticker = str(item.get("symbol") or item.get("ticker") or "").strip().upper()
+    ticker = re.sub(r"\.(KS|KQ)$", "", ticker)
+    category = str(item.get("category") or "").upper()
+    if category.startswith("KR"):
+        digits = "".join(ch for ch in ticker if ch.isdigit())
+        return "A" + digits.zfill(6)[-6:] if digits else ""
+    return ""
+
+
+def _toss_hits(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("result", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _resolve_toss_product_code(item: dict, cache: dict, timeout: float = 5.0) -> str:
+    """Best-effort Toss WTS product code. Failure never affects the scan."""
+    direct = _direct_toss_product_code(item)
+    if direct:
+        return direct
+    ticker = str(item.get("symbol") or item.get("ticker") or "").strip().upper().replace(".", "-")
+    if not ticker:
+        return ""
+    symbols = cache.setdefault("symbols", {})
+    cached = symbols.get(ticker)
+    if isinstance(cached, dict) and cached.get("product_code"):
+        return str(cached["product_code"]).strip().upper()
+    name = str(item.get("name") or "").strip()
+    try:
+        response = requests.post(
+            TOSS_SEARCH_API,
+            json={"query": ticker},
+            headers=TOSS_BROWSER_HEADERS,
+            timeout=timeout,
+        )
+        if response.status_code in (403, 429):
+            return ""
+        response.raise_for_status()
+        hits = _toss_hits(response.json())
+        chosen = None
+        for hit in hits:
+            if str(hit.get("symbol") or "").strip().upper() == ticker and hit.get("stockCode"):
+                chosen = hit
+                break
+        if chosen is None and name:
+            name_cf = name.casefold()
+            for hit in hits:
+                fields = (hit.get("companyName"), hit.get("keyword"), hit.get("stockName"))
+                if any(str(v or "").strip().casefold() == name_cf for v in fields) and hit.get("stockCode"):
+                    chosen = hit
+                    break
+        usable = [h for h in hits if h.get("stockCode")]
+        if chosen is None and len(usable) == 1:
+            chosen = usable[0]
+        if not chosen:
+            return ""
+        code = str(chosen.get("stockCode") or "").strip().upper()
+        if code:
+            symbols[ticker] = {
+                "product_code": code,
+                "name": str(chosen.get("companyName") or chosen.get("keyword") or name),
+                "market": str(chosen.get("market") or item.get("category") or ""),
+            }
+        return code
+    except Exception:
+        return ""
+
+
+
 # -----------------------------------------------------------------------------
 # Scan acceleration / stale-symbol quarantine
 # -----------------------------------------------------------------------------
@@ -796,8 +903,8 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if market_size_krw < MIN_MARKET_SIZE_KRW:
             return None, "market_size_lt_10t"
 
-    # The opinion engine intentionally uses one indicator only: Supertrend(10, 3).
-    st_data = analyze_supertrend(frame, period=10, multiplier=3.0, market=stock.category)
+    # DTC Local v1.14.2 PrevDownSTGate: SuperTrend(14,2) + ADX(14,14).
+    st_data = analyze_supertrend(frame, period=14, multiplier=2.0, market=stock.category)
     st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
@@ -818,10 +925,10 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "opinion": st_data.get("opinion", "Hold"),
         "opinion_code": st_data.get("opinion_code", "HOLD"),
         "opinion_label": st_data.get("opinion_label", "Hold"),
-        "hold_reason": st_data.get("hold_reason"),
-        "new_sell": bool(st_data.get("new_sell", False)),
-        "reference_setups": st_data.get("reference_setups") or {},
         "rank_level": int(st_data.get("rank_level", OPINION_ORDER["HOLD"])),
+        "adx": clean(st_data.get("adx"), 2),
+        "st_direction": st_data.get("st_direction"),
+        "reason": st_data.get("reason") or "",
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
         "market_cap": clean(market_size_krw, 0),
@@ -897,6 +1004,7 @@ def _detail_filename(item: dict) -> str:
 def _summary_item(item: dict, detail_path: str) -> dict:
     st = dict(item.get("supertrend") or {})
     st.pop("chart", None)
+    st.pop("chart_events", None)
     bt = dict(st.get("backtest") or {})
     bt.pop("recent_trades", None)
     st["backtest"] = bt
@@ -914,15 +1022,16 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "opinion": item.get("opinion", "Hold"),
         "opinion_code": item.get("opinion_code", "HOLD"),
         "opinion_label": item.get("opinion_label", "Hold"),
-        "hold_reason": item.get("hold_reason"),
-        "new_sell": bool(item.get("new_sell", False)),
-        "reference_setups": item.get("reference_setups") or st.get("reference_setups") or {},
         "rank_level": item.get("rank_level", OPINION_ORDER["HOLD"]),
+        "adx": item.get("adx", st.get("adx")),
+        "st_direction": item.get("st_direction", st.get("st_direction")),
+        "reason": item.get("reason", st.get("reason") or ""),
         "supertrend": st,
         "sector": item.get("sector") or "—",
         "market_size_krw": item.get("market_size_krw"),
         "market_cap": item.get("market_cap", item.get("market_size_krw")),
         "market_size_basis": item.get("market_size_basis"),
+        "toss_product_code": item.get("toss_product_code"),
         "detail_path": detail_path,
     }
 
@@ -942,88 +1051,95 @@ def _atomic_copy(src: Path, dst: Path) -> None:
 
 
 def _daily_opinion_distribution(items: list[dict]) -> list[dict]:
-    by_date: dict[str, Counter] = {}
-    for item in items:
-        research = item.get("_supertrend_research") or {}
-        for row in research.get("daily_opinions") or []:
-            date = str(row.get("date") or "")
-            code = str(row.get("opinion_code") or "HOLD")
-            if date:
-                by_date.setdefault(date, Counter())[code] += 1
-    rows = []
-    for date in sorted(by_date)[-60:]:
-        c = by_date[date]
-        rows.append({
-            "date": date,
-            "STRONG_BUY": int(c["STRONG_BUY"]),
-            "BUY": int(c["BUY"]),
-            "HOLD": int(c["HOLD"]),
-            "SELL": int(c["SELL"]),
-            "total": int(sum(c.values())),
-        })
-    return rows
+    # v14 publishes current-scan opinion counts in summary metadata; per-stock
+    # historical daily opinion arrays are intentionally not exported.
+    c = Counter(str(item.get("opinion_code") or "HOLD") for item in items)
+    if not items:
+        return []
+    date = max((str(item.get("date") or "") for item in items), default="")
+    return [{
+        "date": date,
+        "STRONG_BUY": int(c["STRONG_BUY"]),
+        "BUY": int(c["BUY"]),
+        "HOLD": int(c["HOLD"]),
+        "SELL": int(c["SELL"]),
+        "STRONG_SELL": int(c["STRONG_SELL"]),
+        "total": int(sum(c.values())),
+    }]
 
 
 def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
-    trades: list[dict] = []
+    events: list[dict] = []
     for item in items:
         ticker = item.get("ticker")
         research = item.get("_supertrend_research") or {}
-        for t in research.get("trades") or []:
-            trades.append({**t, "ticker": ticker})
+        for event in research.get("events") or []:
+            events.append({**event, "ticker": ticker})
 
-    max_returns = [finite(t.get("max_return_pct")) for t in trades]
-    max_returns = [float(x) for x in max_returns if np.isfinite(x)]
-    win20 = [t.get("win_20d") for t in trades if t.get("win_20d") is not None]
-    latest_dist = _daily_opinion_distribution(items)
+    completed = [
+        finite(e.get("max_return_pct")) for e in events
+        if e.get("completed")
+    ]
+    completed = [float(x) for x in completed if np.isfinite(x)]
     return {
-        "model": "SUPER_TREND_10_3_V13_4",
+        "model": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN_V14_1",
         "window": "last 2 calendar years",
-        "max_return_median_pct": clean(float(np.median(max_returns)), 2) if max_returns else None,
-        "win_rate_20d_pct": clean(float(np.mean([bool(x) for x in win20]) * 100.0), 2) if win20 else None,
-        "max_return_samples": int(len(max_returns)),
-        "win_20d_samples": int(len(win20)),
-        "entry": "first Strong Buy per rising leg, next bar open",
-        "max_return": "maximum daily High return from entry until next Sell signal",
-        "win_20d": "Close 20 sessions after entry > entry open",
-        "daily_opinion_distribution_60d": latest_dist,
-        "note": "Only max-return median and 20-session positive-return win rate are headline metrics. Breakout/pullback tags are reference-only.",
+        "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
+        "completed_cycles": int(len(completed)),
+        "signal_cycles": int(len(events)),
+        "entry": "first STRONG BUY or BUY while flat; signal-day close",
+        "exit": "first SELL or STRONG SELL; signal-day close",
+        "reset": "new BUY allowed only after at least one SuperTrend DOWN bar since previous entry",
+        "max_return": "maximum daily High return from entry through exit",
+        "headline": "median of completed BUY->SELL cycle maximum returns",
+        "current_opinion_distribution": _daily_opinion_distribution(items),
     }
 
 
 def _supertrend_report_markdown(category: str, diag: dict) -> str:
-    med = diag.get("max_return_median_pct")
-    win = diag.get("win_rate_20d_pct")
+    med = diag.get("median_max_return_pct")
     med_text = "—" if med is None else f"{float(med):.2f}%"
-    win_text = "—" if win is None else f"{float(win):.2f}%"
     lines = [
-        f"# DTC SuperTrend(10,3) 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        f"# DTC Supertrad Index 백테스트 — {CATEGORY_LABEL.get(category, category)}",
         "",
         f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
-        "## 결과",
+        "## 알고리즘",
         "",
-        f"- **최고 수익률 중위값: {med_text}** (표본 {diag.get('max_return_samples', 0)}회)",
-        f"- **20거래일 뒤 승률: {win_text}** (표본 {diag.get('win_20d_samples', 0)}회)",
-        "- 진입: 각 상승 레그 최초 강한 매수 신호 다음 봉 시가",
-        "- 최고 수익률: 진입 후 다음 매도 신호가 발생할 때까지의 일중 최고가 기준 수익률",
-        "- 20D 승: 진입 20거래일 뒤 종가가 진입가보다 조금이라도 높으면 승",
+        "- SuperTrend(14,2) + ADX(DI 14 / smoothing 14)",
+        "- ADX >= 70: STRONG SELL",
+        "- 40 <= ADX < 70: SELL",
+        "- ST 상승 + 25 <= ADX < 30: BUY",
+        "- ST 상승 + 20 <= ADX < 25 + 현재 ST > 최근 하락→상승 전환봉 ST: STRONG BUY",
+        "- 그 외: HOLD",
         "",
-        "## 최근 60거래일 의견 분포",
+        "## 2년 BUY→SELL Cycle Backtest",
         "",
-        "| 날짜 | 강한 매수 | 매수 | Hold | 매도 | 합계 |",
-        "|---|---:|---:|---:|---:|---:|",
+        f"- **완료 사이클 최고수익률 중위값: {med_text}**",
+        f"- 완료 사이클: {diag.get('completed_cycles', 0)}회 / 신호 사이클: {diag.get('signal_cycles', 0)}회",
+        "- 진입: 포지션이 없을 때 최초 STRONG BUY 또는 BUY 신호일 종가",
+        "- 청산: 최초 SELL 또는 STRONG SELL 신호일 종가",
+        "- 진입 후 BUY/STRONG BUY 재신호는 무시",
+        "- 다음 신규 BUY는 이전 진입 뒤 SuperTrend 하락봉이 최소 1개 이상 지나야 허용",
+        "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 그 집합의 중위값",
+        "- 미청산 사이클은 차트에는 표시하지만 중위값에서는 제외",
+        "",
+        "## 현재 의견 분포",
+        "",
+        "| 날짜 | STRONG BUY | BUY | HOLD | SELL | STRONG SELL | 합계 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for row in diag.get("daily_opinion_distribution_60d") or []:
-        lines.append(f"| {row['date']} | {row['STRONG_BUY']} | {row['BUY']} | {row['HOLD']} | {row['SELL']} | {row['total']} |")
+    for row in diag.get("current_opinion_distribution") or []:
+        lines.append(f"| {row['date']} | {row['STRONG_BUY']} | {row['BUY']} | {row['HOLD']} | {row['SELL']} | {row['STRONG_SELL']} | {row['total']} |")
     lines += [
         "",
         "## 주의",
         "",
         "- 현재 유니버스로 과거를 재구성하므로 생존 편향이 존재합니다.",
-        "- 돌파매매/눌림목매매 평가는 참고 태그이며 SuperTrend 의견과 백테스트에 영향을 주지 않습니다.",
+        "- 백테스트는 DTC Local v1.14.2 규격대로 신호일 종가 체결을 사용합니다.",
     ]
     return "\n".join(lines) + "\n"
+
 
 def _write_quiz_shard(category: str, items: list[dict], frames: dict[str, pd.DataFrame]) -> int:
     """Publish a lazy-loaded quiz manifest plus per-stock compact OHLCV files."""
@@ -1207,7 +1323,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v13.4 Supertrend | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v14.1 Supertrad Index | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1399,9 +1515,8 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Supertrend ranking: Strong Buy -> Buy -> Hold -> Sell.
-    # Same-level default is market cap/AUM descending. Recent SELL flips remain
-    # first inside the collapsed SELL group.
+    # Supertrad Index ranking: Strong Buy -> Buy -> Hold -> Sell -> Strong Sell.
+    # Same-level default is market cap/AUM descending.
     unsorted_items = list(results.values())
     backtest_refreshed = True
     backtest_diagnostics = _aggregate_supertrend_backtest(category, unsorted_items)
@@ -1409,8 +1524,7 @@ def scan_category(
     def _rank_key(item: dict):
         level = int(item.get("rank_level", OPINION_ORDER["HOLD"]))
         cap = finite(item.get("market_size_krw"), -1.0)
-        sell_recent_key = 0 if (item.get("opinion_code") == "SELL" and item.get("new_sell")) else 1
-        return (level, sell_recent_key if level == OPINION_ORDER["SELL"] else 0, -cap, item.get("symbol", ""))
+        return (level, -cap, item.get("symbol", ""))
 
     items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
@@ -1422,11 +1536,17 @@ def scan_category(
     # collected for the full universe during analyze_prepared so market-cap/AUM
     # filtering works beyond TOP20.
     print(f"[{category}] display metadata enrichment: top {len(top_items):,}")
+    toss_cache = _load_toss_symbol_cache()
+    toss_cache_dirty = False
     for idx, item in enumerate(top_items, 1):
         stock = by_ticker.get(item["ticker"])
         if stock is None:
             continue
         enrich_display_metadata(stock, item, thresholds, size_cache)
+        toss_code = _resolve_toss_product_code(item, toss_cache)
+        if toss_code:
+            item["toss_product_code"] = toss_code
+            toss_cache_dirty = True
         # Keep detail metrics coherent with the summary display value.
         item["metrics"]["market_size_krw"] = item.get("market_size_krw")
         if idx % 20 == 0 or idx == len(top_items):
@@ -1434,6 +1554,8 @@ def scan_category(
         # Cache normally makes this zero-cost after the first successful fetch.
         if _age_days((size_cache.get(item["ticker"]) or {}).get("meta_fetched_at")) < 0.01:
             time.sleep(random.uniform(0.12, 0.24))
+    if toss_cache_dirty:
+        _save_toss_symbol_cache(toss_cache)
 
     quiz_manifest = DATA_DIR / "quiz" / CATEGORY_DIR[category] / "manifest.json"
     if scan_mode == "FULL" or not quiz_manifest.is_file():
@@ -1449,7 +1571,7 @@ def scan_category(
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Dongtan Trading Center",
-        "strategy": "SUPER_TREND_10_2_OPINION",
+        "strategy": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1476,21 +1598,18 @@ def scan_category(
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "strategy_model": {
-            "name": "Supertrend",
-            "period": 10,
-            "multiplier": 3.0,
-            "opinion_order": ["STRONG_BUY", "BUY", "HOLD", "SELL"],
-            "engine": "TradingView ta.supertrend-compatible state machine",
-            "atr": "Wilder RMA(10)",
-            "warmup_discard_bars": 100,
-            "strong_buy": "internal trend-confirmation point through +3 trading bars",
-            "buy": "confirmed rising trend after the Strong Buy window",
-            "sell_condition": "current Supertrend direction is DOWN",
+            "name": "Supertrad Index",
+            "supertrend": "14,2",
+            "adx": "DI 14 / smoothing 14",
+            "opinion_order": ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"],
+            "strong_sell": "ADX >= 70",
+            "sell": "40 <= ADX < 70",
+            "buy": "ST UP and 25 <= ADX < 30",
+            "strong_buy": "ST UP and 20 <= ADX < 25 and, from the bar after flip, current UP ST >= last DOWN ST immediately before flip",
             "otherwise": "HOLD",
-            "ranking": "Strong Buy -> Buy -> Hold -> Sell; same level market size descending; recent SELL flips first inside SELL",
-            "reference_setups": "breakout/pullback labels are reference-only and never affect opinion/ranking",
-            "chart": "126 sessions adjusted real OHLC + Supertrend(10,3)",
-            "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue",
+            "ranking": "Strong Buy -> Buy -> Hold -> Sell -> Strong Sell; same level market size descending",
+            "chart": "126 sessions adjusted real OHLC + SuperTrend(14,2) + ADX(14,14) + BUY/SELL cycle markers; click opens Toss Securities WTS",
+            "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue; Strong Buy red dashed; Buy orange dashed",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },
@@ -1523,7 +1642,7 @@ def main():
         "--scan-mode",
         choices=["FULL", "QUICK"],
         default="FULL",
-        help="FULL refreshes market/quiz data; QUICK refreshes current Supertrend opinions and reuses the latest FULL quiz shard.",
+        help="FULL refreshes market/quiz data; QUICK refreshes current Supertrad Index opinions and reuses the latest FULL quiz shard.",
     )
     args = parser.parse_args()
 

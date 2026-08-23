@@ -1,34 +1,11 @@
-# DTC v13.3 SuperTrend 구현
+# DTC v14.1 Supertrad Index 구현
 
-## 판정
+기준: 첨부 DTC Local v1.14.2 PrevDownSTGate.
 
-`P0 = ST[flip_idx-1]`, `P1 = ST[today]`.
+STRONG BUY gate:
+1. ST_DIR -1 → +1 flip을 찾는다.
+2. P0 = flip 직전 봉의 DOWN SuperTrend 값 ST[i-1].
+3. flip 봉 자체는 age=0으로 제외한다.
+4. 다음 UP 봉부터 current ST >= P0 이고 20 <= ADX < 25이면 STRONG BUY.
 
-1. `dir < 0` → 매도
-2. 상승이지만 P0 없음 → Hold/NO_FLIP
-3. 상승이지만 `P1 < P0` → Hold/BELOW_GATE
-4. `P1 >= P0` 최초 성립 봉을 `gate_idx`로 래치
-5. `today - gate_idx <= 3` → 강한 매수
-6. 그 이후 같은 상승 레그 → 매수
-
-새로운 하락→상승 전환이 발생할 때만 P0가 갱신됩니다.
-
-## 참고 태그
-
-- 돌파: 직전20일 고점 돌파 + 거래량비 1.2x 이상 = 좋음; 고점 -3% 이내 + 0.8x 이상 = 보통; 나머지 나쁨.
-- 눌림: ST 상승 + EMA20>=EMA50 + EMA20 근처 + RSI14 40~60 = 좋음. 완화 조건은 보통, 나머지는 나쁨.
-
-참고 태그는 Opinion에 사용하지 않습니다.
-
-## Backtest
-
-- 기간: 최근 2년
-- 상승 레그당 최초 강한 매수 1회
-- 진입: 신호 다음 봉 시가
-- 성공: 다음 매도 신호 전에 일중 High가 진입가 대비 +10% 이상 도달
-- 출력 headline: +10% 도달 승률
-- 미청산 레그: 분모 제외
-
-## 차트
-
-일반 수정 OHLC 126거래일 + SuperTrend(10,2). 전환점에서 ST 선은 끊습니다. 상승 캔들/ST는 빨강, 하락 캔들/ST는 파랑입니다.
+BUY / SELL / STRONG SELL / HOLD 및 2년 BUY→SELL cycle 백테스트는 로컬 v1.14.2와 동일하다.

@@ -1,9 +1,9 @@
-# DTC v13.3 SuperTrend Backtest Report
+# DTC v14.1 Supertrad Index Backtest Report
 
-실제 카테고리 스캔 시 `docs/data/<cat>/supertrend_backtest_report.md`가 생성됩니다.
-
-Headline metric은 하나뿐입니다.
-
-> **강한 매수 다음 봉 시가 진입 후, 다음 매도 신호 전까지 +10% 가격 도달 승률**
-
-표본수/성공수는 분모 확인용으로 함께 기록하지만 평균수익률, 중앙값, 손익비 등은 화면의 백테스트 지표로 사용하지 않습니다.
+백테스트 규칙은 DTC Local v1.14.2와 동일합니다.
+- 최초 STRONG BUY 또는 BUY 신호일 종가 진입
+- 보유 중 추가 BUY 무시
+- 최초 SELL/STRONG SELL 신호일 종가 청산
+- 다음 진입 전 ST DOWN 봉 최소 1개 필요
+- 완료 cycle의 진입~청산 최고 High 수익률 집합 중위값을 BACKTEST로 표시
+- 미완료 cycle은 차트에는 표시하되 중위값에서 제외

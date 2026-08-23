@@ -1,32 +1,37 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-SUPER_TREND_PERIOD = 10
-SUPER_TREND_MULTIPLIER = 3.0
-WARMUP_DISCARD_BARS = 100
+# DTC Local v1.14.2 PrevDownSTGate + BUY->SELL Cycle specification.
+SUPER_TREND_PERIOD = 14
+SUPER_TREND_MULTIPLIER = 2.0
+ADX_DI_LENGTH = 14
+ADX_SMOOTHING = 14
 BACKTEST_YEARS = 2
-BACKTEST_SESSIONS = 504
-MIN_REQUIRED_BARS = 604
 CHART_SESSIONS = 126
-NEW_SELL_WINDOW_BARS = 5
-STRONG_BUY_GATE_BARS = 3  # gate bar=0, then +1/+2/+3 trading bars
+# The web scanner still keeps its inherited >=604-session hard filter.  The
+# algorithm itself only needs enough history for ST/ADX warm-up, but keeping the
+# scanner filter makes the 2Y cycle test stable and deterministic.
+MIN_REQUIRED_BARS = 604
 
 OPINION_ORDER = {
     "STRONG_BUY": 0,
     "BUY": 1,
     "HOLD": 2,
     "SELL": 3,
+    "STRONG_SELL": 4,
 }
 
 OPINION_LABEL = {
-    "STRONG_BUY": "강한 매수",
-    "BUY": "매수",
-    "HOLD": "Hold",
-    "SELL": "매도",
+    "STRONG_BUY": "STRONG BUY",
+    "BUY": "BUY",
+    "HOLD": "HOLD",
+    "SELL": "SELL",
+    "STRONG_SELL": "STRONG SELL",
 }
 
 
@@ -35,7 +40,7 @@ def _num(series: pd.Series) -> pd.Series:
 
 
 def _ohlc(df: pd.DataFrame) -> pd.DataFrame:
-    """Return valid adjusted OHLC bars only; never forward-fill missing sessions."""
+    """Valid adjusted OHLC only. Missing sessions are omitted, never forward-filled."""
     required = ["Open", "High", "Low", "Close"]
     if df is None or df.empty or any(c not in df.columns for c in required):
         return pd.DataFrame(columns=required)
@@ -43,8 +48,7 @@ def _ohlc(df: pd.DataFrame) -> pd.DataFrame:
     for c in required:
         out[c] = _num(df[c]).to_numpy()
     out["Volume"] = _num(df["Volume"]).to_numpy() if "Volume" in df.columns else 0.0
-    out = out.replace([np.inf, -np.inf], np.nan)
-    out = out.dropna(subset=required)
+    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=required)
     out = out[
         (out["High"] >= out["Low"])
         & (out["Open"] > 0)
@@ -53,470 +57,394 @@ def _ohlc(df: pd.DataFrame) -> pd.DataFrame:
         & (out["Close"] > 0)
     ]
     out["Volume"] = out["Volume"].fillna(0.0).clip(lower=0.0)
-    out = out[~out.index.duplicated(keep="last")].sort_index()
+    return out[~out.index.duplicated(keep="last")].sort_index()
+
+
+def _rma(values: np.ndarray, length: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    out = np.full(len(values), np.nan, dtype=float)
+    if length <= 0 or len(values) < length:
+        return out
+    seed = values[:length]
+    if not np.all(np.isfinite(seed)):
+        return out
+    out[length - 1] = float(np.mean(seed))
+    for i in range(length, len(values)):
+        if np.isfinite(values[i]) and np.isfinite(out[i - 1]):
+            out[i] = (out[i - 1] * (length - 1) + values[i]) / length
     return out
 
 
-def wilder_rma(series: pd.Series, period: int) -> pd.Series:
-    """TradingView/Pine Wilder RMA: SMA seed then alpha=1/period recurrence."""
-    values = pd.to_numeric(series, errors="coerce").to_numpy(float)
+def _rma_from_first_finite(values: np.ndarray, length: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
     out = np.full(len(values), np.nan, dtype=float)
-    if period <= 0 or len(values) < period:
-        return pd.Series(out, index=series.index, dtype=float)
-    for seed_end in range(period - 1, len(values)):
-        seed = values[seed_end - period + 1 : seed_end + 1]
-        if np.all(np.isfinite(seed)):
-            out[seed_end] = float(np.mean(seed))
-            start = seed_end + 1
-            break
-    else:
-        return pd.Series(out, index=series.index, dtype=float)
-    for i in range(start, len(values)):
+    finite = np.flatnonzero(np.isfinite(values))
+    if length <= 0 or len(finite) < length:
+        return out
+    first = int(finite[0])
+    seed_end = first + length
+    if seed_end > len(values):
+        return out
+    seed_values = values[first:seed_end]
+    if np.count_nonzero(np.isfinite(seed_values)) < length:
+        return out
+    seed_idx = seed_end - 1
+    out[seed_idx] = float(np.mean(seed_values))
+    for i in range(seed_idx + 1, len(values)):
         if np.isfinite(values[i]) and np.isfinite(out[i - 1]):
-            out[i] = (out[i - 1] * (period - 1) + values[i]) / period
-    return pd.Series(out, index=series.index, dtype=float)
-
-
-def true_range(df: pd.DataFrame) -> pd.Series:
-    ohlc = _ohlc(df)
-    if ohlc.empty:
-        return pd.Series(dtype=float)
-    high, low, close = ohlc["High"], ohlc["Low"], ohlc["Close"]
-    prev_close = close.shift(1)
-    return pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
+            out[i] = (out[i - 1] * (length - 1) + values[i]) / length
+    return out
 
 
 def supertrend(
     df: pd.DataFrame,
-    period: int = SUPER_TREND_PERIOD,
+    length: int = SUPER_TREND_PERIOD,
     multiplier: float = SUPER_TREND_MULTIPLIER,
 ) -> pd.DataFrame:
-    """TradingView ta.supertrend(factor, atrPeriod)-compatible line values.
+    """SuperTrend used by DTC Local v1.14: ST(14,2), Wilder ATR, close-based flips."""
+    d = _ohlc(df).copy()
+    if d.empty:
+        return d.assign(ATR=np.nan, ST_UPPER=np.nan, ST_LOWER=np.nan, ST=np.nan, ST_DIR=0)
 
-    Internal direction convention is +1=UP, -1=DOWN (TradingView returns the
-    opposite sign). Inputs are standard adjusted OHLC, ATR uses Wilder RMA,
-    and the state machine is a direct translation of TradingView's documented
-    pine_supertrend() reference implementation.
-    """
-    ohlc = _ohlc(df)
-    columns = [
-        "tr", "atr", "hl2", "upper_basic", "lower_basic",
-        "upper", "lower", "supertrend", "direction",
-    ]
-    if ohlc.empty:
-        return pd.DataFrame(index=getattr(df, "index", None), columns=columns, dtype=float)
+    high = d["High"].to_numpy(float)
+    low = d["Low"].to_numpy(float)
+    close = d["Close"].to_numpy(float)
+    n = len(d)
 
-    high, low, close = ohlc["High"], ohlc["Low"], ohlc["Close"]
-    tr = true_range(ohlc).reindex(ohlc.index)
-    atr = wilder_rma(tr, int(period))
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum.reduce([high - low, np.abs(high - prev_close), np.abs(low - prev_close)])
+    atr = _rma(tr, int(length))
     hl2 = (high + low) / 2.0
-    upper_basic = hl2 + float(multiplier) * atr
-    lower_basic = hl2 - float(multiplier) * atr
+    basic_upper = hl2 + float(multiplier) * atr
+    basic_lower = hl2 - float(multiplier) * atr
 
-    n = len(ohlc)
     upper = np.full(n, np.nan, dtype=float)
     lower = np.full(n, np.nan, dtype=float)
-    direction = np.full(n, np.nan, dtype=float)
     st = np.full(n, np.nan, dtype=float)
-    a = atr.to_numpy(float)
-    c = close.to_numpy(float)
-    ub0 = upper_basic.to_numpy(float)
-    lb0 = lower_basic.to_numpy(float)
+    direction = np.zeros(n, dtype=int)
+    first = int(length) - 1
+    if n <= first:
+        d["ATR"] = atr
+        d["ST_UPPER"] = upper
+        d["ST_LOWER"] = lower
+        d["ST"] = st
+        d["ST_DIR"] = direction
+        return d
 
+    upper[first] = basic_upper[first]
+    lower[first] = basic_lower[first]
+    direction[first] = -1
+    st[first] = upper[first]
+
+    for i in range(first + 1, n):
+        upper[i] = basic_upper[i] if (basic_upper[i] < upper[i - 1] or close[i - 1] > upper[i - 1]) else upper[i - 1]
+        lower[i] = basic_lower[i] if (basic_lower[i] > lower[i - 1] or close[i - 1] < lower[i - 1]) else lower[i - 1]
+        if math.isclose(st[i - 1], upper[i - 1], rel_tol=1e-12, abs_tol=1e-12):
+            if close[i] > upper[i]:
+                direction[i] = 1
+                st[i] = lower[i]
+            else:
+                direction[i] = -1
+                st[i] = upper[i]
+        else:
+            if close[i] < lower[i]:
+                direction[i] = -1
+                st[i] = upper[i]
+            else:
+                direction[i] = 1
+                st[i] = lower[i]
+
+    d["ATR"] = atr
+    d["ST_UPPER"] = upper
+    d["ST_LOWER"] = lower
+    d["ST"] = st
+    d["ST_DIR"] = direction
+    return d
+
+
+def adx(
+    df: pd.DataFrame,
+    di_length: int = ADX_DI_LENGTH,
+    adx_smoothing: int = ADX_SMOOTHING,
+) -> pd.DataFrame:
+    d = _ohlc(df).copy()
+    n = len(d)
+    if n == 0:
+        for col in ("PLUS_DI", "MINUS_DI", "DX", "ADX"):
+            d[col] = pd.Series(dtype=float)
+        return d
+
+    high = d["High"].to_numpy(float)
+    low = d["Low"].to_numpy(float)
+    close = d["Close"].to_numpy(float)
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum.reduce([high - low, np.abs(high - prev_close), np.abs(low - prev_close)])
+
+    up_move = np.diff(high, prepend=high[0])
+    down_move = -np.diff(low, prepend=low[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    atr = _rma(tr, int(di_length))
+    plus_sm = _rma(plus_dm, int(di_length))
+    minus_sm = _rma(minus_dm, int(di_length))
+    plus_di = np.full(n, np.nan, dtype=float)
+    minus_di = np.full(n, np.nan, dtype=float)
+    valid_atr = np.isfinite(atr) & (atr > 0)
+    plus_di[valid_atr] = 100.0 * plus_sm[valid_atr] / atr[valid_atr]
+    minus_di[valid_atr] = 100.0 * minus_sm[valid_atr] / atr[valid_atr]
+
+    denom = plus_di + minus_di
+    dx = np.full(n, np.nan, dtype=float)
+    valid = np.isfinite(denom) & (denom > 0)
+    dx[valid] = 100.0 * np.abs(plus_di[valid] - minus_di[valid]) / denom[valid]
+    zero = np.isfinite(plus_di) & np.isfinite(minus_di) & (denom == 0)
+    dx[zero] = 0.0
+
+    d["PLUS_DI"] = plus_di
+    d["MINUS_DI"] = minus_di
+    d["DX"] = dx
+    d["ADX"] = _rma_from_first_finite(dx, int(adx_smoothing))
+    return d
+
+
+def add_up_flip_reference(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach the previous DOWN SuperTrend price at the latest DOWN->UP flip.
+
+    DTC Local v1.14.2 rule:
+    * P0 is ST[i-1], the last DOWN SuperTrend value immediately before flip.
+    * The UP-flip bar itself has age 0 and cannot be STRONG BUY.
+    * From the next UP bar onward, current UP ST must reach/exceed P0.
+    """
+    d = df.copy()
+    n = len(d)
+    refs = np.full(n, np.nan, dtype=float)
+    ages = np.full(n, np.nan, dtype=float)
+    current_ref = np.nan
+    current_age = -1
+    dirs = pd.to_numeric(d.get("ST_DIR", pd.Series(index=d.index, dtype=float)), errors="coerce").fillna(0).astype(int).to_numpy()
+    sts = pd.to_numeric(d.get("ST", pd.Series(index=d.index, dtype=float)), errors="coerce").to_numpy(dtype=float)
     for i in range(n):
-        if not np.isfinite(a[i]):
-            continue
-        # Pine uses nz(previous final band); on the first ATR-valid bar this
-        # reduces to the current basic bands.
-        if i == 0 or not np.isfinite(upper[i - 1]) or not np.isfinite(lower[i - 1]):
-            upper[i] = ub0[i]
-            lower[i] = lb0[i]
-        else:
-            prev_upper, prev_lower = upper[i - 1], lower[i - 1]
-            prev_close = c[i - 1]
-            lower[i] = lb0[i] if (lb0[i] > prev_lower or prev_close < prev_lower) else prev_lower
-            upper[i] = ub0[i] if (ub0[i] < prev_upper or prev_close > prev_upper) else prev_upper
-
-        # TradingView reference: direction=DOWN while previous ATR is na;
-        # thereafter state depends on which final band held prevSuperTrend.
-        if i == 0 or not np.isfinite(a[i - 1]) or not np.isfinite(st[i - 1]):
-            direction[i] = -1.0
-        else:
-            prev_on_upper = np.isclose(st[i - 1], upper[i - 1], rtol=1e-12, atol=1e-12)
-            if prev_on_upper:  # previous state DOWN
-                direction[i] = 1.0 if c[i] > upper[i] else -1.0
-            else:  # previous state UP
-                direction[i] = -1.0 if c[i] < lower[i] else 1.0
-        st[i] = lower[i] if direction[i] > 0 else upper[i]
-
-    return pd.DataFrame(
-        index=ohlc.index,
-        data={
-            "tr": tr.to_numpy(float),
-            "atr": atr.to_numpy(float),
-            "hl2": hl2.to_numpy(float),
-            "upper_basic": upper_basic.to_numpy(float),
-            "lower_basic": lower_basic.to_numpy(float),
-            "upper": upper,
-            "lower": lower,
-            "supertrend": st,
-            "direction": direction,
-        },
-    )
+        is_flip = (
+            i > 0
+            and dirs[i] == 1
+            and dirs[i - 1] == -1
+            and np.isfinite(sts[i - 1])
+        )
+        if is_flip:
+            current_ref = float(sts[i - 1])
+            current_age = 0
+        if dirs[i] == 1 and np.isfinite(current_ref):
+            refs[i] = current_ref
+            ages[i] = float(current_age)
+            current_age += 1
+        elif dirs[i] != 1:
+            current_age = -1
+    d["ST_UP_FLIP_REF"] = refs
+    d["ST_UP_FLIP_AGE"] = ages
+    return d
 
 
-def _opinion_for(
-    close: float,
-    p0: float,
-    p1: float,
-    direction: float,
-    bars_since_gate: int | None,
-) -> tuple[str, str | None, float | None]:
-    """Opinion rule: Strong Buy for gate day through +3 trading bars."""
-    if not np.isfinite(direction):
-        return "HOLD", "NO_FLIP", None
-    if direction < 0:
-        return "SELL", None, None
-    if not (np.isfinite(p0) and p0 > 0 and np.isfinite(p1)):
-        return "HOLD", "NO_FLIP", None
-
-    r_pct = (close - p0) / p0 * 100.0 if np.isfinite(close) and close > 0 else np.nan
-    if p1 < p0:
-        return "HOLD", "BELOW_GATE", float(r_pct) if np.isfinite(r_pct) else None
-
-    eps = max(1e-12, abs(close) * 1e-12)
-    assert close + eps >= p1 >= p0 - eps, f"gate invariant failed: close={close}, p1={p1}, p0={p0}"
-    assert np.isfinite(r_pct) and r_pct >= -1e-10, f"r_pct invalid after gate: {r_pct}"
-    age = int(bars_since_gate) if bars_since_gate is not None else 0
-    if 0 <= age <= STRONG_BUY_GATE_BARS:
-        return "STRONG_BUY", None, max(0.0, float(r_pct))
-    return "BUY", None, max(0.0, float(r_pct))
+def classify_supertrad_index(
+    st_direction: int,
+    adx_value: float,
+    st_value: float | None = None,
+    up_flip_st: float | None = None,
+    up_flip_age: int | float | None = None,
+) -> tuple[str, str]:
+    """Exact DTC Local v1.14.2 Supertrad Index decision table."""
+    if adx_value is None or not np.isfinite(float(adx_value)):
+        return "HOLD", "ADX(14,14) 계산값 부족"
+    a = float(adx_value)
+    if a >= 70.0:
+        return "STRONG_SELL", f"ADX(14,14) {a:.1f} ≥ 70 · SuperTrend와 무관"
+    if a >= 40.0:
+        return "SELL", f"ADX(14,14) {a:.1f} ≥ 40 · SuperTrend와 무관"
+    if int(st_direction) == 1 and 20.0 <= a < 25.0:
+        age_ok = (
+            up_flip_age is None
+            or (np.isfinite(float(up_flip_age)) and float(up_flip_age) >= 1.0)
+        )
+        gate_ok = (
+            st_value is not None
+            and up_flip_st is not None
+            and np.isfinite(float(st_value))
+            and np.isfinite(float(up_flip_st))
+            and age_ok
+            and float(st_value) >= float(up_flip_st)
+        )
+        if gate_ok:
+            return "STRONG_BUY", (
+                f"SuperTrend(14,2) 상승 · 현재 ST {float(st_value):,.2f} ≥ 직전 하락 ST {float(up_flip_st):,.2f} · "
+                f"20 ≤ ADX(14,14) {a:.1f} < 25"
+            )
+        return "HOLD", (
+            f"SuperTrend 상승이나 ST 돌파조건 미충족 · 현재 ST {float(st_value):,.2f} / 직전 하락 ST {float(up_flip_st):,.2f}"
+            if st_value is not None and up_flip_st is not None and np.isfinite(float(st_value)) and np.isfinite(float(up_flip_st))
+            else "SuperTrend 상승이나 직전 하락 ST 기준가격이 아직 없습니다."
+        )
+    if int(st_direction) == 1 and 25.0 <= a < 30.0:
+        return "BUY", f"SuperTrend(14,2) 상승 · 25 ≤ ADX(14,14) {a:.1f} < 30"
+    if a < 20.0:
+        return "HOLD", f"ADX(14,14) {a:.1f} < 20"
+    if 30.0 <= a < 40.0:
+        return "HOLD", f"30 ≤ ADX(14,14) {a:.1f} < 40"
+    return "HOLD", f"SuperTrend(14,2) 하락 · ADX(14,14) {a:.1f} < 40"
 
 
 def signal_series(
     df: pd.DataFrame,
     period: int = SUPER_TREND_PERIOD,
     multiplier: float = SUPER_TREND_MULTIPLIER,
-    warmup_discard: int = WARMUP_DISCARD_BARS,
+    di_length: int = ADX_DI_LENGTH,
+    adx_smoothing: int = ADX_SMOOTHING,
 ) -> pd.DataFrame:
-    ohlc = _ohlc(df)
-    st = supertrend(ohlc, period=period, multiplier=multiplier)
-    out = ohlc.join(st, how="left")
-    n = len(out)
-    if n == 0:
-        return out
+    st = supertrend(df, period, multiplier)
+    if st.empty:
+        return st
+    d = adx(st[["Open", "High", "Low", "Close", "Volume"]], di_length, adx_smoothing)
+    # Preserve the ST columns computed above.
+    for col in ("ATR", "ST_UPPER", "ST_LOWER", "ST", "ST_DIR"):
+        d[col] = st[col]
+    d = add_up_flip_reference(d)
 
-    st_arr = out["supertrend"].to_numpy(float)
-    dir_arr = out["direction"].to_numpy(float)
-    close_arr = out["Close"].to_numpy(float)
-    atr_arr = out["atr"].to_numpy(float)
-    first_valids = np.flatnonzero(np.isfinite(st_arr) & np.isfinite(dir_arr))
-    first_valid = int(first_valids[0]) if len(first_valids) else n
-    decision_from = first_valid + int(warmup_discard)
-
-    p0_values = np.full(n, np.nan)
-    flip_positions = np.full(n, np.nan)
-    gate_positions = np.full(n, np.nan)
-    r_gate_values = np.full(n, np.nan)
-    r_values = np.full(n, np.nan)
-    stop_values = np.full(n, np.nan)
-    atr_pct_values = np.full(n, np.nan)
-    g_atr_values = np.full(n, np.nan)
-    d_atr_values = np.full(n, np.nan)
-    bars_flip_values = np.full(n, np.nan)
-    bars_gate_values = np.full(n, np.nan)
-    sell_flip_values = np.full(n, np.nan)
-    new_sell_values = np.zeros(n, dtype=bool)
-    decision_valid = np.zeros(n, dtype=bool)
-    opinion_codes: list[str] = ["HOLD"] * n
-    hold_reasons: list[str | None] = ["NO_FLIP"] * n
-    leg_ids = np.full(n, np.nan)
-
-    current_p0 = np.nan
-    current_flip: int | None = None
-    current_gate: int | None = None
-    current_r_at_gate = np.nan
-    current_leg_id = 0
-    last_sell_flip: int | None = None
-
-    for i in range(n):
-        d, p1, close, atr = dir_arr[i], st_arr[i], close_arr[i], atr_arr[i]
-        prev_d = dir_arr[i - 1] if i > 0 else np.nan
-        decision_valid[i] = i >= decision_from and np.isfinite(d) and np.isfinite(p1)
-
-        if np.isfinite(d) and d > 0 and i > 0 and np.isfinite(prev_d) and prev_d < 0:
-            current_leg_id += 1
-            current_flip = i
-            current_gate = None
-            current_r_at_gate = np.nan
-            current_p0 = st_arr[i - 1] if np.isfinite(st_arr[i - 1]) else np.nan
-
-        if np.isfinite(d) and d < 0 and i > 0 and np.isfinite(prev_d) and prev_d > 0:
-            last_sell_flip = i
-            current_flip = None
-            current_gate = None
-            current_r_at_gate = np.nan
-            current_p0 = np.nan
-
-        if np.isfinite(d) and d > 0:
-            if current_flip is not None:
-                flip_positions[i] = current_flip
-                leg_ids[i] = current_leg_id
-                bars_flip_values[i] = i - current_flip
-            if np.isfinite(current_p0):
-                p0_values[i] = current_p0
-                r_values[i] = (close - current_p0) / current_p0 * 100.0
-                if np.isfinite(atr) and atr > 0:
-                    g_atr_values[i] = (close - current_p0) / atr
-                if np.isfinite(p1) and p1 >= current_p0 and current_gate is None:
-                    current_gate = i
-                    current_r_at_gate = r_values[i]
-                if current_gate is not None:
-                    gate_positions[i] = current_gate
-                    bars_gate_values[i] = i - current_gate
-                    r_gate_values[i] = current_r_at_gate
-
-            gate_age = int(i - current_gate) if current_gate is not None else None
-            op, reason, r = _opinion_for(close, current_p0, p1, d, gate_age)
-            opinion_codes[i] = op
-            hold_reasons[i] = reason if op == "HOLD" else None
-            if r is not None and np.isfinite(r):
-                r_values[i] = float(r)
-        elif np.isfinite(d) and d < 0:
-            opinion_codes[i] = "SELL"
-            hold_reasons[i] = None
-        else:
-            opinion_codes[i] = "HOLD"
-            hold_reasons[i] = "NO_FLIP"
-
-        if np.isfinite(close) and close > 0 and np.isfinite(p1):
-            stop_values[i] = (close - p1) / close * 100.0
-        if np.isfinite(close) and close > 0 and np.isfinite(atr) and atr > 0:
-            atr_pct_values[i] = atr / close * 100.0
-            d_atr_values[i] = (close - p1) / atr if np.isfinite(p1) else np.nan
-
-        if last_sell_flip is not None and np.isfinite(d) and d < 0:
-            sell_flip_values[i] = last_sell_flip
-            new_sell_values[i] = (i - last_sell_flip) < NEW_SELL_WINDOW_BARS
-
-    out["p0"] = p0_values
-    out["flip_pos"] = flip_positions
-    out["gate_pos"] = gate_positions
-    out["leg_id"] = leg_ids
-    out["r_at_gate"] = r_gate_values
-    out["r_pct"] = r_values
-    out["stop_pct"] = stop_values
-    out["atr_pct"] = atr_pct_values
-    out["g_atr"] = g_atr_values
-    out["d_atr"] = d_atr_values
-    out["bars_since_flip"] = bars_flip_values
-    out["bars_since_gate"] = bars_gate_values
-    out["sell_flip_pos"] = sell_flip_values
-    out["new_sell"] = new_sell_values
-    out["decision_valid"] = decision_valid
-    out["opinion_code"] = opinion_codes
-    out["opinion"] = [OPINION_LABEL[x] for x in opinion_codes]
-    out["hold_reason"] = hold_reasons
-    return out
+    ops: list[str] = []
+    reasons: list[str] = []
+    dirs = d["ST_DIR"].fillna(0).astype(int).to_numpy()
+    adxs = d["ADX"].to_numpy(float)
+    sts = d["ST"].to_numpy(float)
+    refs = d["ST_UP_FLIP_REF"].to_numpy(float)
+    ages = d["ST_UP_FLIP_AGE"].to_numpy(float)
+    for i in range(len(d)):
+        op, reason = classify_supertrad_index(dirs[i], adxs[i], sts[i], refs[i], ages[i])
+        ops.append(op)
+        reasons.append(reason)
+    d["opinion_code"] = ops
+    d["opinion"] = [OPINION_LABEL[x] for x in ops]
+    d["reason"] = reasons
+    return d
 
 
-def _rsi14(close: pd.Series) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = (-delta).clip(lower=0.0)
-    avg_gain = wilder_rma(gain, 14)
-    avg_loss = wilder_rma(loss, 14)
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100.0 - 100.0 / (1.0 + rs)
-    rsi = rsi.where(avg_loss > 0, 100.0)
-    return rsi
+def _date_text(ts: Any) -> str:
+    return pd.Timestamp(ts).strftime("%Y-%m-%d")
 
 
-def reference_setups(ohlc: pd.DataFrame, current_direction: float | None) -> dict[str, Any]:
-    """Reference-only breakout/pullback labels. Never used by opinion/ranking."""
-    df = _ohlc(ohlc)
-    if len(df) < 60:
-        neutral = {"grade": "NORMAL", "label": "보통", "reason": "데이터 부족"}
-        return {"reference_only": True, "breakout": dict(neutral), "pullback": dict(neutral)}
+def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> dict[str, Any]:
+    """Exact DTC Local v1.14 BUY->SELL cycle backtest.
 
-    close = df["Close"]
-    volume = df["Volume"]
-    prior_high20 = df["High"].shift(1).rolling(20, min_periods=20).max().iloc[-1]
-    prior_vol20 = volume.shift(1).rolling(20, min_periods=20).mean().iloc[-1]
-    c = float(close.iloc[-1])
-    v = float(volume.iloc[-1])
-    dist_high = (c / prior_high20 - 1.0) * 100.0 if np.isfinite(prior_high20) and prior_high20 > 0 else np.nan
-    vol_ratio = v / prior_vol20 if np.isfinite(prior_vol20) and prior_vol20 > 0 else np.nan
-
-    if np.isfinite(dist_high) and np.isfinite(vol_ratio):
-        if dist_high >= 0.0 and vol_ratio >= 1.20:
-            b_grade, b_label = "GOOD", "좋음"
-        elif dist_high >= -3.0 and vol_ratio >= 0.80:
-            b_grade, b_label = "NORMAL", "보통"
-        else:
-            b_grade, b_label = "BAD", "나쁨"
-    else:
-        b_grade, b_label = "NORMAL", "보통"
-
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-    rsi14 = _rsi14(close).iloc[-1]
-    ema20_dist = (c / ema20 - 1.0) * 100.0 if np.isfinite(ema20) and ema20 > 0 else np.nan
-    is_up = current_direction is not None and np.isfinite(current_direction) and current_direction > 0
-    if is_up and np.isfinite(ema20_dist) and np.isfinite(rsi14) and np.isfinite(ema50):
-        if ema20 >= ema50 and -2.0 <= ema20_dist <= 3.0 and 40.0 <= rsi14 <= 60.0:
-            p_grade, p_label = "GOOD", "좋음"
-        elif ema20 >= ema50 * 0.98 and -5.0 <= ema20_dist <= 6.0 and 35.0 <= rsi14 <= 70.0:
-            p_grade, p_label = "NORMAL", "보통"
-        else:
-            p_grade, p_label = "BAD", "나쁨"
-    else:
-        p_grade, p_label = "BAD", "나쁨"
-
-    return {
-        "reference_only": True,
-        "breakout": {
-            "grade": b_grade,
-            "label": b_label,
-            "distance_to_prior_20d_high_pct": float(dist_high) if np.isfinite(dist_high) else None,
-            "volume_ratio_vs_prior_20d": float(vol_ratio) if np.isfinite(vol_ratio) else None,
-            "rule": "GOOD=20D high breakout + volume>=1.2x; NORMAL=within 3% + volume>=0.8x",
-        },
-        "pullback": {
-            "grade": p_grade,
-            "label": p_label,
-            "ema20_distance_pct": float(ema20_dist) if np.isfinite(ema20_dist) else None,
-            "rsi14": float(rsi14) if np.isfinite(rsi14) else None,
-            "ema20": float(ema20) if np.isfinite(ema20) else None,
-            "ema50": float(ema50) if np.isfinite(ema50) else None,
-            "rule": "GOOD=ST up + EMA20>=EMA50 + near EMA20 + RSI40~60; NORMAL=looser band",
-        },
-    }
-
-
-def backtest_strong_buy_stats(
-    df: pd.DataFrame,
-    signals: pd.DataFrame | None = None,
-    sessions: int = BACKTEST_SESSIONS,
-) -> dict[str, Any]:
-    """2Y Strong-Buy diagnostics.
-
-    For each rising leg, only the first STRONG_BUY signal is sampled. Entry is
-    the next-bar open. Two headline metrics are produced:
-      1) median of each trade's maximum gross return before the next Sell signal
-      2) 20-session win rate, where Close[entry+20] > entry open is a win
-
-    Recent samples without a completed Sell can still contribute to the 20-day
-    metric when 20 future sessions exist, but are excluded from max-return median.
+    * first STRONG BUY/BUY while flat enters at the signal-day Close
+    * ignore later buy signals while active
+    * first SELL/STRONG SELL exits at the signal-day Close
+    * next entry requires >=1 ST-down bar since the prior entry
+    * max return is peak High from entry through exit / entry Close
+    * headline BACKTEST is median max return of completed cycles only
     """
-    signals = signal_series(df) if signals is None else signals
-    if signals.empty or len(signals) < MIN_REQUIRED_BARS:
-        return {
-            "available": False,
-            "reason": "insufficient_history_lt_604",
-            "max_return_median_pct": None,
-            "win_rate_20d_pct": None,
-            "max_return_samples": 0,
-            "win_20d_samples": 0,
-        }
+    if enriched is None or enriched.empty:
+        return {"events": [], "median_max_return_pct": None, "completed_events": 0}
+    d = add_up_flip_reference(enriched.copy()) if "ST_UP_FLIP_REF" not in enriched.columns else enriched.copy()
+    idx = pd.to_datetime(d.index)
+    cutoff = idx.max() - pd.DateOffset(years=years)
 
-    n = len(signals)
-    dates = pd.DatetimeIndex(signals.index)
-    last_ts = pd.Timestamp(dates[-1])
-    try:
-        cutoff = last_ts - pd.DateOffset(years=BACKTEST_YEARS)
-        in_window = np.asarray(dates >= cutoff, dtype=bool)
-    except Exception:
-        in_window = np.arange(n) >= max(0, n - sessions)
-    in_window &= signals["decision_valid"].fillna(False).to_numpy(bool)
+    events: list[dict[str, Any]] = []
+    active: dict[str, Any] | None = None
+    has_ever_entered = False
+    down_seen_since_entry = False
+    ready_after_exit = True
 
-    opinions = signals["opinion_code"].astype(str).to_numpy()
-    direction = signals["direction"].to_numpy(float)
-    leg_ids = signals["leg_id"].to_numpy(float)
-    opens = signals["Open"].to_numpy(float)
-    highs = signals["High"].to_numpy(float)
-    closes = signals["Close"].to_numpy(float)
+    for i, (_, row) in enumerate(d.iterrows()):
+        st_dir = int(row.get("ST_DIR", 0) or 0)
+        av = row.get("ADX", np.nan)
+        stv = row.get("ST", np.nan)
+        flip_ref = row.get("ST_UP_FLIP_REF", np.nan)
+        flip_age = row.get("ST_UP_FLIP_AGE", np.nan)
 
-    # Resolve the first Strong-Buy entry per rising leg.
-    entries: list[dict[str, Any]] = []
-    entered_legs: set[int] = set()
-    for i in range(n):
-        if not in_window[i] or opinions[i] != "STRONG_BUY" or not np.isfinite(leg_ids[i]):
+        if st_dir == -1 and active is not None:
+            down_seen_since_entry = True
+        if st_dir == -1 and active is None and has_ever_entered:
+            ready_after_exit = True
+        if st_dir == 0 or pd.isna(av):
             continue
-        leg = int(leg_ids[i])
-        if leg in entered_legs or i + 1 >= n or not (np.isfinite(opens[i + 1]) and opens[i + 1] > 0):
+        op, reason = classify_supertrad_index(st_dir, float(av), stv, flip_ref, flip_age)
+
+        if active is not None:
+            hi = row.get("High", np.nan)
+            if pd.notna(hi) and np.isfinite(float(hi)):
+                hi = float(hi)
+                if active.get("_peak_price") is None or hi > float(active["_peak_price"]):
+                    active["_peak_price"] = hi
+                    active["_peak_time"] = _date_text(d.index[i])
+            if op in ("SELL", "STRONG_SELL"):
+                active["completed"] = True
+                active["exit_time"] = _date_text(d.index[i])
+                active["exit_price"] = float(row["Close"]) if pd.notna(row.get("Close")) else None
+                active["exit_opinion"] = op
+                active["exit_adx"] = float(av)
+                active["sell_reason"] = reason
+                active["peak_time"] = active.pop("_peak_time", "")
+                active["peak_price"] = active.pop("_peak_price", None)
+                if active.get("peak_price") is not None and active.get("entry_price"):
+                    active["max_return_pct"] = (float(active["peak_price"]) / float(active["entry_price"]) - 1.0) * 100.0
+                else:
+                    active["max_return_pct"] = None
+                if pd.Timestamp(active["_entry_ts"]) >= cutoff:
+                    active.pop("_entry_ts", None)
+                    events.append(active)
+                active = None
+                ready_after_exit = bool(down_seen_since_entry or st_dir == -1)
+                down_seen_since_entry = False
             continue
-        entered_legs.add(leg)
-        entries.append({
-            "leg_id": leg,
-            "signal_pos": int(i),
-            "entry_pos": int(i + 1),
-            "signal_date": dates[i].date().isoformat(),
-            "entry_date": dates[i + 1].date().isoformat(),
-            "entry_price": float(opens[i + 1]),
-        })
 
-    max_returns: list[float] = []
-    win20_flags: list[bool] = []
-    trades: list[dict[str, Any]] = []
+        if has_ever_entered and not ready_after_exit:
+            continue
+        if op in ("STRONG_BUY", "BUY"):
+            close = float(row["Close"]) if pd.notna(row.get("Close")) else float("nan")
+            if not np.isfinite(close) or close <= 0:
+                continue
+            active = {
+                "_entry_ts": pd.Timestamp(d.index[i]),
+                "time": _date_text(d.index[i]),
+                "opinion_code": op,
+                "opinion": OPINION_LABEL[op],
+                "entry_price": close,
+                "adx": float(av),
+                "st_value": float(stv) if pd.notna(stv) else None,
+                "up_flip_st": float(flip_ref) if pd.notna(flip_ref) else None,
+                "reason": reason,
+                "completed": False,
+                "exit_time": "",
+                "exit_price": None,
+                "exit_opinion": "",
+                "peak_time": _date_text(d.index[i]),
+                "peak_price": float(row["High"]) if pd.notna(row.get("High")) else close,
+                "max_return_pct": None,
+                "_peak_time": _date_text(d.index[i]),
+                "_peak_price": float(row["High"]) if pd.notna(row.get("High")) else close,
+            }
+            has_ever_entered = True
+            ready_after_exit = False
+            down_seen_since_entry = False
 
-    for entry in entries:
-        ep = int(entry["entry_pos"])
-        entry_price = float(entry["entry_price"])
+    if active is not None and pd.Timestamp(active["_entry_ts"]) >= cutoff:
+        active["peak_time"] = active.pop("_peak_time", "")
+        active["peak_price"] = active.pop("_peak_price", None)
+        if active.get("peak_price") is not None and active.get("entry_price"):
+            active["max_return_pct"] = (float(active["peak_price"]) / float(active["entry_price"]) - 1.0) * 100.0
+        active.pop("_entry_ts", None)
+        events.append(active)
 
-        # First UP->DOWN transition after entry; max return is measured only to
-        # that Sell signal bar, consistent with the strategy life-cycle.
-        sell_pos = None
-        for j in range(max(ep, 1), n):
-            if (
-                np.isfinite(direction[j - 1]) and np.isfinite(direction[j])
-                and direction[j - 1] > 0 and direction[j] < 0
-            ):
-                sell_pos = j
-                break
-
-        max_return_pct = None
-        if sell_pos is not None and sell_pos >= ep:
-            seg = highs[ep : sell_pos + 1]
-            if len(seg) and np.isfinite(seg).any():
-                max_high = float(np.nanmax(seg))
-                max_return_pct = (max_high / entry_price - 1.0) * 100.0
-                if np.isfinite(max_return_pct):
-                    max_returns.append(float(max_return_pct))
-
-        win20 = None
-        pos20 = ep + 20
-        if pos20 < n and np.isfinite(closes[pos20]) and closes[pos20] > 0:
-            win20 = bool(closes[pos20] > entry_price)
-            win20_flags.append(win20)
-
-        trades.append({
-            **entry,
-            "sell_signal_date": dates[sell_pos].date().isoformat() if sell_pos is not None else None,
-            "max_return_pct": float(max_return_pct) if max_return_pct is not None else None,
-            "return_20d_pct": float((closes[pos20] / entry_price - 1.0) * 100.0) if pos20 < n and np.isfinite(closes[pos20]) else None,
-            "win_20d": win20,
-        })
-
-    daily = []
-    valid_positions = np.flatnonzero(signals["decision_valid"].fillna(False).to_numpy(bool))
-    for i in valid_positions[-60:]:
-        daily.append({"date": dates[i].date().isoformat(), "opinion_code": str(opinions[i])})
-
+    completed = [
+        float(e["max_return_pct"])
+        for e in events
+        if e.get("completed") and e.get("max_return_pct") is not None and np.isfinite(float(e["max_return_pct"]))
+    ]
     return {
-        "available": True,
-        "window": "last 2 calendar years",
-        "max_return_median_pct": float(np.median(max_returns)) if max_returns else None,
-        "win_rate_20d_pct": float(np.mean(win20_flags) * 100.0) if win20_flags else None,
-        "max_return_samples": int(len(max_returns)),
-        "win_20d_samples": int(len(win20_flags)),
-        "entry_rule": "first Strong Buy per rising leg; next bar open",
-        "max_return_rule": "maximum daily High return from entry until next Sell signal",
-        "win_20d_rule": "Close 20 sessions after entry is above entry open",
-        "_research": {"trades": trades, "daily_opinions": daily},
+        "events": events,
+        "median_max_return_pct": float(np.median(completed)) if completed else None,
+        "completed_events": len(completed),
     }
+
 
 def _safe_float(value: Any) -> float | None:
     try:
@@ -538,41 +466,35 @@ def analyze(
         return {
             "available": False,
             "reason": "insufficient_history_lt_604",
-            "opinion": "Hold",
+            "opinion": "HOLD",
             "opinion_code": "HOLD",
-            "opinion_label": "Hold",
-            "hold_reason": "NO_FLIP",
+            "opinion_label": "HOLD",
             "rank_level": OPINION_ORDER["HOLD"],
         }
 
     signals = signal_series(ohlc, period=period, multiplier=multiplier)
-    valid = signals[signals["decision_valid"].fillna(False)]
-    if valid.empty:
+    if signals.empty:
         return {
             "available": False,
-            "reason": "warmup_not_completed",
-            "opinion": "Hold",
+            "reason": "indicator_unavailable",
+            "opinion": "HOLD",
             "opinion_code": "HOLD",
-            "opinion_label": "Hold",
-            "hold_reason": "NO_FLIP",
+            "opinion_label": "HOLD",
             "rank_level": OPINION_ORDER["HOLD"],
         }
 
-    row = valid.iloc[-1]
-    current_pos = signals.index.get_loc(valid.index[-1])
-    direction = _safe_float(row.get("direction"))
-    p1 = _safe_float(row.get("supertrend"))
-    p0 = _safe_float(row.get("p0"))
-    close = _safe_float(row.get("Close"))
-    opinion_code = str(row.get("opinion_code") or "HOLD")
-    opinion_label = OPINION_LABEL.get(opinion_code, "Hold")
-    hold_reason_raw = row.get("hold_reason")
-    hold_reason = str(hold_reason_raw) if opinion_code == "HOLD" and isinstance(hold_reason_raw, str) and hold_reason_raw else None
-    new_sell = bool(row.get("new_sell", False)) if opinion_code == "SELL" else False
+    row = signals.iloc[-1]
+    adx_value = _safe_float(row.get("ADX"))
+    st_value = _safe_float(row.get("ST"))
+    flip_ref = _safe_float(row.get("ST_UP_FLIP_REF"))
+    flip_age = _safe_float(row.get("ST_UP_FLIP_AGE"))
+    st_dir = int(row.get("ST_DIR", 0) or 0)
+    if adx_value is None or st_dir == 0:
+        op, reason = "HOLD", "ADX(14,14) 계산값 부족"
+    else:
+        op, reason = classify_supertrad_index(st_dir, adx_value, st_value, flip_ref, flip_age)
 
-    backtest = backtest_strong_buy_stats(ohlc, signals=signals)
-    research = dict(backtest.pop("_research", {}) or {})
-    refs = reference_setups(ohlc, direction)
+    cycles = compute_buy_cycles(signals, years=BACKTEST_YEARS)
 
     chart_start = max(0, len(signals) - CHART_SESSIONS)
     chart = []
@@ -583,38 +505,56 @@ def analyze(
         if any(v is None for v in vals):
             continue
         o, h, l, c = vals
-        stv = _safe_float(sr.get("supertrend"))
-        d = int(sr["direction"]) if np.isfinite(sr.get("direction", np.nan)) else None
         chart.append({
             "date": pd.Timestamp(idx).date().isoformat(),
-            "open": o, "high": h, "low": l, "close": c,
-            "supertrend": stv,
-            "direction": d,
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "supertrend": _safe_float(sr.get("ST")),
+            "direction": int(sr.get("ST_DIR", 0) or 0),
+            "adx": _safe_float(sr.get("ADX")),
+            "opinion_code": str(sr.get("opinion_code") or "HOLD"),
         })
 
-    bars_since_sell_flip = None
-    if opinion_code == "SELL" and np.isfinite(row.get("sell_flip_pos", np.nan)):
-        bars_since_sell_flip = int(current_pos - int(row["sell_flip_pos"]))
+    # Only event rows in/near the chart window are needed by the mini chart;
+    # the complete 2Y event list remains in research for the category report.
+    chart_dates = {r["date"] for r in chart}
+    chart_events = []
+    for e in cycles["events"]:
+        copy = dict(e)
+        if copy.get("time") in chart_dates or copy.get("peak_time") in chart_dates or copy.get("exit_time") in chart_dates:
+            chart_events.append(copy)
 
     return {
-        "available": bool(p1 is not None and direction is not None),
+        "available": True,
+        "model": "Supertrad Index",
         "period": int(period),
         "multiplier": float(multiplier),
-        "engine": "TradingView ta.supertrend compatible",
-        "atr_smoothing": "Wilder RMA",
-        "warmup_discard_bars": int(WARMUP_DISCARD_BARS),
-        "strong_buy_gate_bars": int(STRONG_BUY_GATE_BARS),
-        "direction": "UP" if direction is not None and direction > 0 else "DOWN" if direction is not None else None,
-        "opinion": opinion_label,
-        "opinion_code": opinion_code,
-        "opinion_label": opinion_label,
-        "hold_reason": hold_reason,
-        "rank_level": int(OPINION_ORDER.get(opinion_code, OPINION_ORDER["HOLD"])),
-        "current_close": close,
-        "new_sell": new_sell,
-        "bars_since_sell_flip": bars_since_sell_flip,
-        "reference_setups": refs,
-        "backtest": backtest,
+        "adx_di_length": ADX_DI_LENGTH,
+        "adx_smoothing": ADX_SMOOTHING,
+        "opinion": OPINION_LABEL.get(op, op),
+        "opinion_code": op,
+        "opinion_label": OPINION_LABEL.get(op, op),
+        "rank_level": int(OPINION_ORDER.get(op, OPINION_ORDER["HOLD"])),
+        "reason": reason,
+        "current_close": _safe_float(row.get("Close")),
+        "st_direction": "상승" if st_dir == 1 else "하락" if st_dir == -1 else None,
+        "st_value": st_value,
+        "up_flip_st": flip_ref,
+        "up_flip_age": flip_age,
+        "adx": adx_value,
+        "backtest": {
+            "available": True,
+            "window": "last 2 calendar years",
+            "median_max_return_pct": cycles["median_max_return_pct"],
+            "completed_events": int(cycles["completed_events"]),
+            "event_count": int(len(cycles["events"])),
+            "entry_rule": "first STRONG BUY/BUY while flat; signal-day close",
+            "exit_rule": "first SELL/STRONG SELL; signal-day close",
+            "median_rule": "median of completed BUY->SELL cycle peak High returns",
+        },
         "chart": chart,
-        "_research": research,
+        "chart_events": chart_events,
+        "_research": {"events": cycles["events"]},
     }
