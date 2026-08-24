@@ -251,11 +251,53 @@ jobs:
 
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
+        shell: bash
         run: |
+          set -u
           echo "Running DTC v14.4 ExcelGrid Dual-ST FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+
+          # Preserve the fully hydrated live tree before scanning. If an
+          # unauthenticated public market-data source rejects the shared GitHub
+          # runner (403/429/transport outage), never publish a half-refreshed
+          # mixture. Restore the last known-good tree and let UI deployment
+          # continue with an explicit warning instead of failing after 30 min.
+          rm -rf /tmp/dtc-pre-scan
+          mkdir -p /tmp/dtc-pre-scan
+          if [[ -d docs/data ]]; then
+            cp -a docs/data /tmp/dtc-pre-scan/data
+          fi
+
+          set +e
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
+          SCAN_STATUS=$?
+          set -e
+
+          if [[ "$SCAN_STATUS" -ne 0 ]]; then
+            echo "::warning::Market refresh failed (exit=${SCAN_STATUS}). Restoring the hydrated last-known-good market snapshot."
+            if [[ ! -d /tmp/dtc-pre-scan/data ]]; then
+              echo "::error::No hydrated snapshot exists to restore; refusing an incomplete deployment."
+              exit "$SCAN_STATUS"
+            fi
+            rm -rf docs/data
+            cp -a /tmp/dtc-pre-scan/data docs/data
+
+            # The deploy verifier requires all four category snapshots. If the
+            # live/cache hydration was incomplete, retain the hard failure.
+            RESTORE_OK=1
+            for DIR in kr kr-etf us us-etf; do
+              if [[ ! -s "docs/data/$DIR/summary.json" || ! -s "docs/data/$DIR/bundle.zip" || ! -d "docs/data/$DIR/stocks" ]]; then
+                echo "::error::Cannot use stale fallback: $DIR snapshot is incomplete."
+                RESTORE_OK=0
+              fi
+            done
+            if [[ "$RESTORE_OK" -ne 1 ]]; then
+              exit "$SCAN_STATUS"
+            fi
+            echo "DTC_STALE_MARKET_FALLBACK=1" >> "$GITHUB_ENV"
+            echo "Market scan failed safely; previous complete snapshots will be redeployed unchanged."
+          fi
 
       - name: Skip market scan for UI-only deploy
         if: steps.market.outputs.market == 'UI_ONLY'
