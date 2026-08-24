@@ -9,12 +9,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="DTC.xlsx" />
-  <meta name="dtc-ui-build" content="20260825-v14_4_1_excel_exact_ui" />
+  <meta name="dtc-ui-build" content="20260825-v14_4_2_pwa_install" />
   <title>DTC.xlsx</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=20260825-v14_4_1_excel_exact_ui" />
+  <link rel="stylesheet" href="./styles.css?v=20260825-v14_4_2_pwa_install" />
 </head>
 <body>
   <svg class="excel-icon-defs" aria-hidden="true">
@@ -40,6 +40,7 @@
       <symbol id="ico-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
       <symbol id="ico-pdf" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM15 3v5h4"/><path d="M8 16c2-5 4-7 7-5 2 1 1 4-1 5-2 1-4 0-6 0"/></symbol>
       <symbol id="ico-share" viewBox="0 0 24 24"><path d="M12 16V4M8 8l4-4 4 4M5 13v7h14v-7"/></symbol>
+      <symbol id="ico-install" viewBox="0 0 24 24"><path d="M12 3v11M8 10l4 4 4-4M5 17v4h14v-4"/></symbol>
       <symbol id="ico-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></symbol>
     </defs>
   </svg>
@@ -76,7 +77,10 @@
       <button class="ribbon-tab" type="button">도움말</button>
       <button class="ribbon-tab" type="button">Acrobat</button>
       <div class="tell-me"><span>💡</span> 어떤 작업을 원하시나요?</div>
-      <button class="share-button" type="button"><svg><use href="#ico-share"/></svg>공유⌄</button>
+      <div class="tabbar-actions">
+        <button id="installPwaBtn" class="install-pwa-button" type="button" aria-label="DTC 앱 설치"><svg><use href="#ico-install"/></svg><span>앱 설치</span></button>
+        <button class="share-button" type="button"><svg><use href="#ico-share"/></svg>공유⌄</button>
+      </div>
     </nav>
 
     <section class="excel-ribbon" aria-label="홈 리본">
@@ -226,6 +230,6 @@
 
   <script src="./runtime-config.js?v=20260825-v14_4_1_excel_exact_ui"></script>
   <script src="./app.js?v=20260825-v14_4_1_excel_exact_ui"></script>
-  <script src="./pwa.js?v=20260825-v14_4_1_excel_exact_ui"></script>
+  <script src="./pwa.js?v=20260825-v14_4_2_pwa_install"></script>
 </body>
 </html>
