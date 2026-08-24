@@ -90,12 +90,17 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v14.2 Supertrad Index TV-compatible scanner + retained support files..."
+          echo "Checking DTC v14.4 ExcelGrid Dual-ST scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "14.2"' scanner.py || {
-            echo "::error::scanner.py is not DTC v14.2 Supertrad Index TV-compatible"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "14.4"' scanner.py || {
+            echo "::error::scanner.py is not DTC v14.4 ExcelGrid Dual-ST"
             exit 1
           }
+
+          test -s market_data.py || { echo "::error::market_data.py missing"; exit 1; }
+          grep -q 'TOSS_WTS_C_CHART_ADJUSTED' market_data.py || { echo "::error::Toss KR exact-source adapter missing"; exit 1; }
+          grep -q 'TRADINGVIEW_PUBLIC_CHART_REGULAR_SPLITS' market_data.py || { echo "::error::TradingView US exact-source adapter missing"; exit 1; }
+          grep -q 'websocket-client' requirements.txt || { echo "::error::websocket-client dependency missing"; exit 1; }
 
           grep -q 'MORNING_INVEST_COMPONENT_VERSION = "11.9"' hydrate_data.py || {
             echo "::error::hydrate_data.py compatibility check failed"
@@ -117,7 +122,7 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: Supertrad Index / v14.2 TV-compatible"
+          echo "scanner.py: Dual SuperTrend Gate / v14.4 ExcelGrid"
           echo "hydrate_data.py: compatible"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
@@ -164,7 +169,7 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Validate Supertrend tests
-        run: python -m unittest -v test_supertrend_strategy.py
+        run: python -m unittest -v test_supertrend_strategy.py test_market_data.py
 
       - name: Validate Firebase repository settings
         shell: bash
@@ -247,7 +252,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v14.2 Supertrad Index TV-compatible FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v14.4 ExcelGrid Dual-ST FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -326,14 +331,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260824-v14_2_tvcompat_toss5",
+            "ui_build": "20260824-v14_4_excelgrid_dualst",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260824-v14_2_tvcompat_toss5"
+          echo "UI build: 20260824-v14_4_excelgrid_dualst"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint
