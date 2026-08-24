@@ -1,15 +1,15 @@
 {
   "id": "./",
-  "name": "DTC Supertrend",
+  "name": "동탄트레이딩센터",
   "short_name": "DTC",
-  "description": "DTC Supertrad Index TradingView-compatible ST(14,2) + ADX(14,14) dashboard",
+  "description": "엑셀형 DTC 주식 스캐너 · 일봉/주봉 SuperTrend(14,2)",
   "lang": "ko-KR",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#080b12",
-  "theme_color": "#080b12",
+  "background_color": "#ffffff",
+  "theme_color": "#217346",
   "categories": [
     "finance",
     "business"

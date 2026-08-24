@@ -1,11 +1,7 @@
-# DTC v14.2 Supertrad Index 구현
+# DTC v14.4 Dual SuperTrend Gate
 
-기준: 첨부 DTC Local v1.14.2 PrevDownSTGate.
-
-STRONG BUY gate:
-1. ST_DIR -1 → +1 flip을 찾는다.
-2. P0 = flip 직전 봉의 DOWN SuperTrend 값 ST[i-1].
-3. flip 봉 자체는 age=0으로 제외한다.
-4. 다음 UP 봉부터 current ST >= P0 이고 20 <= ADX < 25이면 STRONG BUY.
-
-BUY / SELL / STRONG SELL / HOLD 및 2년 BUY→SELL cycle 백테스트는 로컬 v1.14.2와 동일하다.
+- 일봉/주봉 모두 SuperTrend(14,2)
+- 주봉은 일봉 원본에서 월~금으로 집계하며 현재 미완성 주도 포함
+- 백테스트에서는 각 일자까지의 부분 주봉만 사용
+- CASE1/CASE2는 전환봉 다음 봉부터 유효한 PrevDownST gate
+- ADX(14,14)는 표기 전용

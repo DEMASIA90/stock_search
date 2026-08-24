@@ -1,10 +1,15 @@
-# TradingView/Pine alignment — DTC v14.2
+# TradingView alignment — US / US ETF
 
-DTC indicator math now mirrors TradingView/Pine semantics:
+DTC v14.4은 US/US ETF 기술지표 계산에 TradingView public/anonymous chart websocket에서 직접 받은 일봉을 사용합니다.
 
-- SuperTrend(14,2): TradingView published band ratchet; ATR = `ta.rma(ta.tr(true), 14)`.
-- ADX(14,14): Pine DMI sequence using `ta.change`, `ta.tr`, `ta.rma`, and `fixnan`.
-- Price basis: raw chart OHLC (`yfinance auto_adjust=False`); no `Adj Close / Close` dividend rescaling.
-- Missing bars are omitted, never forward-filled.
+- interval: `1D`
+- session: `regular`
+- adjustment: `splits`
+- timezone: exchange
+- ST: TradingView `ta.supertrend(2,14)` 계산 의미와 일치하도록 구현
+- ADX: TradingView/Pine DMI `14,14` RMA 계산 의미와 일치하도록 구현
+- Yahoo OHLC fallback 없음
 
-The formulas and initialization are TradingView-compatible. Exact live values can still differ if Yahoo and TradingView have different current-bar OHLC, exchange consolidation, session handling, or corporate-action histories. For closed daily bars, this removes the prior deterministic formula/adjustment mismatch.
+카드 클릭으로 띄우는 DTC TradingView Advanced Chart도 public/default chart를 사용하므로 scanner의 목표 feed와 동일한 범주입니다.
+
+주의: 사용자가 별도 TradingView 로그인 계정에서 유료 primary-exchange realtime data를 활성화한 경우, 그 차트는 public/default TradingView US feed와 다른 원시 데이터가 될 수 있습니다. 서버가 사용자의 private market-data entitlement를 사용할 수 없으므로 그 경우까지 동일성을 보장할 수는 없습니다.

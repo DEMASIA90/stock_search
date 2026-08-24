@@ -1,9 +1,5 @@
-# DTC v14.2 Supertrad Index Backtest Report
+# DTC v14.4 Dual-ST Backtest
 
-백테스트 규칙은 DTC Local v1.14.2와 동일합니다.
-- 최초 STRONG BUY 또는 BUY 신호일 종가 진입
-- 보유 중 추가 BUY 무시
-- 최초 SELL/STRONG SELL 신호일 종가 청산
-- 다음 진입 전 ST DOWN 봉 최소 1개 필요
-- 완료 cycle의 진입~청산 최고 High 수익률 집합 중위값을 BACKTEST로 표시
-- 미완료 cycle은 차트에는 표시하되 중위값에서 제외
+실데이터 스캔 시 카테고리별 `docs/data/<cat>/supertrend_backtest_report.md`가 생성됩니다.
+
+Headline: 최근 2년 `매수(CASE1&CASE2)` → `매도(ST_D/ST_W 모두 하락)` 완료 cycle들의 최고수익률 중위값.

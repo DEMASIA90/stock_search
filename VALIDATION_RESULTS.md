@@ -1,25 +1,9 @@
-# DTC v14.2 Validation
+# DTC v14.4 Validation
 
-- Source algorithm: uploaded DTC Local v1.14.2 PrevDownSTGate
-- Local source tests: `test_supertrad_index.py` + `test_buy_cycle_backtest.py` = 10 passed
-- Web port tests: `test_supertrend_strategy.py` = 8 passed
-- Synthetic 500-bar local-vs-web parity:
-  - ATR max abs diff = 0.0
-  - ST max abs diff = 0.0
-  - ADX max abs diff = 0.0
-  - previous-DOWN ST reference max abs diff = 0.0
-  - flip age max abs diff = 0.0
-  - daily opinion mismatches = 0
-- STRONG BUY gate:
-  - P0 = ST immediately before DOWN->UP flip
-  - flip bar age 0 excluded
-  - from next UP bar: current ST >= P0
-- BUY->SELL cycle backtest uses the same updated opinion series.
-- JavaScript syntax check passed.
-- Workflow YAML parse passed.
-- Quiz session count = 5.
-- TradingView UI/embedding removed from PWA; chart click now opens Toss Securities WTS.
-
-- TradingView/Pine DMI warm-up: ADX(14,14) first finite bar = index 27.
-- SuperTrend ATR(14) first finite bar = index 13 (`ta.tr(true)`).
-- Dividend-adjustment reconstruction removed from scanner OHLC path.
+- SuperTrend(14,2) / ADX(14,14) Pine-compatible warm-up 유지
+- 주봉 as-of 계산이 완료 주봉 직접 계산과 일치
+- 미래 일봉 변경이 과거 시점 ST_W에 영향을 주지 않는 룩어헤드 검증 통과
+- CASE1/CASE2 의견 테이블 검증
+- BUY→SELL 백테스트 fixture 검증
+- 차트에 ST_D / ST_W 필드 126봉 출력 검증
+- Quiz 1문제 / 5보기 유지

@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "14.2"
+MORNING_INVEST_COMPONENT_VERSION = "14.4"
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,7 @@ import yfinance as yf
 
 from universe import Stock, fetch_kr_restricted_symbols, fetch_us_halted_symbols, get_universe
 from supertrend_strategy import analyze as analyze_supertrend, OPINION_ORDER
+from market_data import download_market_frames, market_data_source_for
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -41,24 +42,24 @@ TOSS_BROWSER_HEADERS = {
 }
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v14.2 · Supertrad Index · TradingView-compatible ST/ADX
+# Dongtan Trading Center (DTC) scanner v14.4 · Excel workbook UI + dual timeframe SuperTrend
 # -----------------------------------------------------------------------------
-# Opinion engine: DTC Local v1.14.2 PrevDownSTGate Supertrad Index.
-#   SuperTrend(14,2) + ADX(DI 14, smoothing 14).
-#   ADX >=70 -> STRONG SELL; 40<=ADX<70 -> SELL.
-#   ST UP + 25<=ADX<30 -> BUY.
-#   ST UP + 20<=ADX<25 + current ST >= previous DOWN ST before flip (flip bar excluded) -> STRONG BUY.
-#   Otherwise HOLD.
-# Ranking: Strong Buy -> Buy -> Hold -> Sell -> Strong Sell, then market size.
-# Backtest: 2Y explicit BUY/STRONG BUY -> SELL/STRONG SELL cycles;
-# signal-close entry/exit, completed-cycle peak-return median.
-# Chart: ~6 months raw OHLC + TradingView-compatible ST(14,2) + ADX(14,14) + cycle markers.
+# Opinion engine: daily + weekly SuperTrend(14,2) gates. ADX(14,14) is reference-only.
+#   CASE1 = ST_D UP and current ST_D >= final DOWN ST_D immediately before latest flip.
+#   CASE2 = ST_W UP and current ST_W >= final DOWN ST_W immediately before latest flip.
+#   CASE1&2 -> 매수; CASE1 only -> 단기 매수; CASE2 only -> 장기 매수.
+#   ST_D/ST_W both DOWN -> 매도; exactly one DOWN -> 매도 고려; otherwise HOLD.
+# Ranking: 매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도, then market size.
+# Backtest: 2Y first 매수(CASE1&2) -> first 매도(both DOWN); completed-cycle peak-return median.
+# KR OHLC: Toss WTS c-chart. US OHLC: TradingView public chart websocket.
+# Chart: ~6 months source-native OHLC + ST_D solid + developing ST_W dashed.
 # -----------------------------------------------------------------------------
 
-FULL_HISTORY_CALENDAR_DAYS = 1120
+FULL_HISTORY_CALENDAR_DAYS = 1120  # retained for Yahoo metadata/FX helpers only
 # Both FULL and QUICK need >=604 valid sessions: 2Y backtest (~504) + 100-bar
 # post-ATR warm-up discard. 980 calendar days leaves a holiday buffer.
-QUICK_HISTORY_CALENDAR_DAYS = 980
+QUICK_HISTORY_CALENDAR_DAYS = 980  # retained for Yahoo metadata/FX helpers only
+EXACT_HISTORY_BARS = 720
 BATCH_SIZE = 48
 RETRY_BATCH_SIZE = 8
 DOWNLOAD_THREADS = 8
@@ -81,7 +82,7 @@ NAVER_HEADERS = {
 NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 100M units (억원)
 
 MIN_TRADING_DAYS = 604  # required by SuperTrend spec: ~504 test bars + 100 discarded warm-up bars
-DISPLAY_META_TOP_N = 100
+DISPLAY_META_TOP_N = 1000
 MIN_PRICE_KRW = 1_000.0
 MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
 ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
@@ -900,10 +901,11 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if market_size_krw < MIN_MARKET_SIZE_KRW:
             return None, "market_size_lt_10t"
 
-    # DTC Local v1.14.2 PrevDownSTGate: SuperTrend(14,2) + ADX(14,14).
+    # DTC v14.4: exact-source OHLC + daily/weekly SuperTrend(14,2); ADX(14,14) is reference-only.
     st_data = analyze_supertrend(frame, period=14, multiplier=2.0, market=stock.category)
     st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
+    day_change_amount = close - prev_close if np.isfinite(prev_close) else np.nan
     day_change = (close / prev_close - 1.0) * 100.0 if np.isfinite(prev_close) and prev_close > 0 else np.nan
 
     item = {
@@ -915,6 +917,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "currency": stock.currency,
         "date": pd.Timestamp(frame.index[-1]).date().isoformat(),
         "close": clean(close),
+        "day_change_amount": clean(day_change_amount, 4),
         "day_change_pct": clean(day_change, 2),
         "rank": None,
         "supertrend": st_data,
@@ -924,12 +927,16 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "opinion_label": st_data.get("opinion_label", "Hold"),
         "rank_level": int(st_data.get("rank_level", OPINION_ORDER["HOLD"])),
         "adx": clean(st_data.get("adx"), 2),
-        "st_direction": st_data.get("st_direction"),
+        "st_d_direction": st_data.get("st_d_direction"),
+        "st_w_direction": st_data.get("st_w_direction"),
+        "case1": bool(st_data.get("case1", False)),
+        "case2": bool(st_data.get("case2", False)),
         "reason": st_data.get("reason") or "",
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
         "market_cap": clean(market_size_krw, 0),
         "market_size_basis": market_size_basis,
+        "market_data_source": market_data_source_for(stock.category),
         "metrics": {
             "market_size_native": clean(market_size_native, 0),
             "market_size_krw": clean(market_size_krw, 0),
@@ -1014,6 +1021,7 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "currency": item["currency"],
         "date": item["date"],
         "close": item["close"],
+        "day_change_amount": item.get("day_change_amount"),
         "day_change_pct": item["day_change_pct"],
         "rank": item["rank"],
         "opinion": item.get("opinion", "Hold"),
@@ -1021,7 +1029,10 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "opinion_label": item.get("opinion_label", "Hold"),
         "rank_level": item.get("rank_level", OPINION_ORDER["HOLD"]),
         "adx": item.get("adx", st.get("adx")),
-        "st_direction": item.get("st_direction", st.get("st_direction")),
+        "st_d_direction": item.get("st_d_direction", st.get("st_d_direction")),
+        "st_w_direction": item.get("st_w_direction", st.get("st_w_direction")),
+        "case1": bool(item.get("case1", st.get("case1", False))),
+        "case2": bool(item.get("case2", st.get("case2", False))),
         "reason": item.get("reason", st.get("reason") or ""),
         "supertrend": st,
         "sector": item.get("sector") or "—",
@@ -1029,6 +1040,7 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "market_cap": item.get("market_cap", item.get("market_size_krw")),
         "market_size_basis": item.get("market_size_basis"),
         "toss_product_code": item.get("toss_product_code"),
+        "market_data_source": item.get("market_data_source"),
         "detail_path": detail_path,
     }
 
@@ -1048,19 +1060,18 @@ def _atomic_copy(src: Path, dst: Path) -> None:
 
 
 def _daily_opinion_distribution(items: list[dict]) -> list[dict]:
-    # v14 publishes current-scan opinion counts in summary metadata; per-stock
-    # historical daily opinion arrays are intentionally not exported.
     c = Counter(str(item.get("opinion_code") or "HOLD") for item in items)
     if not items:
         return []
     date = max((str(item.get("date") or "") for item in items), default="")
     return [{
         "date": date,
-        "STRONG_BUY": int(c["STRONG_BUY"]),
         "BUY": int(c["BUY"]),
+        "SHORT_BUY": int(c["SHORT_BUY"]),
+        "LONG_BUY": int(c["LONG_BUY"]),
         "HOLD": int(c["HOLD"]),
+        "SELL_CONSIDER": int(c["SELL_CONSIDER"]),
         "SELL": int(c["SELL"]),
-        "STRONG_SELL": int(c["STRONG_SELL"]),
         "total": int(sum(c.values())),
     }]
 
@@ -1073,22 +1084,18 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
         for event in research.get("events") or []:
             events.append({**event, "ticker": ticker})
 
-    completed = [
-        finite(e.get("max_return_pct")) for e in events
-        if e.get("completed")
-    ]
+    completed = [finite(e.get("max_return_pct")) for e in events if e.get("completed")]
     completed = [float(x) for x in completed if np.isfinite(x)]
     return {
-        "model": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN_TVCOMPAT_V14_2",
+        "model": "DUAL_ST_D_W_GATE_ST14_2_DUALSOURCE_V14_4",
         "window": "last 2 calendar years",
         "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
         "completed_cycles": int(len(completed)),
         "signal_cycles": int(len(events)),
-        "entry": "first STRONG BUY or BUY while flat; signal-day close",
-        "exit": "first SELL or STRONG SELL; signal-day close",
-        "reset": "new BUY allowed only after at least one SuperTrend DOWN bar since previous entry",
+        "entry": "first 매수(CASE1&CASE2) while flat; signal-day close",
+        "exit": "first 매도(ST_D DOWN and ST_W DOWN); signal-day close",
         "max_return": "maximum daily High return from entry through exit",
-        "headline": "median of completed BUY->SELL cycle maximum returns",
+        "headline": "median of completed 매수->매도 cycle maximum returns",
         "current_opinion_distribution": _daily_opinion_distribution(items),
     }
 
@@ -1097,43 +1104,49 @@ def _supertrend_report_markdown(category: str, diag: dict) -> str:
     med = diag.get("median_max_return_pct")
     med_text = "—" if med is None else f"{float(med):.2f}%"
     lines = [
-        f"# DTC Supertrad Index 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        f"# DTC Dual SuperTrend Gate 백테스트 — {CATEGORY_LABEL.get(category, category)}",
         "",
         f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
         "## 알고리즘",
         "",
-        "- SuperTrend(14,2) + ADX(DI 14 / smoothing 14)",
-        "- ADX >= 70: STRONG SELL",
-        "- 40 <= ADX < 70: SELL",
-        "- ST 상승 + 25 <= ADX < 30: BUY",
-        "- ST 상승 + 20 <= ADX < 25 + 현재 ST > 최근 하락→상승 전환봉 ST: STRONG BUY",
-        "- 그 외: HOLD",
+        "- ST_D: 일봉 SuperTrend(14,2)",
+        "- ST_W: 주봉 SuperTrend(14,2), 현재 진행 중인 주 포함",
+        "- CASE1: ST_D 상승 + 현재 ST_D >= 직전 하락 레그 마지막 ST_D",
+        "- CASE2: ST_W 상승 + 현재 ST_W >= 직전 하락 레그 마지막 ST_W",
+        "- CASE1 & CASE2: 매수",
+        "- CASE1만: 단기 매수",
+        "- CASE2만: 장기 매수",
+        "- ST_D/ST_W 모두 하락: 매도",
+        "- 둘 중 하나만 하락: 매도 고려",
+        "- 나머지: HOLD",
+        "- ADX(14,14)는 표에만 표시하며 의견 판정에는 사용하지 않음",
         "",
-        "## 2년 BUY→SELL Cycle Backtest",
+        "## 2년 매수→매도 Cycle Backtest",
         "",
         f"- **완료 사이클 최고수익률 중위값: {med_text}**",
         f"- 완료 사이클: {diag.get('completed_cycles', 0)}회 / 신호 사이클: {diag.get('signal_cycles', 0)}회",
-        "- 진입: 포지션이 없을 때 최초 STRONG BUY 또는 BUY 신호일 종가",
-        "- 청산: 최초 SELL 또는 STRONG SELL 신호일 종가",
-        "- 진입 후 BUY/STRONG BUY 재신호는 무시",
-        "- 다음 신규 BUY는 이전 진입 뒤 SuperTrend 하락봉이 최소 1개 이상 지나야 허용",
+        "- 진입: 포지션이 없을 때 최초 매수(CASE1&CASE2) 신호일 종가",
+        "- 청산: 최초 매도(ST_D와 ST_W 모두 하락) 신호일 종가",
         "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 그 집합의 중위값",
-        "- 미청산 사이클은 차트에는 표시하지만 중위값에서는 제외",
+        "- 미청산 사이클은 중위값에서 제외",
         "",
         "## 현재 의견 분포",
         "",
-        "| 날짜 | STRONG BUY | BUY | HOLD | SELL | STRONG SELL | 합계 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| 날짜 | 매수 | 단기 매수 | 장기 매수 | HOLD | 매도 고려 | 매도 | 합계 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in diag.get("current_opinion_distribution") or []:
-        lines.append(f"| {row['date']} | {row['STRONG_BUY']} | {row['BUY']} | {row['HOLD']} | {row['SELL']} | {row['STRONG_SELL']} | {row['total']} |")
+        lines.append(
+            f"| {row['date']} | {row['BUY']} | {row['SHORT_BUY']} | {row['LONG_BUY']} | {row['HOLD']} | "
+            f"{row['SELL_CONSIDER']} | {row['SELL']} | {row['total']} |"
+        )
     lines += [
         "",
         "## 주의",
         "",
         "- 현재 유니버스로 과거를 재구성하므로 생존 편향이 존재합니다.",
-        "- 백테스트는 DTC Local v1.14.2 규격대로 신호일 종가 체결을 사용합니다.",
+        "- 주봉 상태는 각 과거 일자 시점의 진행 중 주봉만 사용해 룩어헤드를 방지합니다.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1320,7 +1333,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v14.2 Supertrad Index TV-compatible | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v14.4 Excel Dual-ST | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1370,17 +1383,14 @@ def scan_category(
         scan_universe, cached_small_skipped = _cached_quick_size_prefilter(category, scan_universe, size_cache, scan_mode)
     rejection["cached_small_quick_prefilter"] += cached_small_skipped
 
-    quarantine = _load_yahoo_quarantine(category)
-    if quarantine:
-        before = len(scan_universe)
-        scan_universe = [s for s in scan_universe if s.ticker not in quarantine]
-        rejection["yahoo_quarantine"] += before - len(scan_universe)
-
+    # Price OHLC is exact-source only from v14.3 onward; v14.4 derives the live weekly bar from those same daily candles.  Do not apply the old
+    # Yahoo missing-symbol quarantine to Toss/TradingView source requests.
+    rejection["yahoo_quarantine"] = 0
+    source_name = market_data_source_for(category)
     print(
-        f"[{category}] price-download universe={len(scan_universe):,} "
+        f"[{category}] exact-price universe={len(scan_universe):,} | source={source_name} "
         f"| KRX-stale={rejection['not_in_current_krx_snapshot']:,} "
-        f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,} "
-        f"| yahoo-quarantine={rejection['yahoo_quarantine']:,}"
+        f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,}"
     )
 
     batches = list(chunks(scan_universe, BATCH_SIZE))
@@ -1388,16 +1398,16 @@ def scan_category(
     for batch_no, batch in enumerate(batches, 1):
         tickers = [s.ticker for s in batch]
         try:
-            raw = download_batch(tickers, scan_mode=scan_mode)
+            source_frames = download_market_frames(batch, category, bars=EXACT_HISTORY_BARS, timeout=46)
         except Exception as exc:
-            print(f"[{category}] batch {batch_no}/{total_batches} failed: {type(exc).__name__}: {exc}")
+            print(f"[{category}] exact-source batch {batch_no}/{total_batches} failed: {type(exc).__name__}: {exc}")
             missing.extend(tickers)
-            time.sleep(1.5)
+            time.sleep(1.2)
             continue
 
         for stock in batch:
             try:
-                raw_frame = frame_for(raw, stock.ticker)
+                raw_frame = source_frames.get(stock.ticker)
                 if raw_frame is None or raw_frame.empty:
                     rejection["no_price"] += 1
                     missing.append(stock.ticker)
@@ -1413,36 +1423,34 @@ def scan_category(
                 rejection["analysis_error"] += 1
                 print(f"[{category}] {stock.ticker} analyze error: {type(exc).__name__}: {exc}")
 
-        if batch_no % 10 == 0 or batch_no == total_batches:
+        if batch_no % 5 == 0 or batch_no == total_batches:
             print(
-                f"[{category}] {batch_no}/{total_batches} batches "
+                f"[{category}] {batch_no}/{total_batches} exact-source batches "
                 f"({batch_no/max(1,total_batches)*100:5.1f}%) | priced={len(priced_tickers):,} | eligible={len(results):,}"
             )
-        # Avoid a fixed sleep after every successful batch; it dominated wall
-        # time on 2k-5k symbol universes. A short pause every four batches keeps
-        # request bursts bounded while retaining Yahoo retry protection.
-        if batch_no % 4 == 0 and batch_no != total_batches:
-            time.sleep(random.uniform(*PRIMARY_BATCH_SLEEP))
+        if batch_no % 3 == 0 and batch_no != total_batches:
+            time.sleep(random.uniform(0.10, 0.28))
 
     retry = [t for t in dict.fromkeys(missing) if t not in priced_tickers and t in by_ticker]
     final_unavailable: list[str] = []
     if retry:
-        print(f"[{category}] retrying {len(retry):,} unavailable symbols")
+        print(f"[{category}] retrying {len(retry):,} exact-source unavailable symbols")
         remaining = retry
         attempts = 1 if scan_mode == "QUICK" else RETRY_ATTEMPTS
         for attempt in range(1, attempts + 1):
             if not remaining:
                 break
-            next_remaining = []
-            for batch in chunks(remaining, RETRY_BATCH_SIZE):
+            next_remaining: list[str] = []
+            for ticker_batch in chunks(remaining, RETRY_BATCH_SIZE):
+                stocks = [by_ticker[t] for t in ticker_batch]
                 try:
-                    raw = download_batch(batch, scan_mode=scan_mode, timeout=55)
+                    source_frames = download_market_frames(stocks, category, bars=EXACT_HISTORY_BARS, timeout=55)
                 except Exception:
-                    next_remaining.extend(batch)
+                    next_remaining.extend(ticker_batch)
                     continue
-                for ticker in batch:
+                for ticker in ticker_batch:
                     stock = by_ticker[ticker]
-                    raw_frame = frame_for(raw, ticker)
+                    raw_frame = source_frames.get(ticker)
                     if raw_frame is None or raw_frame.empty:
                         next_remaining.append(ticker)
                         continue
@@ -1458,13 +1466,13 @@ def scan_category(
             previous = set(remaining)
             remaining = list(dict.fromkeys(next_remaining))
             if remaining and set(remaining) == previous:
-                print(f"[{category}] retry made no progress ({len(remaining):,}); stop repeated retries")
+                print(f"[{category}] exact-source retry made no progress ({len(remaining):,}); stop")
                 break
             if remaining and attempt < attempts:
-                time.sleep(min(30.0, 5.0 * (2 ** (attempt - 1))))
+                time.sleep(min(20.0, 4.0 * (2 ** (attempt - 1))))
         if remaining:
             final_unavailable = list(remaining)
-            print(f"[{category}] final unavailable symbols={len(remaining):,}")
+            print(f"[{category}] final exact-source unavailable symbols={len(remaining):,}")
 
     expected_price_count = len(scan_universe)
     coverage = len(priced_tickers) / max(1, expected_price_count)
@@ -1472,33 +1480,11 @@ def scan_category(
     min_absolute = min(100, max(1, expected_price_count))
     if len(priced_tickers) < min_absolute or coverage < required_coverage:
         raise RuntimeError(
-            f"{category} price coverage too low: {len(priced_tickers)}/{expected_price_count} "
-            f"({coverage:.1%}), required>={required_coverage:.0%}. Existing site data was not overwritten."
+            f"{category} {source_name} coverage too low: {len(priced_tickers)}/{expected_price_count} "
+            f"({coverage:.1%}), required>={required_coverage:.0%}. "
+            "No Yahoo OHLC fallback is permitted; existing site data was not overwritten."
         )
 
-    # Healthy FULL scans may quarantine only a tiny tail of repeatedly unavailable
-    # symbols. Mass Yahoo failures are never quarantined, preventing a transient
-    # outage from silently shrinking the next scan universe.
-    for ticker in list(quarantine):
-        if ticker in priced_tickers:
-            quarantine.pop(ticker, None)
-    max_quarantine = max(20, int(max(1, expected_price_count) * YAHOO_QUARANTINE_MAX_RATIO))
-    if (
-        scan_mode == "FULL"
-        and final_unavailable
-        and coverage >= YAHOO_QUARANTINE_MIN_HEALTHY_COVERAGE
-        and len(final_unavailable) <= max_quarantine
-    ):
-        now = datetime.now(timezone.utc)
-        skip_until = now + timedelta(hours=YAHOO_QUARANTINE_HOURS)
-        for ticker in final_unavailable:
-            quarantine[ticker] = {
-                "failed_at": now.isoformat(timespec="seconds"),
-                "skip_until": skip_until.isoformat(timespec="seconds"),
-                "reason": "no_daily_price_after_full_retries",
-            }
-        print(f"[{category}] Yahoo quarantine added={len(final_unavailable):,} until {skip_until.isoformat(timespec='minutes')}")
-    _save_yahoo_quarantine(category, quarantine)
 
     if category not in ETF_CATEGORIES:
         size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
@@ -1512,7 +1498,7 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Supertrad Index ranking: Strong Buy -> Buy -> Hold -> Sell -> Strong Sell.
+    # Dual-ST opinion ranking: 매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도.
     # Same-level default is market cap/AUM descending.
     unsorted_items = list(results.values())
     backtest_refreshed = True
@@ -1540,10 +1526,11 @@ def scan_category(
         if stock is None:
             continue
         enrich_display_metadata(stock, item, thresholds, size_cache)
-        toss_code = _resolve_toss_product_code(item, toss_cache)
-        if toss_code:
-            item["toss_product_code"] = toss_code
-            toss_cache_dirty = True
+        if stock.category in {"KR", "KR_ETF"}:
+            toss_code = _direct_toss_product_code(item)
+            if toss_code:
+                item["toss_product_code"] = toss_code
+                toss_cache_dirty = True
         # Keep detail metrics coherent with the summary display value.
         item["metrics"]["market_size_krw"] = item.get("market_size_krw")
         if idx % 20 == 0 or idx == len(top_items):
@@ -1568,7 +1555,7 @@ def scan_category(
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Dongtan Trading Center",
-        "strategy": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN",
+        "strategy": "DUAL_ST_D_W_GATE_ST14_2_DUALSOURCE_V14_4",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1583,7 +1570,9 @@ def scan_category(
         "krx_stale_prefilter_count": rejection["not_in_current_krx_snapshot"],
         "market_size_prefilter_count": rejection["krx_market_size_lt_10t_prefilter"] + rejection["cached_small_quick_prefilter"],
         "us_bulk_marketcap_prefilter": us_bulk_prefilter_meta,
-        "yahoo_quarantine_count": rejection["yahoo_quarantine"],
+        "yahoo_quarantine_count": 0,
+        "market_data_source": source_name,
+        "price_fallback": "DISABLED",
         "priced_count": len(priced_tickers),
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
@@ -1595,18 +1584,22 @@ def scan_category(
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "strategy_model": {
-            "name": "Supertrad Index",
-            "supertrend": "14,2",
-            "adx": "DI 14 / smoothing 14",
-            "opinion_order": ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"],
-            "strong_sell": "ADX >= 70",
-            "sell": "40 <= ADX < 70",
-            "buy": "ST UP and 25 <= ADX < 30",
-            "strong_buy": "ST UP and 20 <= ADX < 25 and, from the bar after flip, current UP ST >= last DOWN ST immediately before flip",
+            "name": "Dual SuperTrend Gate",
+            "supertrend_daily": "14,2",
+            "supertrend_weekly": "14,2 (developing current week included)",
+            "adx": "ADX(14,14), reference only",
+            "opinion_order": ["BUY", "SHORT_BUY", "LONG_BUY", "HOLD", "SELL_CONSIDER", "SELL"],
+            "case1": "ST_D UP and current ST_D >= last DOWN ST_D immediately before the latest DOWN->UP flip",
+            "case2": "ST_W UP and current ST_W >= last DOWN ST_W immediately before the latest DOWN->UP flip",
+            "buy": "CASE1 & CASE2",
+            "short_buy": "CASE1 only while both timeframes remain UP",
+            "long_buy": "CASE2 only while both timeframes remain UP",
+            "sell": "ST_D DOWN and ST_W DOWN",
+            "sell_consider": "exactly one of ST_D/ST_W is DOWN",
             "otherwise": "HOLD",
-            "ranking": "Strong Buy -> Buy -> Hold -> Sell -> Strong Sell; same level market size descending",
-            "chart": "126 sessions raw OHLC + TradingView-compatible SuperTrend(14,2) + ADX(14,14) + BUY/SELL cycle markers; click opens Toss Securities WTS",
-            "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue; Strong Buy red dashed; Buy orange dashed",
+            "ranking": "매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도; same level market size descending",
+            "ohlc_source": "Toss WTS c-chart for KR/KR_ETF; TradingView public chart websocket for US/US_ETF; no Yahoo fallback",
+            "chart": "126 source-native daily candles + ST_D solid + live ST_W dashed; KR chart opens Toss, US chart opens TradingView",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },
@@ -1639,7 +1632,7 @@ def main():
         "--scan-mode",
         choices=["FULL", "QUICK"],
         default="FULL",
-        help="FULL refreshes market/quiz data; QUICK refreshes current Supertrad Index opinions and reuses the latest FULL quiz shard.",
+        help="FULL refreshes market/quiz data; QUICK refreshes current dual-SuperTrend opinions and reuses the latest FULL quiz shard.",
     )
     args = parser.parse_args()
 

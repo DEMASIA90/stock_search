@@ -3,146 +3,182 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#080b12" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#217346" />
+  <meta name="color-scheme" content="light" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="DTC" />
-  <meta name="dtc-ui-build" content="20260824-v14_2_tvcompat_toss5" />
-  <title>Dongtan Trading Center (DTC)</title>
+  <meta name="dtc-ui-build" content="20260824-v14_4_excelgrid_dualst" />
+  <title>동탄트레이딩센터.xlsx</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=20260824-v14_2_tvcompat_toss5" />
+  <link rel="stylesheet" href="./styles.css?v=20260824-v14_4_excelgrid_dualst" />
 </head>
 <body>
-  <div class="shell">
-    <header class="topbar">
-      <a class="brand" href="./" aria-label="동탄 트레이딩 센터">
-        <span class="dtc-mark" aria-hidden="true">
-          <img src="./logo-dtc.svg?v=20260824-v14_2_tvcompat_toss5" alt="" />
-        </span>
-        <div class="brand-copy">
-          <b>동탄 트레이딩 센터 <span>(Dongtan Trading Center, DTC)</span></b>
-          <small>모든 투자의 책임은 사실 다른 투자자에게 있습니다.</small>
-        </div>
-      </a>
-
-      <label class="mode-switch" for="analysisMode">
-        <span>MODE</span>
-        <select id="analysisMode" aria-label="분석 모드 선택">
-          <option value="supertrend">Supertrad Index</option>
-          <option value="quiz">Quiz mode</option>
-        </select>
-      </label>
-
-      <div class="top-actions">
-        <span class="developer-credit">developed by <b>Stock Simulation Lab.</b></span>
-        <button id="installPwaBtn" class="install-pwa-btn" type="button" hidden>앱 설치</button>
-        <button id="reloadBtn" class="icon-btn" type="button" aria-label="새로고침">↻</button>
+  <div class="excel-app">
+    <header class="excel-titlebar">
+      <div class="quick-tools" aria-hidden="true">
+        <span class="autosave-label">자동 저장</span><span class="fake-toggle"></span>
+        <button class="qa-icon" type="button" tabindex="-1">↶</button>
+        <button class="qa-icon" type="button" tabindex="-1">↷</button>
       </div>
+      <div class="workbook-title"><b>동탄트레이딩센터</b><span>.xlsx</span></div>
+      <div class="title-search" aria-hidden="true">⌕&nbsp;&nbsp;검색</div>
+      <div class="window-tools" aria-hidden="true"><span>—</span><span>□</span><span>×</span></div>
     </header>
 
-    <main id="supertrendModeView" class="mode-view" aria-label="Supertrad Index 전략">
-      <section class="sticky-controls" aria-label="시장 및 시가총액 선택">
-        <nav class="market-tabs" id="marketTabs" aria-label="시장 선택">
-          <button class="market-tab active" data-category="KR">국장</button>
-          <button class="market-tab" data-category="KR_ETF">국장ETF</button>
-          <button class="market-tab" data-category="US">미장</button>
-          <button class="market-tab" data-category="US_ETF">미장ETF</button>
-        </nav>
+    <nav class="excel-tabbar" aria-label="리본 탭">
+      <button class="excel-file-tab" type="button">파일</button>
+      <button class="ribbon-tab active" type="button">홈</button>
+      <button class="ribbon-tab" type="button">삽입</button>
+      <button class="ribbon-tab" type="button">그리기</button>
+      <button class="ribbon-tab" type="button">페이지 레이아웃</button>
+      <button class="ribbon-tab" type="button">수식</button>
+      <button class="ribbon-tab" type="button">데이터</button>
+      <button class="ribbon-tab" type="button">검토</button>
+      <button class="ribbon-tab" type="button">보기</button>
+      <button class="ribbon-tab" type="button">개발 도구</button>
+      <button id="installPwaBtn" class="ribbon-tab install-ribbon-tab" type="button">앱 설치</button>
+    </nav>
 
-        <nav class="cap-filter-tabs" id="capFilterTabs" aria-label="시가총액 필터">
-          <button class="cap-filter" data-cap="10000000000000">10조 이상</button>
-          <button class="cap-filter" data-cap="50000000000000">50조 이상</button>
-          <button class="cap-filter active" data-cap="100000000000000">100조 이상</button>
-          <button class="cap-filter" data-cap="500000000000000">500조 이상</button>
-          <button class="cap-filter" data-cap="1000000000000000">1000조 이상</button>
-        </nav>
-      </section>
-
-      <section class="summary-row compact-summary">
-        <div><p id="scanStatus">—</p></div>
-        <div class="summary-meta">
-          <b id="marketDate">—</b>
-          <span id="coverage">—</span>
-        </div>
-      </section>
-
-      <section class="search-row">
-        <label class="search-box">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.5-4.5m2-5A7 7 0 1 1 4.5 11.5a7 7 0 0 1 14 0Z"/></svg>
-          <input id="searchInput" type="search" autocomplete="off" placeholder="종목명 / TICKER 검색" />
-          <kbd id="resultCount">—</kbd>
-        </label>
-      </section>
-
-      <div id="status" class="status">데이터를 불러오는 중입니다.</div>
-      <section id="stockList" class="stock-list" aria-label="종목 목록"></section>
-    </main>
-
-    <main id="quizModeView" class="mode-view quiz-mode-view" hidden aria-label="Quiz 모드">
-      <section class="quiz-shell">
-        <header class="quiz-toolbar">
-          <div>
-            <small>CHART RECONSTRUCTION QUIZ</small>
-            <h1>가려진 30일의 종가 흐름을 맞혀보세요.</h1>
-            <p>시총·순자산 100조원 이상 종목 · 앞 60거래일 캔들/볼린저/10구간 매물대 → 다음 30거래일 예측</p>
-          </div>
-          <button id="newQuizBtn" class="quiz-new-btn" type="button">5문제 시작</button>
-        </header>
-
-        <div id="quizStatus" class="quiz-status">총 5문제입니다. 5문제 시작을 누르면 무작위 차트가 생성됩니다.</div>
-
-        <section id="quizGame" class="quiz-game" hidden>
-          <div class="quiz-question-meta">
-            <div>
-              <span id="quizNumber">QUIZ #—</span>
-              <b id="quizIdentity">종목 · 기간 비공개</b>
-            </div>
-            <span id="quizSegmentLabel">5문제 · 각 90거래일 중 30일 가림</span>
-          </div>
-
-          <div id="quizMainChart" class="quiz-main-chart" aria-label="퀴즈 캔들 차트"></div>
-
-          <div class="quiz-instruction">
-            <b>가려진 구간의 실제 종가 모양은?</b>
-            <span id="quizInstructionSub">보기는 실제 시장의 30일 패턴을 기반으로 생성됩니다.</span>
-          </div>
-
-          <div id="quizChoices" class="quiz-choices" aria-label="정답 보기"></div>
-          <div class="quiz-actions">
-            <div id="quizSelectedHint" class="quiz-selected-hint">보기를 선택하면 가려진 구간에 해당 차트가 먼저 채워집니다.</div>
-            <button id="quizSubmitBtn" class="quiz-submit-btn" type="button" disabled>정답 제출</button>
-          </div>
-          <div id="quizFeedback" class="quiz-feedback" hidden></div>
-        </section>
-      </section>
-    </main>
-
-    <footer>Dongtan Trading Center · DTC · Not investment advice</footer>
-  </div>
-
-  <div id="scoreModal" class="modal" hidden>
-    <button class="modal-backdrop" type="button" data-close-modal aria-label="닫기"></button>
-    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="scoreModalTitle">
-      <header class="modal-head">
-        <div>
-          <small>SUPERTREND DETAIL</small>
-          <h2 id="scoreModalTitle">—</h2>
-        </div>
-        <button class="modal-close" type="button" data-close-modal aria-label="닫기">×</button>
-      </header>
-      <div id="scoreModalBody" class="score-detail-body"></div>
+    <section class="excel-ribbon" aria-label="홈 리본">
+      <div class="ribbon-group clipboard-group">
+        <div class="ribbon-large"><span class="ribbon-glyph">▣</span><b>붙여넣기</b><small>⌄</small></div>
+        <div class="ribbon-stack"><span>✂ 잘라내기</span><span>▱ 복사</span><span>▧ 서식 복사</span></div>
+        <em>클립보드</em>
+      </div>
+      <div class="ribbon-group font-group">
+        <div class="font-controls"><span>맑은 고딕</span><span>11</span><button>A⌃</button><button>A⌄</button></div>
+        <div class="font-buttons"><b>B</b><i>I</i><u>U</u><span>▦</span><span>🖌</span><span>A̲</span></div>
+        <em>글꼴</em>
+      </div>
+      <div class="ribbon-group align-group">
+        <div class="align-icons"><span>≡</span><span>≣</span><span>☰</span><span>↔</span><span>↕</span><span>▤</span></div>
+        <div class="align-label">자동 줄 바꿈&nbsp;&nbsp; 병합하고 가운데 맞춤</div>
+        <em>맞춤</em>
+      </div>
+      <div class="ribbon-group number-group">
+        <div class="number-select">일반&nbsp;&nbsp;&nbsp;&nbsp;⌄</div>
+        <div class="number-buttons"><span>%</span><span>,</span><span>.0←</span><span>.00→</span></div>
+        <em>표시 형식</em>
+      </div>
+      <div class="ribbon-group style-group">
+        <div class="style-cards"><span>조건부<br>서식</span><span>표<br>서식</span><span>셀<br>스타일</span></div>
+        <em>스타일</em>
+      </div>
+      <div class="ribbon-group cells-group">
+        <div class="style-cards"><span>＋<br>삽입</span><span>－<br>삭제</span><span>▦<br>서식</span></div>
+        <em>셀</em>
+      </div>
+      <div class="ribbon-group edit-group">
+        <div class="style-cards"><span>Σ<br>자동 합계</span><span>⇣<br>채우기</span><span>⌕<br>찾기 및 선택</span></div>
+        <em>편집</em>
+      </div>
     </section>
+
+    <section class="formula-bar">
+      <div id="nameBox" class="name-box">A1</div>
+      <button type="button" aria-hidden="true">×</button><button type="button" aria-hidden="true">✓</button>
+      <div class="fx">fx</div>
+      <input id="formulaInput" type="text" value="" readonly aria-label="수식 입력줄" />
+    </section>
+
+    <main class="workbook-stage">
+      <section id="marketSheetView" class="sheet-view">
+        <div class="sheet-scroll" id="sheetScroll">
+          <table id="stockSheet" class="excel-grid" aria-label="DTC 종목 워크시트">
+            <colgroup>
+              <col class="row-num-col" />
+              <col class="col-a" /><col class="col-b" /><col class="col-c" /><col class="col-d" />
+              <col class="col-e" /><col class="col-f" /><col class="col-g" /><col class="col-h" />
+              <col class="col-i" /><col class="col-j" /><col class="col-k" /><col class="col-l" />
+            </colgroup>
+            <thead>
+              <tr class="column-letter-row">
+                <th class="corner-cell"></th>
+                <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th><th>L</th>
+              </tr>
+              <tr class="filter-row">
+                <th class="row-number">1</th>
+                <td class="filter-cell">
+                  <select id="capSelect" aria-label="시가총액 필터"></select>
+                </td>
+                <td id="sheetStatusCell" colspan="10" class="sheet-status-cell">데이터를 불러오는 중입니다.</td>
+                <td class="chart-title-cell">선택 행 차트</td>
+              </tr>
+              <tr class="header-row">
+                <th class="row-number">2</th>
+                <th>종목 <span>⌄</span></th>
+                <th>섹터 <span>⌄</span></th>
+                <th>현재가 <span>⌄</span></th>
+                <th>등락액 <span>⌄</span></th>
+                <th>등락율 <span>⌄</span></th>
+                <th>시가총액 <span>⌄</span></th>
+                <th>ST_D <span>⌄</span></th>
+                <th>ST_W <span>⌄</span></th>
+                <th>ADX(14) <span>⌄</span></th>
+                <th>매수의견 <span>⌄</span></th>
+                <th>Backtest 결과 <span>⌄</span></th>
+                <th>차트</th>
+              </tr>
+            </thead>
+            <tbody id="sheetBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="quizSheetView" class="sheet-view quiz-sheet-view" hidden>
+        <div class="quiz-sheet-grid">
+          <div class="quiz-column-letters"><span></span><b>A</b><b>B</b><b>C</b><b>D</b><b>E</b><b>F</b><b>G</b><b>H</b><b>I</b><b>J</b><b>K</b><b>L</b></div>
+          <div class="quiz-row-number">1</div>
+          <div class="quiz-excel-cell">
+            <section class="quiz-shell">
+              <header class="quiz-toolbar">
+                <div>
+                  <small>CHART RECONSTRUCTION QUIZ</small>
+                  <h1>가려진 30일의 흐름을 맞혀보세요.</h1>
+                  <p>한 번에 한 문제 · 보기 5개 · 앞 60거래일만 공개</p>
+                </div>
+                <button id="newQuizBtn" class="quiz-new-btn" type="button">문제 시작</button>
+              </header>
+              <div id="quizStatus" class="quiz-status">보기 5개 중 실제 다음 30거래일 차트를 선택하세요.</div>
+              <section id="quizGame" class="quiz-game" hidden>
+                <div class="quiz-question-meta">
+                  <div><span id="quizNumber">QUIZ</span><b id="quizIdentity">종목 · 기간 비공개</b></div>
+                  <span id="quizSegmentLabel">1문제 · 보기 5개 · 90거래일 중 30일 가림</span>
+                </div>
+                <div id="quizMainChart" class="quiz-main-chart" aria-label="퀴즈 캔들 차트"></div>
+                <div class="quiz-instruction"><b>가려진 구간의 실제 종가 모양은?</b><span id="quizInstructionSub">보기를 선택하면 먼저 미리보기 됩니다.</span></div>
+                <div id="quizChoices" class="quiz-choices" aria-label="정답 보기"></div>
+                <div class="quiz-actions">
+                  <div id="quizSelectedHint" class="quiz-selected-hint">보기를 선택하세요.</div>
+                  <button id="quizSubmitBtn" class="quiz-submit-btn" type="button" disabled>정답 제출</button>
+                </div>
+                <div id="quizFeedback" class="quiz-feedback" hidden></div>
+              </section>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="excel-statusbar">
+      <div class="sheet-nav" aria-label="워크시트 선택">
+        <button class="sheet-nav-icon" type="button" aria-hidden="true">＋</button>
+        <button class="sheet-tab active" data-sheet="KR" type="button">국장</button>
+        <button class="sheet-tab" data-sheet="KR_ETF" type="button">국장ETF</button>
+        <button class="sheet-tab" data-sheet="US" type="button">미장</button>
+        <button class="sheet-tab" data-sheet="US_ETF" type="button">미장ETF</button>
+        <button class="sheet-tab quiz-tab" data-sheet="QUIZ" type="button">Quiz</button>
+      </div>
+      <div class="status-right"><span id="bottomStatus">준비</span><span>100%</span><span class="zoom-line"></span><span>＋</span></div>
+    </footer>
   </div>
 
-
-
-  <script src="./runtime-config.js?v=20260824-v14_2_tvcompat_toss5"></script>
-  <script src="./news-config.js?v=20260824-v14_2_tvcompat_toss5"></script>
-  <script src="./app.js?v=20260824-v14_2_tvcompat_toss5"></script>
-  <script src="./pwa.js?v=20260824-v14_2_tvcompat_toss5"></script>
+  <script src="./runtime-config.js?v=20260824-v14_4_excelgrid_dualst"></script>
+  <script src="./app.js?v=20260824-v14_4_excelgrid_dualst"></script>
+  <script src="./pwa.js?v=20260824-v14_4_excelgrid_dualst"></script>
 </body>
 </html>
