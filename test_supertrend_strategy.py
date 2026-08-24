@@ -44,6 +44,67 @@ class SupertradIndexTests(unittest.TestCase):
         self.assertTrue(np.isfinite(out["ADX"].iloc[-1]))
         self.assertGreaterEqual(float(out["ADX"].iloc[-1]), 0.0)
 
+
+    def test_tradingview_dmi_first_valid_bar_matches_pine_warmup(self):
+        close = np.linspace(100, 140, 120) + np.sin(np.arange(120) / 5.0)
+        out = adx(frame_from_close(close), 14, 14)
+        adx_vals = out["ADX"].to_numpy(float)
+        first = int(np.flatnonzero(np.isfinite(adx_vals))[0])
+        # ta.change()/ta.tr are na on bar 0; DI first appears on bar 14,
+        # then 14 finite DX observations seed ADX on bar 27.
+        self.assertEqual(first, 27)
+
+    def test_supertrend_atr_uses_tr_true_pine_seed(self):
+        df = frame_from_close(np.linspace(100, 130, 80))
+        out = supertrend(df, 14, 2.0)
+        atr = out["ATR"].to_numpy(float)
+        first = int(np.flatnonzero(np.isfinite(atr))[0])
+        self.assertEqual(first, 13)
+
+    def test_adx_matches_independent_pine_reference(self):
+        n = 240
+        x = np.arange(n, dtype=float)
+        close = 100 + 0.12*x + 3*np.sin(x/7.0)
+        df = frame_from_close(close, wick=0.017)
+        got = adx(df, 14, 14)
+
+        h = df["High"].to_numpy(float)
+        l = df["Low"].to_numpy(float)
+        c = df["Close"].to_numpy(float)
+        up = np.r_[np.nan, np.diff(h)]
+        down = np.r_[np.nan, -np.diff(l)]
+        pdm = np.where(np.isnan(up), np.nan, np.where((up > down) & (up > 0), up, 0.0))
+        mdm = np.where(np.isnan(down), np.nan, np.where((down > up) & (down > 0), down, 0.0))
+        tr = np.full(n, np.nan)
+        tr[1:] = np.maximum.reduce([h[1:]-l[1:], np.abs(h[1:]-c[:-1]), np.abs(l[1:]-c[:-1])])
+
+        def rma(src, length):
+            src=np.asarray(src,float); out=np.full(len(src),np.nan); vals=[]; prev=np.nan
+            for i,v in enumerate(src):
+                if not np.isfinite(prev):
+                    if np.isfinite(v): vals.append(float(v))
+                    if len(vals)==length:
+                        prev=float(np.mean(vals)); out[i]=prev
+                else:
+                    if np.isfinite(v): prev=(prev*(length-1)+float(v))/length
+                    out[i]=prev
+            return out
+        def fixnan(src):
+            out=np.full(len(src),np.nan); last=np.nan
+            for i,v in enumerate(src):
+                if np.isfinite(v): last=float(v)
+                if np.isfinite(last): out[i]=last
+            return out
+
+        trur=rma(tr,14); ps=rma(pdm,14); ms=rma(mdm,14)
+        plus=fixnan(100*ps/trur); minus=fixnan(100*ms/trur)
+        sm=plus+minus
+        ratio=np.where(np.isfinite(sm), np.abs(plus-minus)/np.where(sm==0,1,sm), np.nan)
+        exp_adx=100*rma(ratio,14)
+        mask=np.isfinite(exp_adx) & np.isfinite(got["ADX"].to_numpy(float))
+        self.assertTrue(mask.any())
+        self.assertLess(float(np.max(np.abs(exp_adx[mask]-got["ADX"].to_numpy(float)[mask]))), 1e-12)
+
     def test_decision_table_exact(self):
         self.assertEqual(classify_supertrad_index(1, 19.99, 105, 100, 1)[0], "HOLD")
         self.assertEqual(classify_supertrad_index(1, 20.0, 105, 100, 1)[0], "STRONG_BUY")

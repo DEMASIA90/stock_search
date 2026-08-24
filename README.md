@@ -1,4 +1,4 @@
-# Dongtan Trading Center (DTC) — v14.1 Supertrad Index
+# Dongtan Trading Center (DTC) — v14.2 Supertrad Index
 
 DTC Local **v1.14.2 PrevDownSTGate** 규칙을 웹/PWA 스캐너에 이식한 버전입니다.
 
@@ -24,3 +24,7 @@ DTC Local **v1.14.2 PrevDownSTGate** 규칙을 웹/PWA 스캐너에 이식한 �
 
 ## Quiz
 한 세션은 **5문제**입니다. 5번째 제출 후 정답 수를 표시하고 새 5문제 세션을 시작할 수 있습니다.
+
+
+## TradingView alignment
+ST/ADX calculations use Pine-compatible RMA/TR/DMI initialization and raw chart OHLC. See `TRADINGVIEW_ALIGNMENT.md`.

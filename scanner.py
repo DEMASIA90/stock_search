@@ -15,7 +15,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MORNING_INVEST_COMPONENT_VERSION = "14.1"
+MORNING_INVEST_COMPONENT_VERSION = "14.2"
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,7 @@ TOSS_BROWSER_HEADERS = {
 }
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v14.1 · Supertrad Index
+# Dongtan Trading Center (DTC) scanner v14.2 · Supertrad Index · TradingView-compatible ST/ADX
 # -----------------------------------------------------------------------------
 # Opinion engine: DTC Local v1.14.2 PrevDownSTGate Supertrad Index.
 #   SuperTrend(14,2) + ADX(DI 14, smoothing 14).
@@ -52,7 +52,7 @@ TOSS_BROWSER_HEADERS = {
 # Ranking: Strong Buy -> Buy -> Hold -> Sell -> Strong Sell, then market size.
 # Backtest: 2Y explicit BUY/STRONG BUY -> SELL/STRONG SELL cycles;
 # signal-close entry/exit, completed-cycle peak-return median.
-# Chart: ~6 months adjusted real OHLC + ST(14,2) + ADX(14,14) + cycle markers.
+# Chart: ~6 months raw OHLC + TradingView-compatible ST(14,2) + ADX(14,14) + cycle markers.
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1120
@@ -166,14 +166,11 @@ def _numeric_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
             return pd.DataFrame()
         out[col] = pd.to_numeric(out[col], errors="coerce")
     if "Adj Close" in out.columns:
+        # Keep Adj Close only as metadata.  TradingView's standard daily ADX and
+        # SuperTrend are calculated from the chart's OHLC series, not from a
+        # dividend-adjusted OHLC reconstruction.  Do NOT multiply O/H/L/C by
+        # Adj Close / Close here.
         out["Adj Close"] = pd.to_numeric(out["Adj Close"], errors="coerce")
-        # Defensive fallback for any non-auto-adjusted source: scale O/H/L/C by
-        # Adj Close / Close so splits/dividends cannot distort historical ST.
-        raw_close = out["Close"].replace(0, np.nan)
-        factor = (out["Adj Close"] / raw_close).replace([np.inf, -np.inf], np.nan)
-        if factor.notna().any():
-            for col in ("Open", "High", "Low", "Close"):
-                out[col] = out[col] * factor
     if "Volume" in out.columns:
         out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
     else:
@@ -967,7 +964,7 @@ def download_batch(tickers: list[str], scan_mode: str = "FULL", timeout=40) -> p
         end=end.isoformat(),
         interval="1d",
         group_by="ticker",
-        auto_adjust=True,
+        auto_adjust=False,
         actions=False,
         progress=False,
         threads=min(DOWNLOAD_THREADS, max(1, len(tickers))),
@@ -1082,7 +1079,7 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
     ]
     completed = [float(x) for x in completed if np.isfinite(x)]
     return {
-        "model": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN_V14_1",
+        "model": "SUPERTRAD_INDEX_ST14_2_ADX14_14_PREVDOWN_TVCOMPAT_V14_2",
         "window": "last 2 calendar years",
         "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
         "completed_cycles": int(len(completed)),
@@ -1323,7 +1320,7 @@ def scan_category(
         _refresh_kr_etf_size_cache_from_naver(size_cache)
 
     print("=" * 76)
-    print(f"DTC v14.1 Supertrad Index | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
+    print(f"DTC v14.2 Supertrad Index TV-compatible | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
         print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
     else:
@@ -1608,7 +1605,7 @@ def scan_category(
             "strong_buy": "ST UP and 20 <= ADX < 25 and, from the bar after flip, current UP ST >= last DOWN ST immediately before flip",
             "otherwise": "HOLD",
             "ranking": "Strong Buy -> Buy -> Hold -> Sell -> Strong Sell; same level market size descending",
-            "chart": "126 sessions adjusted real OHLC + SuperTrend(14,2) + ADX(14,14) + BUY/SELL cycle markers; click opens Toss Securities WTS",
+            "chart": "126 sessions raw OHLC + TradingView-compatible SuperTrend(14,2) + ADX(14,14) + BUY/SELL cycle markers; click opens Toss Securities WTS",
             "chart_colors": "bullish candle/red, bearish candle/blue, ST up/red, ST down/blue; Strong Buy red dashed; Buy orange dashed",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",

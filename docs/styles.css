@@ -423,7 +423,7 @@ footer{padding:28px 0 3px;text-align:center;color:#4e596b;font-size:9px;letter-s
 
 @media (max-width:560px){.list-tools{justify-content:stretch}.sort-control{width:100%;justify-content:space-between}.sort-control select{max-width:72%;font-size:9px}.sell-group>summary small{display:none}.sell-group-list{padding:7px;gap:8px}}
 
-/* v14.1 Supertrad Index · PrevDownSTGate · Toss WTS */
+/* v14.2 Supertrad Index · TradingView-compatible ST/ADX · Toss WTS */
 .opinion-pill.opinion-strong-sell{background:#10253f;border-color:#2f5f99;color:#bcd8ff}
 .stock-card.opinion-strong-sell{border-color:rgba(47,95,153,.48);box-shadow:0 7px 30px rgba(47,95,153,.06)}
 .supertrad-info{margin-top:12px;display:flex;flex-direction:column;gap:7px}

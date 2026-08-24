@@ -1,4 +1,4 @@
-# DTC v14.1 Supertrad Index Backtest Report
+# DTC v14.2 Supertrad Index Backtest Report
 
 백테스트 규칙은 DTC Local v1.14.2와 동일합니다.
 - 최초 STRONG BUY 또는 BUY 신호일 종가 진입

@@ -1,4 +1,4 @@
-# DTC v14.1 Validation
+# DTC v14.2 Validation
 
 - Source algorithm: uploaded DTC Local v1.14.2 PrevDownSTGate
 - Local source tests: `test_supertrad_index.py` + `test_buy_cycle_backtest.py` = 10 passed
@@ -19,3 +19,7 @@
 - Workflow YAML parse passed.
 - Quiz session count = 5.
 - TradingView UI/embedding removed from PWA; chart click now opens Toss Securities WTS.
+
+- TradingView/Pine DMI warm-up: ADX(14,14) first finite bar = index 27.
+- SuperTrend ATR(14) first finite bar = index 13 (`ta.tr(true)`).
+- Dividend-adjustment reconstruction removed from scanner OHLC path.

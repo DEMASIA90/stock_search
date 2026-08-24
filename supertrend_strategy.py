@@ -60,48 +60,77 @@ def _ohlc(df: pd.DataFrame) -> pd.DataFrame:
     return out[~out.index.duplicated(keep="last")].sort_index()
 
 
-def _rma(values: np.ndarray, length: int) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
-    out = np.full(len(values), np.nan, dtype=float)
-    if length <= 0 or len(values) < length:
+def _pine_rma(values: np.ndarray, length: int) -> np.ndarray:
+    """Pine/TradingView ta.rma() semantics for a numeric series.
+
+    Pine seeds RMA with an SMA over the first ``length`` non-na source values,
+    then applies alpha=1/length recursively.  na source values are ignored
+    after a seed exists (the previous RMA is retained).
+    """
+    src = np.asarray(values, dtype=float)
+    out = np.full(len(src), np.nan, dtype=float)
+    if length <= 0 or len(src) == 0:
         return out
-    seed = values[:length]
-    if not np.all(np.isfinite(seed)):
-        return out
-    out[length - 1] = float(np.mean(seed))
-    for i in range(length, len(values)):
-        if np.isfinite(values[i]) and np.isfinite(out[i - 1]):
-            out[i] = (out[i - 1] * (length - 1) + values[i]) / length
+
+    finite_positions: list[int] = []
+    seeded = False
+    prev = np.nan
+    alpha = 1.0 / float(length)
+
+    for i, value in enumerate(src):
+        if not seeded:
+            if np.isfinite(value):
+                finite_positions.append(i)
+            if len(finite_positions) == length:
+                vals = [src[j] for j in finite_positions]
+                prev = float(np.mean(vals))
+                out[i] = prev
+                seeded = True
+            continue
+
+        if np.isfinite(value):
+            prev = alpha * float(value) + (1.0 - alpha) * prev
+        out[i] = prev
     return out
 
 
-def _rma_from_first_finite(values: np.ndarray, length: int) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
-    out = np.full(len(values), np.nan, dtype=float)
-    finite = np.flatnonzero(np.isfinite(values))
-    if length <= 0 or len(finite) < length:
-        return out
-    first = int(finite[0])
-    seed_end = first + length
-    if seed_end > len(values):
-        return out
-    seed_values = values[first:seed_end]
-    if np.count_nonzero(np.isfinite(seed_values)) < length:
-        return out
-    seed_idx = seed_end - 1
-    out[seed_idx] = float(np.mean(seed_values))
-    for i in range(seed_idx + 1, len(values)):
-        if np.isfinite(values[i]) and np.isfinite(out[i - 1]):
-            out[i] = (out[i - 1] * (length - 1) + values[i]) / length
+def _pine_fixnan(values: np.ndarray) -> np.ndarray:
+    """TradingView fixnan(): replace na with the nearest previous non-na."""
+    src = np.asarray(values, dtype=float)
+    out = np.full(len(src), np.nan, dtype=float)
+    last = np.nan
+    for i, value in enumerate(src):
+        if np.isfinite(value):
+            last = float(value)
+        if np.isfinite(last):
+            out[i] = last
     return out
 
+
+def _true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray, handle_na: bool) -> np.ndarray:
+    """TradingView ta.tr / ta.tr(true) behavior."""
+    n = len(close)
+    tr = np.full(n, np.nan, dtype=float)
+    for i in range(n):
+        if i == 0 or not np.isfinite(close[i - 1]):
+            if handle_na:
+                tr[i] = high[i] - low[i]
+            continue
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+    return tr
 
 def supertrend(
     df: pd.DataFrame,
     length: int = SUPER_TREND_PERIOD,
     multiplier: float = SUPER_TREND_MULTIPLIER,
 ) -> pd.DataFrame:
-    """SuperTrend used by DTC Local v1.14: ST(14,2), Wilder ATR, close-based flips."""
+    """TradingView/Pine-compatible ta.supertrend() calculation.
+
+    ATR is ta.rma(ta.tr(true), length).  The band ratchet and direction state
+    follow TradingView's published Supertrend formula exactly.  DTC keeps +1
+    for up and -1 for down internally (Pine's returned direction sign differs,
+    but the plotted ST price series is the same).
+    """
     d = _ohlc(df).copy()
     if d.empty:
         return d.assign(ATR=np.nan, ST_UPPER=np.nan, ST_LOWER=np.nan, ST=np.nan, ST_DIR=0)
@@ -111,10 +140,9 @@ def supertrend(
     close = d["Close"].to_numpy(float)
     n = len(d)
 
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum.reduce([high - low, np.abs(high - prev_close), np.abs(low - prev_close)])
-    atr = _rma(tr, int(length))
+    # TradingView ta.atr(length) = ta.rma(ta.tr(true), length).
+    tr = _true_range(high, low, close, handle_na=True)
+    atr = _pine_rma(tr, int(length))
     hl2 = (high + low) / 2.0
     basic_upper = hl2 + float(multiplier) * atr
     basic_lower = hl2 - float(multiplier) * atr
@@ -168,6 +196,20 @@ def adx(
     di_length: int = ADX_DI_LENGTH,
     adx_smoothing: int = ADX_SMOOTHING,
 ) -> pd.DataFrame:
+    """TradingView/Pine-compatible DMI/ADX.
+
+    This mirrors the canonical Pine implementation used with ta.dmi():
+      up      = ta.change(high)
+      down    = -ta.change(low)
+      plusDM  = na(up) ? na : (up > down and up > 0 ? up : 0)
+      minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+      trur    = ta.rma(ta.tr, di_length)
+      plus    = fixnan(100 * ta.rma(plusDM, di_length) / trur)
+      minus   = fixnan(100 * ta.rma(minusDM, di_length) / trur)
+      ADX     = 100 * ta.rma(abs(plus-minus)/(sum==0 ? 1 : sum), smoothing)
+
+    Note the deliberate first-bar na in ta.change() and ta.tr (handle_na=false).
+    """
     d = _ohlc(df).copy()
     n = len(d)
     if n == 0:
@@ -178,37 +220,57 @@ def adx(
     high = d["High"].to_numpy(float)
     low = d["Low"].to_numpy(float)
     close = d["Close"].to_numpy(float)
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum.reduce([high - low, np.abs(high - prev_close), np.abs(low - prev_close)])
 
-    up_move = np.diff(high, prepend=high[0])
-    down_move = -np.diff(low, prepend=low[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Pine ta.change(): first value is na.
+    up = np.full(n, np.nan, dtype=float)
+    down = np.full(n, np.nan, dtype=float)
+    if n > 1:
+        up[1:] = high[1:] - high[:-1]
+        down[1:] = low[:-1] - low[1:]
 
-    atr = _rma(tr, int(di_length))
-    plus_sm = _rma(plus_dm, int(di_length))
-    minus_sm = _rma(minus_dm, int(di_length))
-    plus_di = np.full(n, np.nan, dtype=float)
-    minus_di = np.full(n, np.nan, dtype=float)
-    valid_atr = np.isfinite(atr) & (atr > 0)
-    plus_di[valid_atr] = 100.0 * plus_sm[valid_atr] / atr[valid_atr]
-    minus_di[valid_atr] = 100.0 * minus_sm[valid_atr] / atr[valid_atr]
+    plus_dm = np.full(n, np.nan, dtype=float)
+    minus_dm = np.full(n, np.nan, dtype=float)
+    valid_change = np.isfinite(up) & np.isfinite(down)
+    plus_dm[valid_change] = np.where(
+        (up[valid_change] > down[valid_change]) & (up[valid_change] > 0.0),
+        up[valid_change],
+        0.0,
+    )
+    minus_dm[valid_change] = np.where(
+        (down[valid_change] > up[valid_change]) & (down[valid_change] > 0.0),
+        down[valid_change],
+        0.0,
+    )
+
+    # DMI's published Pine implementation uses ta.tr (handle_na=false),
+    # unlike ta.atr(), which uses ta.tr(true).
+    tr = _true_range(high, low, close, handle_na=False)
+    trur = _pine_rma(tr, int(di_length))
+    plus_sm = _pine_rma(plus_dm, int(di_length))
+    minus_sm = _pine_rma(minus_dm, int(di_length))
+
+    plus_raw = np.full(n, np.nan, dtype=float)
+    minus_raw = np.full(n, np.nan, dtype=float)
+    valid_trur = np.isfinite(trur) & (trur != 0.0)
+    plus_raw[valid_trur] = 100.0 * plus_sm[valid_trur] / trur[valid_trur]
+    minus_raw[valid_trur] = 100.0 * minus_sm[valid_trur] / trur[valid_trur]
+    plus_di = _pine_fixnan(plus_raw)
+    minus_di = _pine_fixnan(minus_raw)
 
     denom = plus_di + minus_di
-    dx = np.full(n, np.nan, dtype=float)
-    valid = np.isfinite(denom) & (denom > 0)
-    dx[valid] = 100.0 * np.abs(plus_di[valid] - minus_di[valid]) / denom[valid]
-    zero = np.isfinite(plus_di) & np.isfinite(minus_di) & (denom == 0)
-    dx[zero] = 0.0
+    ratio = np.full(n, np.nan, dtype=float)
+    finite_di = np.isfinite(plus_di) & np.isfinite(minus_di)
+    nonzero = finite_di & (denom != 0.0)
+    ratio[nonzero] = np.abs(plus_di[nonzero] - minus_di[nonzero]) / denom[nonzero]
+    ratio[finite_di & (denom == 0.0)] = np.abs(plus_di[finite_di & (denom == 0.0)] - minus_di[finite_di & (denom == 0.0)])
+
+    adx_value = 100.0 * _pine_rma(ratio, int(adx_smoothing))
 
     d["PLUS_DI"] = plus_di
     d["MINUS_DI"] = minus_di
-    d["DX"] = dx
-    d["ADX"] = _rma_from_first_finite(dx, int(adx_smoothing))
+    d["DX"] = ratio * 100.0
+    d["ADX"] = adx_value
     return d
-
 
 def add_up_flip_reference(df: pd.DataFrame) -> pd.DataFrame:
     """Attach the previous DOWN SuperTrend price at the latest DOWN->UP flip.

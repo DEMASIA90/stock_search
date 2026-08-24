@@ -358,8 +358,8 @@ async function openScoreDetail(stock) {
   let detail=stock;try{detail=await ensureDetail(stock);}catch(_){ }
   const st=detail?.supertrend||stock?.supertrend||{},bt=st.backtest||{};
   const med=numberOrNaN(bt.median_max_return_pct),adx=numberOrNaN(st.adx ?? detail.adx),completed=Number(bt.completed_events||0),total=Number(bt.event_count||0);
-  body.innerHTML=`<div class="score-total"><span>SUPERTRAD INDEX · ST(14,2) + ADX(14,14)</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
-    <div class="score-row"><div><b>SuperTrend</b><small>기간 14 · Factor 2 · 일반 OHLC</small></div><strong>${escapeHtml(st.st_direction||detail.st_direction||'—')}</strong></div>
+  body.innerHTML=`<div class="score-total"><span>SUPERTRAD INDEX · TV-compatible ST(14,2) + ADX(14,14)</span><b>${escapeHtml(st.opinion_label||opinionText(stock))}</b></div><div class="score-rows">
+    <div class="score-row"><div><b>SuperTrend</b><small>기간 14 · Factor 2 · TradingView/Pine OHLC 방식</small></div><strong>${escapeHtml(st.st_direction||detail.st_direction||'—')}</strong></div>
     <div class="score-row"><div><b>ADX</b><small>DI 14 · smoothing 14</small></div><strong>${Number.isFinite(adx)?adx.toFixed(1):'—'}</strong></div>
     <div class="score-row"><div><b>판정 근거</b><small>DTC Local v1.14.2 PrevDownSTGate</small></div><strong class="score-reason-text">${escapeHtml(st.reason||detail.reason||'—')}</strong></div>
     <div class="score-row"><div><b>2Y BUY→SELL BACKTEST</b><small>완료 cycle 최고수익률들의 중위값 · 신호일 종가 체결</small></div><strong>${Number.isFinite(med)?pct(med,1):'—'} · ${completed}/${total}</strong></div>

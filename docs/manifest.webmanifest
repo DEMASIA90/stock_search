@@ -2,7 +2,7 @@
   "id": "./",
   "name": "DTC Supertrend",
   "short_name": "DTC",
-  "description": "DTC Supertrad Index ST(14,2) + ADX(14,14) dashboard",
+  "description": "DTC Supertrad Index TradingView-compatible ST(14,2) + ADX(14,14) dashboard",
   "lang": "ko-KR",
   "start_url": "./",
   "scope": "./",

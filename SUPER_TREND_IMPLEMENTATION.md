@@ -1,4 +1,4 @@
-# DTC v14.1 Supertrad Index 구현
+# DTC v14.2 Supertrad Index 구현
 
 기준: 첨부 DTC Local v1.14.2 PrevDownSTGate.
 
