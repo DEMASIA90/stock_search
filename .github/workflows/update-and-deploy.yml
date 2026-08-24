@@ -90,10 +90,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Commit: ${{ github.sha }}"
-          echo "Checking DTC v14.1 Supertrad Index scanner + retained support files..."
+          echo "Checking DTC v14.2 Supertrad Index TV-compatible scanner + retained support files..."
 
-          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "14.1"' scanner.py || {
-            echo "::error::scanner.py is not DTC v14.1 Supertrad Index"
+          grep -q 'MORNING_INVEST_COMPONENT_VERSION = "14.2"' scanner.py || {
+            echo "::error::scanner.py is not DTC v14.2 Supertrad Index TV-compatible"
             exit 1
           }
 
@@ -117,7 +117,7 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py: Supertrad Index / v14.1"
+          echo "scanner.py: Supertrad Index / v14.2 TV-compatible"
           echo "hydrate_data.py: compatible"
           echo "universe.py: v11.2"
           echo "KR restriction implementation: direct KIND status pages + badge fallback"
@@ -247,7 +247,7 @@ jobs:
       - name: Scan selected market
         if: steps.market.outputs.market != 'UI_ONLY'
         run: |
-          echo "Running DTC v14.1 Supertrad Index FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
+          echo "Running DTC v14.2 Supertrad Index TV-compatible FAST | ${{ steps.market.outputs.market }} | ${{ steps.market.outputs.scan_mode }}"
           python scanner.py \
             --market "${{ steps.market.outputs.market }}" \
             --scan-mode "${{ steps.market.outputs.scan_mode }}"
@@ -326,14 +326,14 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260823-v14_1_prevdown_toss5",
+            "ui_build": "20260824-v14_2_tvcompat_toss5",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260823-v14_1_prevdown_toss5"
+          echo "UI build: 20260824-v14_2_tvcompat_toss5"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint
