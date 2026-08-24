@@ -1,17 +1,13 @@
-# Validation results · v14.4.1 Excel UI
+# Validation results — TradingView repair
 
-- Python compile: PASS
-- `node --check docs/app.js`: PASS
-- SuperTrend / dual-timeframe tests: 8/8 PASS
-- Exact market-data adapter tests: 8/8 PASS
-- UI structure checks:
-  - title `DTC.xlsx`: PASS
-  - opinion column A: PASS
-  - formula input editable/searchable: PASS
-  - sortable A-K headers: PASS
-  - chart overlay without row expansion: PASS
-  - Quiz five choices: PASS
-  - Quiz Bollinger/volume-profile rendering removed: PASS
-  - Quiz SuperTrend(14,2) renderer present: PASS
+- Python syntax compile: `market_data.py`, `scanner.py` — PASS
+- SuperTrend strategy tests: 8/8 — PASS
+- Market-data adapter tests: 12/12 — PASS
+- Combined unit tests: 20/20 — PASS
+- TradingView regression test confirms `create_series = [chart_session, sds_1, s1, sds_sym_1, 1D, bars]` — PASS
+- `du` historical candle parsing — PASS
+- `symbol_error` isolation — PASS
+- all-socket-failure propagation with diagnostic text — PASS
+- No Yahoo OHLC fallback marker — PASS
 
-The scanner/market algorithm is unchanged from v14.4; this revision is a UI/quiz-rendering update, so no new FULL scan is required for the shell itself.
+A live TradingView websocket call could not be executed in the artifact runtime because outbound DNS is unavailable there. GitHub Actions will now run a 3-symbol TradingView preflight before a US scan and will print the actual handshake/protocol failure if the external endpoint is unavailable.

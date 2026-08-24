@@ -18,6 +18,7 @@ mixed-source publication.
 
 import json
 import math
+import os
 import random
 import re
 import string
@@ -54,6 +55,9 @@ TOSS_HEADERS = {
 TRADINGVIEW_WS = "wss://data.tradingview.com/socket.io/websocket"
 TRADINGVIEW_ORIGIN = "https://data.tradingview.com"
 TV_SERIES_PER_SOCKET = 16
+TV_SOCKET_PAUSE = (0.35, 0.70)
+TV_CONNECT_ORIGINS = ("https://data.tradingview.com", "https://www.tradingview.com")
+TV_AUTH_TOKEN = os.environ.get("TRADINGVIEW_AUTH_TOKEN", "").strip() or "unauthorized_user_token"
 
 
 class ExactMarketDataError(RuntimeError):
@@ -250,37 +254,50 @@ def _tv_session(prefix: str) -> str:
 
 
 def _tv_frame(payload: str) -> str:
-    return f"~m~{len(payload)}~m~{payload}"
+    # TradingView's frame length is the UTF-8 byte length, not Python's
+    # character count. Most protocol JSON is ASCII, but using bytes here avoids
+    # a subtle framing bug if a non-ASCII server/client payload ever appears.
+    return f"~m~{len(payload.encode('utf-8'))}~m~{payload}"
 
 
 def _tv_command(method: str, params: list[Any]) -> str:
     return _tv_frame(json.dumps({"m": method, "p": params}, separators=(",", ":")))
 
 
-def _tv_payloads(raw: str) -> list[str]:
-    """Extract TradingView ~m~length~m~ payloads from one websocket receive."""
-    text = str(raw or "")
+def _tv_payloads(raw: str | bytes) -> list[str]:
+    """Extract TradingView ``~m~length~m~`` payloads from one websocket receive.
+
+    One websocket text message can contain several protocol frames. Length is a
+    byte count, so parsing is performed on bytes and decoded per frame.
+    """
+    if isinstance(raw, bytes):
+        data = raw
+    else:
+        data = str(raw or "").encode("utf-8")
     out: list[str] = []
     pos = 0
-    marker = "~m~"
+    marker = b"~m~"
     while True:
-        start = text.find(marker, pos)
+        start = data.find(marker, pos)
         if start < 0:
             break
         len_start = start + len(marker)
-        len_end = text.find(marker, len_start)
+        len_end = data.find(marker, len_start)
         if len_end < 0:
             break
         try:
-            size = int(text[len_start:len_end])
-        except ValueError:
+            size = int(data[len_start:len_end].decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
             pos = len_end + len(marker)
             continue
         body_start = len_end + len(marker)
-        body = text[body_start:body_start + size]
+        body = data[body_start:body_start + size]
         if len(body) < size:
             break
-        out.append(body)
+        try:
+            out.append(body.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
         pos = body_start + size
     return out
 
@@ -316,7 +333,58 @@ def _tv_rows_from_series(series_payload: Any) -> pd.DataFrame:
     return _frame_from_rows(rows)
 
 
+def _tv_series_spec(index: int) -> tuple[str, str, str]:
+    """Return protocol-correct ``(alias, series_id, series_key)`` identifiers."""
+    n = int(index) + 1
+    return f"sds_sym_{n}", f"sds_{n}", f"s{n}"
+
+
+def _tv_connect(timeout: float):
+    """Open a TradingView websocket with diagnostic origin fallback.
+
+    TradingView is an unofficial/public websocket dependency and its handshake
+    policy can vary by edge/IP. Trying the two browser-observed origins keeps an
+    otherwise valid scan from failing on an origin-policy change while preserving
+    the same TradingView source and anonymous/auth-token policy.
+    """
+    if websocket is None:
+        raise ExactMarketDataError("websocket-client is required for TradingView US candles")
+
+    errors: list[str] = []
+    headers = [
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/151 Safari/537.36",
+        "Accept-Language: en-US,en;q=0.9",
+        "Cache-Control: no-cache",
+        "Pragma: no-cache",
+    ]
+    for origin in TV_CONNECT_ORIGINS:
+        try:
+            return websocket.create_connection(
+                TRADINGVIEW_WS,
+                timeout=timeout,
+                origin=origin,
+                header=headers,
+            )
+        except Exception as exc:
+            errors.append(f"origin={origin}: {type(exc).__name__}: {exc}")
+    raise ExactMarketDataError("TradingView websocket handshake failed; " + " | ".join(errors))
+
+
+def _tv_error_text(method: str, params: list[Any]) -> str:
+    detail = " | ".join(str(x) for x in params[1:4]) if len(params) > 1 else "no detail"
+    return f"{method}: {detail}"
+
+
 def fetch_tradingview_us_batch(stocks: list[Any], bars: int = 720, timeout: float = 42.0) -> dict[str, pd.DataFrame]:
+    """Fetch a small batch of US daily candles from TradingView.
+
+    Protocol notes:
+    * ``create_series`` requires distinct series id/key values (``sds_1``, ``s1``).
+    * Historical bars can arrive as ``du`` or ``timescale_update`` messages.
+    * Symbol-level errors are isolated; connection/protocol failures are raised so
+      the scanner can report the real cause instead of silently producing 0/500.
+    """
     if websocket is None:
         raise ExactMarketDataError("websocket-client is required for TradingView US candles")
     if not stocks:
@@ -325,55 +393,82 @@ def fetch_tradingview_us_batch(stocks: list[Any], bars: int = 720, timeout: floa
     chart_session = _tv_session("cs")
     results: dict[str, pd.DataFrame] = {}
     series_to_stock: dict[str, Any] = {}
+    alias_to_series: dict[str, str] = {}
     completed: set[str] = set()
+    symbol_errors: dict[str, str] = {}
+    transport_error: str | None = None
+    fatal_error: str | None = None
 
-    ws = websocket.create_connection(
-        TRADINGVIEW_WS,
-        timeout=timeout,
-        origin=TRADINGVIEW_ORIGIN,
-        header=["User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36"],
-    )
+    ws = _tv_connect(timeout)
     try:
-        ws.send(_tv_command("set_auth_token", ["unauthorized_user_token"]))
+        # A shorter recv timeout lets the deadline loop distinguish a quiet
+        # socket from an immediately broken connection.
+        try:
+            ws.settimeout(min(8.0, max(2.0, float(timeout) / 4.0)))
+        except Exception:
+            pass
+
+        ws.send(_tv_command("set_auth_token", [TV_AUTH_TOKEN]))
+        ws.send(_tv_command("set_locale", ["en", "US"]))
         ws.send(_tv_command("chart_create_session", [chart_session, ""]))
         ws.send(_tv_command("switch_timezone", [chart_session, "exchange"]))
 
         for i, stock in enumerate(stocks):
-            alias = f"sym_{i}"
-            series = f"ser_{i}"
+            alias, series_id, series_key = _tv_series_spec(i)
             tv_symbol = tradingview_symbol(stock)
             descriptor = "=" + json.dumps(
                 {"symbol": tv_symbol, "adjustment": "splits", "session": "regular"},
                 separators=(",", ":"),
             )
             ws.send(_tv_command("resolve_symbol", [chart_session, alias, descriptor]))
-            ws.send(_tv_command("create_series", [chart_session, series, series, alias, "1D", int(bars)]))
-            series_to_stock[series] = stock
+            # IMPORTANT: series id and series key are distinct protocol fields.
+            ws.send(
+                _tv_command(
+                    "create_series",
+                    [chart_session, series_id, series_key, alias, "1D", int(bars)],
+                )
+            )
+            series_to_stock[series_id] = stock
+            alias_to_series[alias] = series_id
 
         deadline = time.monotonic() + timeout
         while len(completed) < len(series_to_stock) and time.monotonic() < deadline:
             try:
                 raw = ws.recv()
-            except Exception:
+            except Exception as exc:
+                # websocket-client raises WebSocketTimeoutException during quiet
+                # periods. Keep waiting until our own deadline in that case.
+                timeout_cls = getattr(getattr(websocket, "_exceptions", object()), "WebSocketTimeoutException", ())
+                if timeout_cls and isinstance(exc, timeout_cls):
+                    continue
+                transport_error = f"{type(exc).__name__}: {exc}"
                 break
             if not raw:
                 continue
+
             for payload in _tv_payloads(raw):
                 if payload.startswith("~h~"):
+                    # Echo heartbeat payload in TradingView framing exactly.
                     try:
                         ws.send(_tv_frame(payload))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        transport_error = f"heartbeat send failed: {type(exc).__name__}: {exc}"
                     continue
+
                 try:
                     msg = json.loads(payload)
                 except Exception:
                     continue
-                method = msg.get("m")
+                if not isinstance(msg, dict):
+                    continue
+                method = str(msg.get("m") or "")
                 params = msg.get("p") or []
-                if method == "timescale_update" and len(params) >= 2 and isinstance(params[1], dict):
-                    for series, series_payload in params[1].items():
-                        stock = series_to_stock.get(series)
+                if not isinstance(params, list):
+                    params = []
+
+                if method in {"du", "timescale_update"} and len(params) >= 2 and isinstance(params[1], dict):
+                    for series_id, series_payload in params[1].items():
+                        stock = series_to_stock.get(str(series_id))
                         if stock is None:
                             continue
                         frame = _tv_rows_from_series(series_payload)
@@ -385,14 +480,56 @@ def fetch_tradingview_us_batch(stocks: list[Any], bars: int = 720, timeout: floa
                             frame = pd.concat([prior, frame])
                             frame = frame[~frame.index.duplicated(keep="last")].sort_index()
                         results[ticker] = frame.tail(bars)
+
                 elif method == "series_completed" and len(params) >= 2:
-                    series = str(params[1])
-                    if series in series_to_stock:
-                        completed.add(series)
-                elif method in {"series_error", "critical_error"}:
-                    # The coverage guard/retry path will surface missing symbols.
-                    if len(params) >= 2 and str(params[1]) in series_to_stock:
-                        completed.add(str(params[1]))
+                    series_id = str(params[1])
+                    if series_id in series_to_stock:
+                        completed.add(series_id)
+
+                elif method == "symbol_error" and len(params) >= 2:
+                    alias = str(params[1])
+                    series_id = alias_to_series.get(alias)
+                    if series_id:
+                        stock = series_to_stock[series_id]
+                        symbol_errors[str(stock.ticker)] = _tv_error_text(method, params)
+                        completed.add(series_id)
+
+                elif method == "series_error" and len(params) >= 2:
+                    series_id = str(params[1])
+                    if series_id in series_to_stock:
+                        stock = series_to_stock[series_id]
+                        symbol_errors[str(stock.ticker)] = _tv_error_text(method, params)
+                        completed.add(series_id)
+
+                elif method in {"critical_error", "protocol_error"}:
+                    fatal_error = _tv_error_text(method, params)
+                    break
+
+            if fatal_error:
+                break
+
+        if symbol_errors:
+            sample = "; ".join(f"{k}={v}" for k, v in list(symbol_errors.items())[:4])
+            suffix = "" if len(symbol_errors) <= 4 else f"; +{len(symbol_errors)-4} more"
+            print(f"[TradingView] symbol/series errors {len(symbol_errors)}/{len(stocks)}: {sample}{suffix}")
+
+        if fatal_error:
+            raise ExactMarketDataError(f"TradingView protocol fatal error: {fatal_error}")
+
+        if not results and transport_error:
+            raise ExactMarketDataError(f"TradingView websocket receive failed before any candles: {transport_error}")
+
+        # A connected socket that receives neither usable bars nor symbol errors
+        # is a protocol/edge failure, not 16 independent missing tickers.
+        if not results and not symbol_errors:
+            unresolved = len(series_to_stock) - len(completed)
+            raise ExactMarketDataError(
+                f"TradingView returned no candle series for batch of {len(stocks)} "
+                f"(completed={len(completed)}, unresolved={unresolved}, timeout={timeout:.0f}s)"
+            )
+
+        if transport_error and results:
+            print(f"[TradingView] partial socket result {len(results)}/{len(stocks)} before {transport_error}")
         return results
     finally:
         try:
@@ -403,16 +540,58 @@ def fetch_tradingview_us_batch(stocks: list[Any], bars: int = 720, timeout: floa
 
 def _download_tradingview_group(stocks: list[Any], bars: int, timeout: float) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
-    for start in range(0, len(stocks), TV_SERIES_PER_SOCKET):
+    failures: list[str] = []
+    group_count = max(1, math.ceil(len(stocks) / TV_SERIES_PER_SOCKET))
+
+    for group_no, start in enumerate(range(0, len(stocks), TV_SERIES_PER_SOCKET), 1):
         group = stocks[start:start + TV_SERIES_PER_SOCKET]
         try:
             out.update(fetch_tradingview_us_batch(group, bars=bars, timeout=timeout))
-        except Exception:
-            # Leave symbols absent so scanner retries them with a smaller batch.
-            pass
+        except Exception as exc:
+            tickers = ",".join(str(getattr(x, "ticker", "?")) for x in group[:4])
+            if len(group) > 4:
+                tickers += ",..."
+            detail = f"socket-group {group_no}/{group_count} [{tickers}]: {type(exc).__name__}: {exc}"
+            failures.append(detail)
+            print(f"[TradingView] {detail}")
+
         if start + TV_SERIES_PER_SOCKET < len(stocks):
-            time.sleep(random.uniform(0.08, 0.18))
+            # Public anonymous websocket endpoints are sensitive to bursts,
+            # especially from shared CI IP ranges. Modest pacing dramatically
+            # reduces connection churn without changing the source or candles.
+            time.sleep(random.uniform(*TV_SOCKET_PAUSE))
+
+    if failures and not out:
+        summary = " | ".join(failures[:3])
+        if len(failures) > 3:
+            summary += f" | +{len(failures)-3} more failed socket groups"
+        raise ExactMarketDataError(
+            f"all TradingView socket groups failed for {len(stocks)} symbols; {summary}"
+        )
+    if failures:
+        print(
+            f"[TradingView] batch partial: priced={len(out)}/{len(stocks)}, "
+            f"failed_socket_groups={len(failures)}/{group_count}"
+        )
     return out
+
+def exact_source_preflight(stocks: Iterable[Any], category: str, timeout: float = 18.0) -> tuple[int, int]:
+    """Fast exact-source connectivity/protocol probe used before a US scan.
+
+    It intentionally requests only five bars for at most three real universe
+    symbols. This catches handshake/protocol-wide failures before the scanner
+    spends dozens of websocket connections on a universe that cannot succeed.
+    """
+    sample = list(stocks)[:3]
+    if not sample:
+        return 0, 0
+    frames = download_market_frames(sample, category, bars=5, timeout=timeout)
+    usable = sum(1 for stock in sample if (frames.get(str(stock.ticker)) is not None and not frames[str(stock.ticker)].empty))
+    if usable <= 0:
+        raise ExactMarketDataError(
+            f"{str(category).upper()} exact-source preflight returned 0/{len(sample)} usable symbols"
+        )
+    return usable, len(sample)
 
 
 def download_market_frames(stocks: Iterable[Any], category: str, bars: int = 720, timeout: float = 42.0) -> dict[str, pd.DataFrame]:

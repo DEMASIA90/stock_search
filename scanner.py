@@ -24,7 +24,7 @@ import yfinance as yf
 
 from universe import Stock, fetch_kr_restricted_symbols, fetch_us_halted_symbols, get_universe
 from supertrend_strategy import analyze as analyze_supertrend, OPINION_ORDER
-from market_data import download_market_frames, market_data_source_for
+from market_data import download_market_frames, exact_source_preflight, market_data_source_for
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "docs" / "data"
@@ -1393,18 +1393,58 @@ def scan_category(
         f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,}"
     )
 
+    if category in {"US", "US_ETF"} and scan_universe:
+        probe_error = ""
+        for probe_attempt in range(1, 3):
+            try:
+                probe_ok, probe_total = exact_source_preflight(scan_universe, category, timeout=18)
+                print(
+                    f"[{category}] TradingView preflight OK: {probe_ok}/{probe_total} "
+                    f"sample symbols returned candles"
+                )
+                probe_error = ""
+                time.sleep(random.uniform(0.55, 0.95))
+                break
+            except Exception as exc:
+                probe_error = f"{type(exc).__name__}: {exc}"
+                print(
+                    f"[{category}] TradingView preflight {probe_attempt}/2 failed: {probe_error}"
+                )
+                if probe_attempt < 2:
+                    time.sleep(4.0)
+        if probe_error:
+            raise RuntimeError(
+                f"{category} TradingView exact-source preflight failed twice; {probe_error}. "
+                "Existing site data was not overwritten."
+            )
+
     batches = list(chunks(scan_universe, BATCH_SIZE))
     total_batches = len(batches)
+    consecutive_source_batch_failures = 0
+    last_source_error = ""
     for batch_no, batch in enumerate(batches, 1):
         tickers = [s.ticker for s in batch]
         try:
             source_frames = download_market_frames(batch, category, bars=EXACT_HISTORY_BARS, timeout=46)
         except Exception as exc:
-            print(f"[{category}] exact-source batch {batch_no}/{total_batches} failed: {type(exc).__name__}: {exc}")
+            last_source_error = f"{type(exc).__name__}: {exc}"
+            print(f"[{category}] exact-source batch {batch_no}/{total_batches} failed: {last_source_error}")
             missing.extend(tickers)
-            time.sleep(1.2)
+            consecutive_source_batch_failures += 1
+            # Three complete US batch failures represent a shared TradingView
+            # transport/protocol problem, not 144 independent unavailable
+            # symbols. Abort before hammering the public websocket with the
+            # remaining universe and a second 500-symbol retry wave.
+            if category in {"US", "US_ETF"} and consecutive_source_batch_failures >= 3:
+                raise RuntimeError(
+                    f"{category} TradingView exact-source unavailable across "
+                    f"{consecutive_source_batch_failures} consecutive batches; "
+                    f"last error: {last_source_error}. Existing site data was not overwritten."
+                )
+            time.sleep(1.8 if category in {"US", "US_ETF"} else 1.2)
             continue
 
+        consecutive_source_batch_failures = 0
         for stock in batch:
             try:
                 raw_frame = source_frames.get(stock.ticker)
@@ -1428,8 +1468,11 @@ def scan_category(
                 f"[{category}] {batch_no}/{total_batches} exact-source batches "
                 f"({batch_no/max(1,total_batches)*100:5.1f}%) | priced={len(priced_tickers):,} | eligible={len(results):,}"
             )
-        if batch_no % 3 == 0 and batch_no != total_batches:
-            time.sleep(random.uniform(0.10, 0.28))
+        if batch_no != total_batches:
+            if category in {"US", "US_ETF"}:
+                time.sleep(random.uniform(0.45, 0.85))
+            elif batch_no % 3 == 0:
+                time.sleep(random.uniform(0.10, 0.28))
 
     retry = [t for t in dict.fromkeys(missing) if t not in priced_tickers and t in by_ticker]
     final_unavailable: list[str] = []
@@ -1445,7 +1488,12 @@ def scan_category(
                 stocks = [by_ticker[t] for t in ticker_batch]
                 try:
                     source_frames = download_market_frames(stocks, category, bars=EXACT_HISTORY_BARS, timeout=55)
-                except Exception:
+                except Exception as exc:
+                    print(
+                        f"[{category}] exact-source retry {attempt}/{attempts} batch failed "
+                        f"({','.join(ticker_batch[:4])}{',...' if len(ticker_batch) > 4 else ''}): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     next_remaining.extend(ticker_batch)
                     continue
                 for ticker in ticker_batch:
@@ -1465,7 +1513,16 @@ def scan_category(
 
             previous = set(remaining)
             remaining = list(dict.fromkeys(next_remaining))
-            if remaining and set(remaining) == previous:
+            no_progress = bool(remaining and set(remaining) == previous)
+            if no_progress:
+                if attempt < attempts:
+                    delay = min(20.0, 4.0 * (2 ** (attempt - 1)))
+                    print(
+                        f"[{category}] exact-source retry {attempt}/{attempts} made no progress "
+                        f"({len(remaining):,}); backing off {delay:.0f}s before final retry"
+                    )
+                    time.sleep(delay)
+                    continue
                 print(f"[{category}] exact-source retry made no progress ({len(remaining):,}); stop")
                 break
             if remaining and attempt < attempts:

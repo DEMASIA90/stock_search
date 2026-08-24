@@ -85,6 +85,88 @@ class MarketDataAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(float(df.iloc[-1]['Close']), 108.0)
         self.assertAlmostEqual(float(df.iloc[-1]['Volume']), 1200.0)
 
+
+    def test_tradingview_protocol_uses_distinct_series_key_and_parses_du(self):
+        ts = int(pd.Timestamp('2026-08-21 20:00:00', tz='UTC').timestamp())
+        du = md._tv_frame(json.dumps({
+            'm': 'du',
+            'p': ['cs_any', {'sds_1': {'s': [
+                {'i': 0, 'v': [ts, 630.0, 635.0, 628.0, 634.0, 1234567]}
+            ]}}]
+        }, separators=(',', ':')))
+        done = md._tv_frame(json.dumps({
+            'm': 'series_completed', 'p': ['cs_any', 'sds_1']
+        }, separators=(',', ':')))
+
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+                self.messages = [du, done]
+            def settimeout(self, value):
+                self.timeout = value
+            def send(self, value):
+                self.sent.append(value)
+            def recv(self):
+                return self.messages.pop(0)
+            def close(self):
+                pass
+
+        fake = FakeWS()
+        stock = self.stock('SPY', 'SPY', 'NYSE Arca')
+        with patch.object(md, '_tv_connect', return_value=fake):
+            got = md.fetch_tradingview_us_batch([stock], bars=5, timeout=2)
+
+        self.assertIn('SPY', got)
+        self.assertEqual(len(got['SPY']), 1)
+        commands = []
+        for framed in fake.sent:
+            for body in md._tv_payloads(framed):
+                if body.startswith('{'):
+                    commands.append(json.loads(body))
+        create = next(x for x in commands if x.get('m') == 'create_series')
+        self.assertEqual(create['p'][1:4], ['sds_1', 's1', 'sds_sym_1'])
+        resolve = next(x for x in commands if x.get('m') == 'resolve_symbol')
+        self.assertIn('AMEX:SPY', resolve['p'][2])
+        self.assertIn('"adjustment":"splits"', resolve['p'][2])
+        self.assertIn('"session":"regular"', resolve['p'][2])
+
+    def test_tradingview_symbol_error_isolated_without_batch_exception(self):
+        err = md._tv_frame(json.dumps({
+            'm': 'symbol_error',
+            'p': ['cs_any', 'sds_sym_1', 'Unknown symbol']
+        }, separators=(',', ':')))
+
+        class FakeWS:
+            def __init__(self):
+                self.sent = []
+                self.messages = [err]
+            def settimeout(self, value):
+                pass
+            def send(self, value):
+                self.sent.append(value)
+            def recv(self):
+                return self.messages.pop(0)
+            def close(self):
+                pass
+
+        with patch.object(md, '_tv_connect', return_value=FakeWS()):
+            got = md.fetch_tradingview_us_batch([self.stock('BAD', 'BAD', 'NASDAQ')], bars=5, timeout=2)
+        self.assertEqual(got, {})
+
+    def test_tradingview_group_surfaces_total_transport_failure(self):
+        stocks = [self.stock('SPY', 'SPY', 'NYSE Arca')]
+        with patch.object(md, 'fetch_tradingview_us_batch', side_effect=md.ExactMarketDataError('handshake 403')):
+            with self.assertRaises(md.ExactMarketDataError) as ctx:
+                md._download_tradingview_group(stocks, bars=5, timeout=1)
+        self.assertIn('all TradingView socket groups failed', str(ctx.exception))
+        self.assertIn('handshake 403', str(ctx.exception))
+
+    def test_tradingview_frame_uses_utf8_byte_length(self):
+        body = '한글'
+        framed = md._tv_frame(body)
+        self.assertTrue(framed.startswith(f"~m~{len(body.encode('utf-8'))}~m~"))
+        self.assertEqual(md._tv_payloads(framed), [body])
+
     def test_no_yahoo_ohlc_fallback_marker(self):
         source = Path(md.__file__).read_text(encoding='utf-8').lower()
         self.assertIn('no yahoo ohlc fallback', source)

@@ -1,15 +1,19 @@
-# TradingView alignment — US / US ETF
+# TradingView exact-source alignment — v14.4.2 repair
 
-DTC v14.4은 US/US ETF 기술지표 계산에 TradingView public/anonymous chart websocket에서 직접 받은 일봉을 사용합니다.
+US / US_ETF OHLC remains TradingView-only with `session=regular` and `adjustment=splits`; no Yahoo OHLC fallback was added.
 
-- interval: `1D`
-- session: `regular`
-- adjustment: `splits`
-- timezone: exchange
-- ST: TradingView `ta.supertrend(2,14)` 계산 의미와 일치하도록 구현
-- ADX: TradingView/Pine DMI `14,14` RMA 계산 의미와 일치하도록 구현
-- Yahoo OHLC fallback 없음
+## Repaired protocol path
 
-카드 클릭으로 띄우는 DTC TradingView Advanced Chart도 public/default chart를 사용하므로 scanner의 목표 feed와 동일한 범주입니다.
+- `create_series`: distinct identifiers are now used: `sds_1` (series id), `s1` (series key), `sds_sym_1` (resolved alias).
+- Historical bar messages: both `du` and `timescale_update` are parsed.
+- `symbol_error`, `series_error`, `critical_error`, and `protocol_error` are surfaced instead of being silently discarded.
+- WebSocket handshake/receive failures now propagate with concrete exception details.
+- TradingView framing uses UTF-8 byte length and accepts text or byte receives.
+- Heartbeats are echoed in TradingView framing.
+- Anonymous mode remains `unauthorized_user_token`; optional `TRADINGVIEW_AUTH_TOKEN` environment support is available without being required.
+- Connection pacing and source preflight reduce burst pressure on shared GitHub Actions IPs.
+- Three consecutive complete US source-batch failures trigger a circuit breaker rather than retrying the whole universe blindly.
 
-주의: 사용자가 별도 TradingView 로그인 계정에서 유료 primary-exchange realtime data를 활성화한 경우, 그 차트는 public/default TradingView US feed와 다른 원시 데이터가 될 수 있습니다. 서버가 사용자의 private market-data entitlement를 사용할 수 없으므로 그 경우까지 동일성을 보장할 수는 없습니다.
+## Regression coverage
+
+`test_market_data.py` now validates the corrected `create_series` request, `du` parsing, symbol-error isolation, total transport failure propagation, and UTF-8 frame sizing.
