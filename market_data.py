@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - surfaced at runtime by the US adapter
     websocket = None
 
 TOSS_WTS_BASE = "https://wts-info-api.tossinvest.com"
-TOSS_C_CHART_MAX = 500
+TOSS_C_CHART_MAX = max(61, min(500, int(os.environ.get("DTC_TOSS_PAGE_SIZE", "200"))))
 TOSS_WORKERS = max(1, min(6, int(os.environ.get("DTC_TOSS_WORKERS", "4"))))
 TOSS_HTTP_RETRIES = max(1, min(3, int(os.environ.get("DTC_TOSS_HTTP_RETRIES", "2"))))
 TOSS_RETRYABLE_STATUS = {500, 502, 503, 504}
@@ -56,7 +56,7 @@ TOSS_HEADERS = {
 
 TRADINGVIEW_WS = "wss://data.tradingview.com/socket.io/websocket"
 TRADINGVIEW_ORIGIN = "https://data.tradingview.com"
-TV_SERIES_PER_SOCKET = 16
+TV_SERIES_PER_SOCKET = max(1, min(32, int(os.environ.get("DTC_TV_SYMBOLS_PER_SOCKET", "16"))))
 TV_SOCKET_PAUSE = (0.35, 0.70)
 TV_CONNECT_ORIGINS = ("https://data.tradingview.com", "https://www.tradingview.com")
 TV_AUTH_TOKEN = os.environ.get("TRADINGVIEW_AUTH_TOKEN", "").strip() or "unauthorized_user_token"
@@ -163,83 +163,97 @@ def _response_detail(response: requests.Response, limit: int = 420) -> str:
 
 
 def _toss_page(product_code: str, count: int, from_datetime: str | None, timeout: float) -> tuple[pd.DataFrame, str | None]:
-    """Fetch one public Toss WTS candle page with bounded transport retries.
+    """Fetch one public Toss WTS candle page.
 
-    4xx responses are never hidden or blindly retried. In particular, 403/429
-    usually means the public endpoint has rejected the current CI request/IP;
-    hammering 2,570 symbols only makes that condition worse. 5xx and network
-    timeouts receive one short bounded retry because they are commonly transient.
+    Toss currently accepts small chart requests reliably, while a production-sized
+    ``count`` can return HTTP 400 even for valid products.  Treat that specific
+    case as a page-size negotiation problem: back off the count (never the product
+    code or source) and remember a smaller request size for the caller.  403/429
+    remain hard stops and are never bypassed.
     """
-    params: dict[str, Any] = {
-        "count": int(min(TOSS_C_CHART_MAX, max(1, count))),
-        "session": "all",
-        "investMode": "krx",
-        "useAdjustedRate": "true",
-    }
-    if from_datetime:
-        params["from"] = from_datetime
-    url = f"{TOSS_WTS_BASE}/api/v1/c-chart/kr-s/{product_code}/day:1?{urlencode(params)}"
+    requested = int(min(500, max(1, count)))
+    candidates = []
+    for n in (requested, min(requested, 200), min(requested, 120), min(requested, 61)):
+        if n not in candidates:
+            candidates.append(n)
 
     last_exc: Exception | None = None
-    for attempt in range(1, TOSS_HTTP_RETRIES + 1):
-        try:
-            response = requests.get(url, headers=TOSS_HEADERS, timeout=timeout)
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_exc = exc
-            if attempt < TOSS_HTTP_RETRIES:
-                time.sleep(0.8 * attempt)
-                continue
-            raise ExactMarketDataError(
-                f"Toss c-chart transport failed for {product_code}: {type(exc).__name__}: {exc}"
-            ) from exc
+    for effective_count in candidates:
+        params: dict[str, Any] = {
+            "count": effective_count,
+            "session": "all",
+            "investMode": "krx",
+            "useAdjustedRate": "true",
+        }
+        if from_datetime:
+            params["from"] = from_datetime
+        url = f"{TOSS_WTS_BASE}/api/v1/c-chart/kr-s/{product_code}/day:1?{urlencode(params)}"
 
-        if response.status_code >= 400:
-            detail = _response_detail(response)
-            msg = (
-                f"Toss c-chart HTTP {response.status_code} for {product_code}"
-                f"{': ' + detail if detail else ''}"
-            )
-            if response.status_code in TOSS_RETRYABLE_STATUS and attempt < TOSS_HTTP_RETRIES:
-                last_exc = ExactMarketDataError(msg)
-                time.sleep(0.8 * attempt)
-                continue
-            if response.status_code in {403, 429}:
-                msg += "; public endpoint rejected/rate-limited this request; stop bulk retries"
-            raise ExactMarketDataError(msg)
+        for attempt in range(1, TOSS_HTTP_RETRIES + 1):
+            try:
+                response = requests.get(url, headers=TOSS_HEADERS, timeout=timeout)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                if attempt < TOSS_HTTP_RETRIES:
+                    time.sleep(0.8 * attempt)
+                    continue
+                raise ExactMarketDataError(
+                    f"Toss c-chart transport failed for {product_code}: {type(exc).__name__}: {exc}"
+                ) from exc
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ExactMarketDataError(
-                f"Toss c-chart returned non-JSON for {product_code}: {_response_detail(response)}"
-            ) from exc
+            if response.status_code >= 400:
+                detail = _response_detail(response)
+                msg = (
+                    f"Toss c-chart HTTP {response.status_code} for {product_code}"
+                    f" count={effective_count}{': ' + detail if detail else ''}"
+                )
+                if response.status_code == 400 and effective_count > 61:
+                    last_exc = ExactMarketDataError(msg)
+                    break  # try a smaller count, same exact source/product
+                if response.status_code in TOSS_RETRYABLE_STATUS and attempt < TOSS_HTTP_RETRIES:
+                    last_exc = ExactMarketDataError(msg)
+                    time.sleep(0.8 * attempt)
+                    continue
+                if response.status_code in {403, 429}:
+                    msg += "; public endpoint rejected/rate-limited this request; stop bulk retries"
+                raise ExactMarketDataError(msg)
 
-        result = payload.get("result") if isinstance(payload, dict) else None
-        if not isinstance(result, dict):
-            raise ExactMarketDataError(
-                f"Toss c-chart unexpected response for {product_code}: missing object result"
-            )
-        candles = result.get("candles")
-        if not isinstance(candles, list):
-            raise ExactMarketDataError(
-                f"Toss c-chart unexpected response for {product_code}: result.candles is not a list"
-            )
-        frame = _parse_toss_candles(candles)
-        if candles and frame.empty:
-            keys = sorted({str(k) for c in candles[:3] if isinstance(c, dict) for k in c.keys()})
-            raise ExactMarketDataError(
-                f"Toss c-chart candle schema unsupported for {product_code}; observed keys={keys[:20]}"
-            )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ExactMarketDataError(
+                    f"Toss c-chart returned non-JSON for {product_code}: {_response_detail(response)}"
+                ) from exc
 
-        # Some chart responses expose a cursor; prefer it. If absent, the caller
-        # derives a cursor from the oldest returned candle.
-        cursor = result.get("nextFrom") or result.get("nextBefore") or result.get("nextDateTime")
-        return frame, str(cursor) if cursor else None
+            result = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(result, dict):
+                raise ExactMarketDataError(
+                    f"Toss c-chart unexpected response for {product_code}: missing object result"
+                )
+            candles = result.get("candles")
+            if not isinstance(candles, list):
+                raise ExactMarketDataError(
+                    f"Toss c-chart unexpected response for {product_code}: result.candles is not a list"
+                )
+            frame = _parse_toss_candles(candles)
+            if candles and frame.empty:
+                keys = sorted({str(k) for c in candles[:3] if isinstance(c, dict) for k in c.keys()})
+                raise ExactMarketDataError(
+                    f"Toss c-chart candle schema unsupported for {product_code}; observed keys={keys[:20]}"
+                )
+
+            paging = result.get("pagingParam") if isinstance(result.get("pagingParam"), dict) else {}
+            cursor = (
+                result.get("nextFrom") or result.get("nextBefore") or result.get("nextDateTime")
+                or paging.get("key") or paging.get("nextDateTime") or paging.get("from")
+            )
+            if effective_count != requested:
+                print(f"[Toss] {product_code} page-size fallback {requested}->{effective_count} accepted")
+            return frame, str(cursor) if cursor else None
 
     if last_exc is not None:
         raise ExactMarketDataError(f"Toss c-chart failed for {product_code}: {last_exc}")
     raise ExactMarketDataError(f"Toss c-chart failed for {product_code}")
-
 
 def fetch_toss_kr_daily(stock: Any, bars: int = 720, timeout: float = 28.0) -> pd.DataFrame:
     code = toss_product_code(stock)
@@ -247,9 +261,11 @@ def fetch_toss_kr_daily(stock: Any, bars: int = 720, timeout: float = 28.0) -> p
     cursor: str | None = None
     oldest_seen: pd.Timestamp | None = None
 
-    # c-chart count is capped at 500. Two pages normally cover the >=604 bars
-    # DTC needs.  Keep two extra attempts for inclusivity/cursor drift.
-    for _ in range(4):
+    # Page size is negotiated by _toss_page.  If Toss only accepts the small
+    # 61-candle shape, 720 bars need ~12 pages; larger accepted pages exit much
+    # earlier as soon as enough history is collected.
+    max_pages = max(4, math.ceil(max(1, bars) / 61) + 2)
+    for _ in range(max_pages):
         page, next_cursor = _toss_page(code, min(TOSS_C_CHART_MAX, bars), cursor, timeout)
         if page.empty:
             break
@@ -267,7 +283,8 @@ def fetch_toss_kr_daily(stock: Any, bars: int = 720, timeout: float = 28.0) -> p
         else:
             # Observed c-chart supports a ``from`` cursor.  Move just before the
             # oldest candle so an inclusive endpoint cannot return the same page.
-            cursor = (new_oldest - pd.Timedelta(seconds=1)).isoformat()
+            local_oldest = new_oldest.tz_localize("Asia/Seoul") if new_oldest.tzinfo is None else new_oldest.tz_convert("Asia/Seoul")
+            cursor = (local_oldest - pd.Timedelta(seconds=1)).isoformat()
         time.sleep(random.uniform(0.04, 0.12))
     return collected.tail(bars) if not collected.empty else pd.DataFrame()
 
@@ -458,166 +475,130 @@ def _tv_error_text(method: str, params: list[Any]) -> str:
 
 
 def fetch_tradingview_us_batch(stocks: list[Any], bars: int = 720, timeout: float = 42.0) -> dict[str, pd.DataFrame]:
-    """Fetch a small batch of US daily candles from TradingView.
+    """Fetch US candles over one websocket, one active series at a time.
 
-    Protocol notes:
-    * ``create_series`` requires distinct series id/key values (``sds_1``, ``s1``).
-    * Historical bars can arrive as ``du`` or ``timescale_update`` messages.
-    * Symbol-level errors are isolated; connection/protocol failures are raised so
-      the scanner can report the real cause instead of silently producing 0/500.
+    Anonymous TradingView chart sessions can currently reject a second concurrent
+    ``create_series`` with ``exceed limit of series in the session``.  Reuse the
+    websocket, but create/delete a dedicated chart session for each symbol so no
+    session ever owns more than one series.
     """
     if websocket is None:
         raise ExactMarketDataError("websocket-client is required for TradingView US candles")
     if not stocks:
         return {}
 
-    chart_session = _tv_session("cs")
     results: dict[str, pd.DataFrame] = {}
-    series_to_stock: dict[str, Any] = {}
-    alias_to_series: dict[str, str] = {}
-    completed: set[str] = set()
     symbol_errors: dict[str, str] = {}
-    transport_error: str | None = None
-    fatal_error: str | None = None
-
     ws = _tv_connect(timeout)
+    overall_deadline = time.monotonic() + float(timeout)
     try:
-        # A shorter recv timeout lets the deadline loop distinguish a quiet
-        # socket from an immediately broken connection.
         try:
-            ws.settimeout(min(8.0, max(2.0, float(timeout) / 4.0)))
+            ws.settimeout(min(6.0, max(2.0, float(timeout) / 5.0)))
         except Exception:
             pass
-
         ws.send(_tv_command("set_auth_token", [TV_AUTH_TOKEN]))
         ws.send(_tv_command("set_locale", ["en", "US"]))
-        ws.send(_tv_command("chart_create_session", [chart_session, ""]))
-        ws.send(_tv_command("switch_timezone", [chart_session, "exchange"]))
 
         for i, stock in enumerate(stocks):
+            if time.monotonic() >= overall_deadline:
+                break
+            chart_session = _tv_session("cs")
             alias, series_id, series_key = _tv_series_spec(i)
+            ticker = str(stock.ticker)
             tv_symbol = tradingview_symbol(stock)
             descriptor = "=" + json.dumps(
                 {"symbol": tv_symbol, "adjustment": "splits", "session": "regular"},
                 separators=(",", ":"),
             )
+            ws.send(_tv_command("chart_create_session", [chart_session, ""]))
+            ws.send(_tv_command("switch_timezone", [chart_session, "exchange"]))
             ws.send(_tv_command("resolve_symbol", [chart_session, alias, descriptor]))
-            # IMPORTANT: series id and series key are distinct protocol fields.
-            ws.send(
-                _tv_command(
-                    "create_series",
-                    [chart_session, series_id, series_key, alias, "1D", int(bars)],
-                )
-            )
-            series_to_stock[series_id] = stock
-            alias_to_series[alias] = series_id
+            ws.send(_tv_command("create_series", [chart_session, series_id, series_key, alias, "1D", int(bars)]))
 
-        deadline = time.monotonic() + timeout
-        while len(completed) < len(series_to_stock) and time.monotonic() < deadline:
-            try:
-                raw = ws.recv()
-            except Exception as exc:
-                # websocket-client raises WebSocketTimeoutException during quiet
-                # periods. Keep waiting until our own deadline in that case.
-                timeout_cls = getattr(getattr(websocket, "_exceptions", object()), "WebSocketTimeoutException", ())
-                if timeout_cls and isinstance(exc, timeout_cls):
-                    continue
-                transport_error = f"{type(exc).__name__}: {exc}"
-                break
-            if not raw:
-                continue
+            frame = pd.DataFrame()
+            completed = False
+            per_symbol_budget = max(4.0, min(10.0, float(timeout) / max(1, len(stocks)) * 2.0))
+            symbol_deadline = min(overall_deadline, time.monotonic() + per_symbol_budget)
+            fatal_error: str | None = None
+            transport_error: str | None = None
 
-            for payload in _tv_payloads(raw):
-                if payload.startswith("~h~"):
-                    # Echo heartbeat payload in TradingView framing exactly.
-                    try:
-                        ws.send(_tv_frame(payload))
-                    except Exception as exc:
-                        transport_error = f"heartbeat send failed: {type(exc).__name__}: {exc}"
-                    continue
-
+            while not completed and time.monotonic() < symbol_deadline:
                 try:
-                    msg = json.loads(payload)
-                except Exception:
-                    continue
-                if not isinstance(msg, dict):
-                    continue
-                method = str(msg.get("m") or "")
-                params = msg.get("p") or []
-                if not isinstance(params, list):
-                    params = []
-
-                if method in {"du", "timescale_update"} and len(params) >= 2 and isinstance(params[1], dict):
-                    for series_id, series_payload in params[1].items():
-                        stock = series_to_stock.get(str(series_id))
-                        if stock is None:
-                            continue
-                        frame = _tv_rows_from_series(series_payload)
-                        if frame.empty:
-                            continue
-                        ticker = str(stock.ticker)
-                        prior = results.get(ticker)
-                        if prior is not None and not prior.empty:
-                            frame = pd.concat([prior, frame])
-                            frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-                        results[ticker] = frame.tail(bars)
-
-                elif method == "series_completed" and len(params) >= 2:
-                    series_id = str(params[1])
-                    if series_id in series_to_stock:
-                        completed.add(series_id)
-
-                elif method == "symbol_error" and len(params) >= 2:
-                    alias = str(params[1])
-                    series_id = alias_to_series.get(alias)
-                    if series_id:
-                        stock = series_to_stock[series_id]
-                        symbol_errors[str(stock.ticker)] = _tv_error_text(method, params)
-                        completed.add(series_id)
-
-                elif method == "series_error" and len(params) >= 2:
-                    series_id = str(params[1])
-                    if series_id in series_to_stock:
-                        stock = series_to_stock[series_id]
-                        symbol_errors[str(stock.ticker)] = _tv_error_text(method, params)
-                        completed.add(series_id)
-
-                elif method in {"critical_error", "protocol_error"}:
-                    fatal_error = _tv_error_text(method, params)
+                    raw = ws.recv()
+                except Exception as exc:
+                    timeout_cls = getattr(getattr(websocket, "_exceptions", object()), "WebSocketTimeoutException", ())
+                    if timeout_cls and isinstance(exc, timeout_cls):
+                        continue
+                    transport_error = f"{type(exc).__name__}: {exc}"
                     break
+                if not raw:
+                    continue
+                for payload in _tv_payloads(raw):
+                    if payload.startswith("~h~"):
+                        ws.send(_tv_frame(payload))
+                        continue
+                    try:
+                        msg = json.loads(payload)
+                    except Exception:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+                    method = str(msg.get("m") or "")
+                    params = msg.get("p") or []
+                    if not isinstance(params, list):
+                        params = []
+
+                    if method in {"du", "timescale_update"} and len(params) >= 2 and isinstance(params[1], dict):
+                        payload_obj = params[1].get(series_id)
+                        if payload_obj is not None:
+                            got = _tv_rows_from_series(payload_obj)
+                            if not got.empty:
+                                frame = got if frame.empty else pd.concat([frame, got])
+                                frame = frame[~frame.index.duplicated(keep="last")].sort_index().tail(bars)
+                    elif method == "series_completed" and len(params) >= 2 and str(params[1]) == series_id:
+                        completed = True
+                    elif method == "symbol_error" and len(params) >= 2 and str(params[1]) == alias:
+                        symbol_errors[ticker] = _tv_error_text(method, params)
+                        completed = True
+                    elif method == "series_error" and len(params) >= 2 and str(params[1]) == series_id:
+                        symbol_errors[ticker] = _tv_error_text(method, params)
+                        completed = True
+                    elif method in {"critical_error", "protocol_error"}:
+                        fatal_error = _tv_error_text(method, params)
+                        completed = True
+                    if completed:
+                        break
+
+            try:
+                ws.send(_tv_command("remove_series", [chart_session, series_id]))
+                ws.send(_tv_command("chart_delete_session", [chart_session]))
+            except Exception:
+                pass
 
             if fatal_error:
+                raise ExactMarketDataError(f"TradingView protocol fatal error for {ticker}: {fatal_error}")
+            if transport_error:
+                if not results:
+                    raise ExactMarketDataError(f"TradingView websocket receive failed for {ticker}: {transport_error}")
+                print(f"[TradingView] partial batch stopped after {len(results)}/{len(stocks)}: {transport_error}")
                 break
+            if not frame.empty:
+                results[ticker] = frame.tail(bars)
+            elif ticker not in symbol_errors and not completed:
+                symbol_errors[ticker] = f"timeout waiting for series completion ({per_symbol_budget:.1f}s)"
 
         if symbol_errors:
             sample = "; ".join(f"{k}={v}" for k, v in list(symbol_errors.items())[:4])
             suffix = "" if len(symbol_errors) <= 4 else f"; +{len(symbol_errors)-4} more"
             print(f"[TradingView] symbol/series errors {len(symbol_errors)}/{len(stocks)}: {sample}{suffix}")
-
-        if fatal_error:
-            raise ExactMarketDataError(f"TradingView protocol fatal error: {fatal_error}")
-
-        if not results and transport_error:
-            raise ExactMarketDataError(f"TradingView websocket receive failed before any candles: {transport_error}")
-
-        # A connected socket that receives neither usable bars nor symbol errors
-        # is a protocol/edge failure, not 16 independent missing tickers.
         if not results and not symbol_errors:
-            unresolved = len(series_to_stock) - len(completed)
-            raise ExactMarketDataError(
-                f"TradingView returned no candle series for batch of {len(stocks)} "
-                f"(completed={len(completed)}, unresolved={unresolved}, timeout={timeout:.0f}s)"
-            )
-
-        if transport_error and results:
-            print(f"[TradingView] partial socket result {len(results)}/{len(stocks)} before {transport_error}")
+            raise ExactMarketDataError(f"TradingView returned no candle series for batch of {len(stocks)}")
         return results
     finally:
         try:
             ws.close()
         except Exception:
             pass
-
 
 def _download_tradingview_group(stocks: list[Any], bars: int, timeout: float) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
@@ -675,7 +656,8 @@ def exact_source_preflight(stocks: Iterable[Any], category: str, timeout: float 
         sample = (preferred + [s for s in stock_list if s not in preferred])[:2]
     else:
         sample = stock_list[:3]
-    frames = download_market_frames(sample, cat, bars=5, timeout=timeout)
+    probe_bars = min(TOSS_C_CHART_MAX, 120) if cat in {"KR", "KR_ETF"} else 5
+    frames = download_market_frames(sample, cat, bars=probe_bars, timeout=timeout)
     usable = sum(
         1 for stock in sample
         if frames.get(str(stock.ticker)) is not None and not frames[str(stock.ticker)].empty

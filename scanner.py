@@ -763,7 +763,10 @@ def _prefilter_us_equities_from_yahoo_screener(
     total = None
     seen_symbols: set[str] = set()
     try:
-        query = query_cls("gt", ["intradaymarketcap", float(min_native)])
+        query = query_cls("and", [
+            query_cls("eq", ["region", "us"]),
+            query_cls("gt", ["intradaymarketcap", float(min_native)]),
+        ])
         for page in range(max_pages):
             offset = page * page_size
             response = screen_fn(

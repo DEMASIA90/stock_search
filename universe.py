@@ -689,14 +689,37 @@ def fetch_us_universes() -> tuple[list[Stock], list[Stock], str]:
 
 
 def fetch_us_halted_symbols() -> tuple[set[str], dict]:
-    """Read Nasdaq Trader's current trade-halt RSS feed.
+    """Read Nasdaq Trader's trade-halt RSS feed without making scans brittle.
 
-    The feed covers Nasdaq-listed and other exchange-listed securities. The parser
-    accepts multiple historical RSS layouts so a markup tweak does not crash scans.
+    Nasdaq occasionally returns an HTML/error document with HTTP 200.  A halt
+    enrichment outage must not crash US or US_ETF universe construction; mark the
+    feed unavailable and continue with an explicit incomplete-restriction flag.
     """
-    response = requests.get(NASDAQ_HALT_RSS, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-    root = ET.fromstring(response.content)
+    try:
+        response = requests.get(NASDAQ_HALT_RSS, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            detail = (response.text or "").strip().replace("\n", " ")[:180]
+            print(f"US halt RSS unavailable; ignoring feed for this run: ParseError: {exc}; body={detail}")
+            return set(), {
+                "source": "NASDAQ_TRADER_HALT_RSS",
+                "available": False,
+                "reason": f"ParseError:{exc}",
+                "feed_items": 0,
+                "halted_count": 0,
+            }
+    except Exception as exc:
+        print(f"US halt RSS unavailable; ignoring feed for this run: {type(exc).__name__}: {exc}")
+        return set(), {
+            "source": "NASDAQ_TRADER_HALT_RSS",
+            "available": False,
+            "reason": f"{type(exc).__name__}:{exc}",
+            "feed_items": 0,
+            "halted_count": 0,
+        }
+
     halted: set[str] = set()
     item_count = 0
     for item in root.findall(".//item"):
@@ -716,7 +739,12 @@ def fetch_us_halted_symbols() -> tuple[set[str], dict]:
                 if _valid_us_symbol(symbol):
                     halted.add(symbol)
                     break
-    return halted, {"source": "NASDAQ_TRADER_HALT_RSS", "feed_items": item_count, "halted_count": len(halted)}
+    return halted, {
+        "source": "NASDAQ_TRADER_HALT_RSS",
+        "available": True,
+        "feed_items": item_count,
+        "halted_count": len(halted),
+    }
 
 
 def get_universe(category: str) -> tuple[list[Stock], str]:

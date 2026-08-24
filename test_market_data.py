@@ -205,6 +205,64 @@ class MarketDataAdapterTests(unittest.TestCase):
         self.assertTrue(framed.startswith(f"~m~{len(body.encode('utf-8'))}~m~"))
         self.assertEqual(md._tv_payloads(framed), [body])
 
+
+    def test_toss_page_downshifts_large_count_after_http_400(self):
+        calls = []
+        class Resp:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = json.dumps(payload)
+            def json(self):
+                return self._payload
+        def fake_get(url, headers=None, timeout=None):
+            calls.append(url)
+            if 'count=200' in url or 'count=120' in url:
+                return Resp(400, {'error': {'statusCode': 400, 'code': '400'}})
+            return Resp(200, {'result': {'candles': [
+                {'dt':'2026-08-21T00:00:00+09:00','open':100,'high':110,'low':95,'close':108,'volume':1234}
+            ]}})
+        with patch.object(md.requests, 'get', side_effect=fake_get):
+            frame, _ = md._toss_page('A005930', 200, None, 1)
+        self.assertEqual(len(frame), 1)
+        self.assertTrue(any('count=200' in u for u in calls))
+        self.assertTrue(any('count=120' in u for u in calls))
+        self.assertTrue(any('count=61' in u for u in calls))
+
+    def test_tradingview_two_symbols_are_serialized_one_series_per_session(self):
+        ts = int(pd.Timestamp('2026-08-21 20:00:00', tz='UTC').timestamp())
+        def msg(method, params):
+            return md._tv_frame(json.dumps({'m': method, 'p': params}, separators=(',', ':')))
+        messages = [
+            msg('du', ['cs_x', {'sds_1': {'s': [{'i':0,'v':[ts,1,2,0.5,1.5,100]}]}}]),
+            msg('series_completed', ['cs_x', 'sds_1']),
+            msg('du', ['cs_y', {'sds_2': {'s': [{'i':0,'v':[ts,2,3,1.5,2.5,200]}]}}]),
+            msg('series_completed', ['cs_y', 'sds_2']),
+        ]
+        class FakeWS:
+            def __init__(self):
+                self.sent=[]; self.messages=list(messages)
+            def settimeout(self, value): pass
+            def send(self, value): self.sent.append(value)
+            def recv(self): return self.messages.pop(0)
+            def close(self): pass
+        fake=FakeWS()
+        stocks=[self.stock('SPY','SPY','NYSE Arca'), self.stock('QQQ','QQQ','NASDAQ')]
+        with patch.object(md, '_tv_connect', return_value=fake):
+            got=md.fetch_tradingview_us_batch(stocks, bars=5, timeout=8)
+        self.assertEqual(set(got), {'SPY','QQQ'})
+        commands=[]
+        for framed in fake.sent:
+            for body in md._tv_payloads(framed):
+                if body.startswith('{'):
+                    commands.append(json.loads(body))
+        methods=[x.get('m') for x in commands]
+        first_create=methods.index('create_series')
+        first_remove=methods.index('remove_series')
+        second_create=methods.index('create_series', first_create+1)
+        self.assertLess(first_create, first_remove)
+        self.assertLess(first_remove, second_create)
+
     def test_no_yahoo_ohlc_fallback_marker(self):
         source = Path(md.__file__).read_text(encoding='utf-8').lower()
         self.assertIn('no yahoo ohlc fallback', source)
