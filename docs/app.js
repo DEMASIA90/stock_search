@@ -7,6 +7,7 @@ const CATEGORY = {
   US: { short: '미장', dir: 'us' },
   US_ETF: { short: '미장ETF', dir: 'us-etf' },
 };
+const CATEGORY_KEYS = Object.keys(CATEGORY);
 const CONFIGURED_DATA_ORIGIN = String(window.DTC_DATA_ORIGIN || '').trim().replace(/\/$/, '');
 const IS_ANDROID_APP = location.hostname === 'localhost' || location.protocol === 'capacitor:';
 const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP) ? (CONFIGURED_DATA_ORIGIN || '.') : '.';
@@ -23,10 +24,12 @@ const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr','kr-etf','us','us-etf'];
 const OPINION_ORDER = {BUY:0,SHORT_BUY:1,LONG_BUY:1,HOLD:2,SELL_CONSIDER:3,SELL:4};
 const OPINION_TEXT = {BUY:'매수',SHORT_BUY:'단기 매수',LONG_BUY:'장기 매수',HOLD:'HOLD',SELL_CONSIDER:'매도 고려',SELL:'매도'};
+const SORT_KEYS = new Set(['opinion','name','sector','close','day_change_amount','day_change_pct','market_size_krw','st_d_direction','st_w_direction','adx','backtest']);
 
 const state = {
   sheet:'KR', category:'KR', data:{KR:null,KR_ETF:null,US:null,US_ETF:null},
   capMin:{equity:100_000_000_000_000,etf:0}, selectedTicker:null, detailCache:new Map(),
+  sort:{key:'opinion',dir:'asc'}, searchOverrideTicker:null,
   quiz:{pool:null,detailCache:new Map(),question:null,answered:false,loading:false},
 };
 
@@ -34,12 +37,13 @@ function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':
 function dataUrl(path,force=false){const clean=String(path).replace(/^\.\//,'').replace(/^\//,'');const base=DATA_BASE==='.'?'.':DATA_BASE.replace(/\/$/,'');const url=`${base}/${clean}`;return force?`${url}${url.includes('?')?'&':'?'}ts=${Date.now()}`:url;}
 function numberOrNaN(v){if(v===null||v===undefined||v==='')return Number.NaN;const n=Number(v);return Number.isFinite(n)?n:Number.NaN;}
 function isEtfCategory(c=state.category){return c==='KR_ETF'||c==='US_ETF';}
-function sizeMode(){return isEtfCategory()?'etf':'equity';}
+function sizeMode(c=state.category){return isEtfCategory(c)?'etf':'equity';}
 function currentCapMin(){return Number(state.capMin[sizeMode()]||0);}
 function currentData(){return state.data[state.category];}
-function stockByTicker(ticker){return (currentData()?.items||[]).find(x=>x.ticker===ticker)||null;}
+function stockByTicker(ticker){return (currentData()?.items||[]).find(x=>String(x.ticker)===String(ticker))||null;}
 
 async function ensureData(category,force=false){if(state.data[category]&&!force)return state.data[category];const r=await fetch(dataUrl(`data/${CATEGORY[category].dir}/summary.json`,force),{cache:force?'no-store':'default'});if(!r.ok)throw new Error(`${category} summary ${r.status}`);const d=await r.json();state.data[category]=d;return d;}
+async function ensureAllData(){await Promise.all(CATEGORY_KEYS.map(c=>ensureData(c,false).catch(()=>null)));}
 async function ensureDetail(stock,force=false){const key=`${stock.category}:${stock.ticker}`;if(state.detailCache.has(key)&&!force)return state.detailCache.get(key);const r=await fetch(dataUrl(stock.detail_path,force),{cache:force?'no-store':'default'});if(!r.ok)throw new Error(`detail ${r.status}`);const d=await r.json();state.detailCache.set(key,d);return d;}
 
 function money(v,currency){const n=numberOrNaN(v);if(!Number.isFinite(n))return '—';return currency==='KRW'?`${Math.round(n).toLocaleString('ko-KR')}원`:`$${n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;}
@@ -49,12 +53,52 @@ function marketSize(v){const n=numberOrNaN(v);if(!Number.isFinite(n))return '—
 function changeClass(v){const n=numberOrNaN(v);return n>0?'change-up':n<0?'change-down':'';}
 function stClass(v){return String(v)==='상승'?'st-up':String(v)==='하락'?'st-down':'';}
 function opinionClass(text){const s=String(text||'');if(s.includes('매수'))return 'opinion-buy';if(s.includes('매도'))return 'opinion-sell';return 'opinion-hold';}
-function backtestText(stock){const bt=stock?.supertrend?.backtest||{};const med=numberOrNaN(bt.median_max_return_pct);const n=Number(bt.completed_events||0);return Number.isFinite(med)?`최고수익 중위 ${pct(med,1)} · ${n}회`:'—';}
+function backtestValue(stock){return numberOrNaN(stock?.supertrend?.backtest?.median_max_return_pct);}
+function backtestText(stock){const bt=stock?.supertrend?.backtest||{};const med=backtestValue(stock);const n=Number(bt.completed_events||0);return Number.isFinite(med)?`최고수익 중위 ${pct(med,1)} · ${n}회`:'—';}
+function opinionCode(stock){return String(stock?.opinion_code||'HOLD').toUpperCase();}
+function opinionRank(stock){return Number(stock?.rank_level??OPINION_ORDER[opinionCode(stock)]??2);}
+function stRank(v){return String(v)==='상승'?0:String(v)==='하락'?2:1;}
+function localeCompare(a,b){return String(a??'').localeCompare(String(b??''),'ko',{numeric:true,sensitivity:'base'});}
 
 function renderCapSelect(){const select=$('#capSelect');if(!select)return;const presets=CAP_FILTER_PRESETS[sizeMode()];const active=currentCapMin();select.innerHTML=presets.map(([v,label])=>`<option value="${v}" ${Number(v)===active?'selected':''}>${escapeHtml(label)}</option>`).join('');}
-function filteredItems(){const min=currentCapMin();const items=(currentData()?.items||[]).filter(s=>min<=0||(Number.isFinite(Number(s.market_size_krw))&&Number(s.market_size_krw)>=min));return [...items].sort((a,b)=>{const ra=Number(a.rank_level??OPINION_ORDER[a.opinion_code]??2),rb=Number(b.rank_level??OPINION_ORDER[b.opinion_code]??2);if(ra!==rb)return ra-rb;return (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);});}
+function sortDirectionForNewKey(key){return ['name','sector','opinion','st_d_direction','st_w_direction'].includes(key)?'asc':'desc';}
+function compareStocks(a,b,key){
+  if(key==='opinion') return opinionRank(a)-opinionRank(b) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
+  if(key==='name') return localeCompare(a.name,b.name);
+  if(key==='sector') return localeCompare(a.sector,b.sector) || localeCompare(a.name,b.name);
+  if(key==='st_d_direction') return stRank(a.st_d_direction)-stRank(b.st_d_direction) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
+  if(key==='st_w_direction') return stRank(a.st_w_direction)-stRank(b.st_w_direction) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
+  const av=key==='backtest'?backtestValue(a):numberOrNaN(a[key]);
+  const bv=key==='backtest'?backtestValue(b):numberOrNaN(b[key]);
+  if(Number.isFinite(av)&&Number.isFinite(bv))return av-bv;
+  if(Number.isFinite(av))return -1;
+  if(Number.isFinite(bv))return 1;
+  return localeCompare(a.name,b.name);
+}
+function filteredItems(){
+  const min=currentCapMin();
+  const override=state.searchOverrideTicker;
+  const raw=(currentData()?.items||[]).filter(s=>String(s.ticker)===String(override)||min<=0||(Number.isFinite(Number(s.market_size_krw))&&Number(s.market_size_krw)>=min));
+  const dir=state.sort.dir==='desc'?-1:1;
+  return [...raw].sort((a,b)=>dir*compareStocks(a,b,state.sort.key));
+}
+function updateSortHeaders(){
+  $$('.header-row [data-sort]').forEach(th=>{
+    const active=th.dataset.sort===state.sort.key;
+    th.classList.toggle('sort-active',active);
+    const mark=$('.sort-indicator',th);
+    if(mark)mark.textContent=active?(state.sort.dir==='asc'?'▲':'▼'):'⌄';
+    if(active)th.title=state.sort.key==='opinion'?(state.sort.dir==='asc'?'매수 우선 → 매도 우선으로 전환':'매도 우선 → 매수 우선으로 전환'):(state.sort.dir==='asc'?'오름차순':'내림차순');
+  });
+}
 
-function renderSheet(){const body=$('#sheetBody');if(!body)return;const items=filteredItems();const data=currentData();const selected=state.selectedTicker;body.innerHTML=items.map((s,i)=>{const row=i+3;const opinion=s.opinion_label||s.opinion||OPINION_TEXT[s.opinion_code]||'HOLD';const selectedClass=s.ticker===selected?' selected':'';return `<tr class="stock-row${selectedClass}" data-ticker="${escapeHtml(s.ticker)}"><th class="row-number">${row}</th>
+function renderSheet(){
+  const body=$('#sheetBody');if(!body)return;
+  const items=filteredItems(),data=currentData(),selected=state.selectedTicker;
+  body.innerHTML=items.map((s,i)=>{
+    const row=i+3, opinion=s.opinion_label||s.opinion||OPINION_TEXT[s.opinion_code]||'HOLD', selectedClass=String(s.ticker)===String(selected)?' selected':'';
+    return `<tr class="stock-row${selectedClass}" data-ticker="${escapeHtml(s.ticker)}"><th class="row-number">${row}</th>
+<td class="center ${opinionClass(opinion)}">${escapeHtml(opinion)}</td>
 <td class="stock-name-cell">${escapeHtml(s.name)} <small>${escapeHtml(s.symbol||s.ticker)}</small></td>
 <td>${escapeHtml(s.sector||'—')}</td>
 <td class="num">${money(s.close,s.currency)}</td>
@@ -64,20 +108,44 @@ function renderSheet(){const body=$('#sheetBody');if(!body)return;const items=fi
 <td class="center ${stClass(s.st_d_direction)}">${escapeHtml(s.st_d_direction||'—')}</td>
 <td class="center ${stClass(s.st_w_direction)}">${escapeHtml(s.st_w_direction||'—')}</td>
 <td class="num">${Number.isFinite(numberOrNaN(s.adx))?Number(s.adx).toFixed(1):'—'}</td>
-<td class="center ${opinionClass(opinion)}">${escapeHtml(opinion)}</td>
 <td class="backtest-cell">${escapeHtml(backtestText(s))}</td>
-<td class="chart-cell"><div class="${s.ticker===selected?'row-chart':'row-chart-placeholder'}" data-row-chart>${s.ticker===selected?'<div class="chart-loading">차트를 불러오는 중입니다.</div>':'행을 클릭하면 차트 표시'}</div></td></tr>`;}).join('');
-const status=`${CATEGORY[state.category].short} · ${data?.market_date||'—'} · ${items.length.toLocaleString()}개 · 가격수신 ${Number(data?.coverage_pct||0).toFixed(1)}%`;
-$('#sheetStatusCell').textContent=status;$('#bottomStatus').textContent=status;
-if(selected){const stock=stockByTicker(selected);const tr=body.querySelector(`tr[data-ticker="${CSS.escape(selected)}"]`);if(stock&&tr)void hydrateSelectedRow(stock,tr);}
+<td class="chart-anchor-cell${String(s.ticker)===String(selected)?' selected-anchor':''}" data-chart-anchor>${String(s.ticker)===String(selected)?'차트 표시 중':' '}</td></tr>`;
+  }).join('');
+  const status=`${CATEGORY[state.category].short} · ${data?.market_date||'—'} · ${items.length.toLocaleString()}개 · 가격수신 ${Number(data?.coverage_pct||0).toFixed(1)}%`;
+  $('#sheetStatusCell').textContent=status;$('#bottomStatus').textContent=status;updateSortHeaders();
+  if(selected){requestAnimationFrame(()=>void hydrateSelectedChart(selected));}else hideChartOverlay();
 }
 
-async function selectRow(ticker){state.selectedTicker=ticker;const stock=stockByTicker(ticker);if(!stock)return;$('#nameBox').textContent='L'+(filteredItems().findIndex(x=>x.ticker===ticker)+3);$('#formulaInput').value=`${stock.name} | ${stock.opinion_label||stock.opinion||''}`;renderSheet();}
-async function hydrateSelectedRow(stock,row){const box=$('[data-row-chart]',row);if(!box)return;try{const detail=await ensureDetail(stock);if(!row.isConnected||state.selectedTicker!==stock.ticker)return;drawSheetChart(box,detail,stock);}catch(err){console.error(err);box.innerHTML='<div class="chart-empty">차트를 불러오지 못했습니다.</div>';}}
+function hideChartOverlay(){const overlay=$('#sheetChartOverlay');if(overlay){overlay.hidden=true;overlay.innerHTML='';}}
+function positionChartOverlay(row){
+  const overlay=$('#sheetChartOverlay'),scroll=$('#sheetScroll'),cell=$('[data-chart-anchor]',row);if(!overlay||!scroll||!cell)return false;
+  const sr=scroll.getBoundingClientRect(),cr=cell.getBoundingClientRect();
+  const top=cr.top-sr.top+scroll.scrollTop, left=cr.left-sr.left+scroll.scrollLeft;
+  overlay.style.top=`${Math.round(top)}px`;overlay.style.left=`${Math.round(left)}px`;overlay.style.width=`${Math.max(520,Math.round(cr.width))}px`;
+  overlay.style.height='324px';overlay.hidden=false;return true;
+}
+async function hydrateSelectedChart(ticker){
+  const stock=stockByTicker(ticker),body=$('#sheetBody'),overlay=$('#sheetChartOverlay');if(!stock||!body||!overlay)return;
+  const row=body.querySelector(`tr[data-ticker="${CSS.escape(String(ticker))}"]`);if(!row||!positionChartOverlay(row)){hideChartOverlay();return;}
+  overlay.innerHTML='<div class="row-chart"><div class="chart-loading">차트를 불러오는 중입니다.</div></div>';
+  try{const detail=await ensureDetail(stock);if(state.selectedTicker!==ticker)return;const currentRow=body.querySelector(`tr[data-ticker="${CSS.escape(String(ticker))}"]`);if(!currentRow||!positionChartOverlay(currentRow))return;overlay.innerHTML='<div class="row-chart" data-overlay-chart></div>';drawSheetChart($('[data-overlay-chart]',overlay),detail,stock);}catch(err){console.error(err);overlay.innerHTML='<div class="row-chart"><div class="chart-empty">차트를 불러오지 못했습니다.</div></div>';}
+}
+async function selectRow(ticker,{scroll=false}={}){
+  state.selectedTicker=ticker;state.searchOverrideTicker=ticker;const stock=stockByTicker(ticker);if(!stock)return;
+  const idx=filteredItems().findIndex(x=>String(x.ticker)===String(ticker));$('#nameBox').textContent=`B${idx+3}`;$('#formulaInput').value=String(stock.name||stock.symbol||stock.ticker);renderSheet();
+  if(scroll)requestAnimationFrame(()=>$('#sheetBody')?.querySelector(`tr[data-ticker="${CSS.escape(String(ticker))}"]`)?.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'}));
+}
 
-function drawSheetChart(el,detail,stock){const st=detail?.supertrend||{};const rows=st.chart||[];if(rows.length<15){el.innerHTML='<div class="chart-empty">차트 데이터 부족</div>';return;}const vals=rows.flatMap(r=>[numberOrNaN(r.low),numberOrNaN(r.high),numberOrNaN(r.supertrend),numberOrNaN(r.weekly_supertrend)]).filter(Number.isFinite);let lo=Math.min(...vals),hi=Math.max(...vals);if(!(hi>lo)){lo*=.99;hi*=1.01;}const ext=(hi-lo)*.06||1;lo-=ext;hi+=ext;const W=720,H=286,pad={l:9,r:55,t:13,b:22},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length,X=i=>pad.l+(i+.5)*step,Y=v=>pad.t+(hi-v)*plotH/(hi-lo);let grid='';for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+5}" y="${y+3}" class="price-axis">${label}</text>`;}const bw=Math.max(1.2,Math.min(4.8,step*.58));let candles='';rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,cls=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${cls}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${cls}"><title>${escapeHtml(r.date)} O ${o} H ${h} L ${l} C ${c}</title></rect>`;});
-function paths(valueKey,dirKey,upClass,downClass){let up='',down='',u=false,d=false;rows.forEach((r,i)=>{const v=numberOrNaN(r[valueKey]),dir=numberOrNaN(r[dirKey]);if(!Number.isFinite(v)){u=d=false;return;}if(dir>0){up+=`${u?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}else if(dir<0){down+=`${d?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}else{u=d=false;}});return `<path d="${up}" class="${upClass}"/><path d="${down}" class="${downClass}"/>`;}
-const dates=`<text x="${X(0)}" y="${H-4}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-4}" text-anchor="end" class="date-axis">${escapeHtml(rows.at(-1).date.slice(5))}</text>`;const isUS=String(stock.category||'').startsWith('US');el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${paths('weekly_supertrend','weekly_direction','st-w-up','st-w-down')}${dates}</svg><div class="chart-legend"><span>ST_D 실선</span><span>ST_W 점선</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-open-hint">${isUS?'TradingView':'토스증권'} 차트 열기 ↗</div><button class="chart-open-hit" type="button" data-open-external="${escapeHtml(stock.ticker)}" aria-label="외부 차트 열기"></button>`;}
+function drawSheetChart(el,detail,stock){
+  const st=detail?.supertrend||{},rows=st.chart||[];if(rows.length<15){el.innerHTML='<div class="chart-empty">차트 데이터 부족</div>';return;}
+  const vals=rows.flatMap(r=>[numberOrNaN(r.low),numberOrNaN(r.high),numberOrNaN(r.supertrend),numberOrNaN(r.weekly_supertrend)]).filter(Number.isFinite);let lo=Math.min(...vals),hi=Math.max(...vals);if(!(hi>lo)){lo*=.99;hi*=1.01;}const ext=(hi-lo)*.06||1;lo-=ext;hi+=ext;
+  const W=760,H=316,pad={l:9,r:58,t:13,b:22},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length,X=i=>pad.l+(i+.5)*step,Y=v=>pad.t+(hi-v)*plotH/(hi-lo);let grid='';
+  for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+5}" y="${y+3}" class="price-axis">${label}</text>`;}
+  const bw=Math.max(1.2,Math.min(4.8,step*.58));let candles='';rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,cls=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${cls}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${cls}"><title>${escapeHtml(r.date)} O ${o} H ${h} L ${l} C ${c}</title></rect>`;});
+  function paths(valueKey,dirKey,upClass,downClass){let up='',down='',u=false,d=false;rows.forEach((r,i)=>{const v=numberOrNaN(r[valueKey]),dir=numberOrNaN(r[dirKey]);if(!Number.isFinite(v)){u=d=false;return;}if(dir>0){up+=`${u?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}else if(dir<0){down+=`${d?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}else{u=d=false;}});return `<path d="${up}" class="${upClass}"/><path d="${down}" class="${downClass}"/>`;}
+  const dates=`<text x="${X(0)}" y="${H-4}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-4}" text-anchor="end" class="date-axis">${escapeHtml(rows.at(-1).date.slice(5))}</text>`;const isUS=String(stock.category||'').startsWith('US');
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${paths('weekly_supertrend','weekly_direction','st-w-up','st-w-down')}${dates}</svg><div class="chart-legend"><span>ST_D 실선</span><span>ST_W 점선</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-open-hint">${isUS?'TradingView':'토스증권'} 차트 열기 ↗</div><button class="chart-open-hit" type="button" data-open-external="${escapeHtml(stock.ticker)}" aria-label="외부 차트 열기"></button>`;
+}
 
 function tossProductCode(stock){const existing=String(stock?.toss_product_code||'').trim().toUpperCase();if(existing)return existing;const raw=String(stock?.symbol||stock?.ticker||'').trim().toUpperCase().replace(/\.(KS|KQ)$/i,'');if(/^[0-9A-Z]{6}$/.test(raw))return `A${raw}`;if(/^A[0-9A-Z]{6}$/.test(raw))return raw;return '';}
 function openTossChart(stock){const code=tossProductCode(stock);window.open(code?`https://www.tossinvest.com/stocks/${encodeURIComponent(code)}/order`:'https://www.tossinvest.com/','_blank','noopener,noreferrer');}
@@ -85,7 +153,34 @@ function tradingViewSymbol(stock){const raw=String(stock?.symbol||stock?.ticker|
 function openTradingView(stock){window.open(`https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tradingViewSymbol(stock))}`,'_blank','noopener,noreferrer');}
 function openExternal(stock){if(String(stock?.category||'').startsWith('US'))openTradingView(stock);else openTossChart(stock);}
 
-async function switchSheet(sheet,force=false){state.sheet=sheet;$$('.sheet-tab').forEach(b=>b.classList.toggle('active',b.dataset.sheet===sheet));if(sheet==='QUIZ'){$('#marketSheetView').hidden=true;$('#quizSheetView').hidden=false;$('#nameBox').textContent='A1';$('#formulaInput').value='Quiz · 1문제 / 보기 5개';return;}$('#quizSheetView').hidden=true;$('#marketSheetView').hidden=false;state.category=sheet;state.selectedTicker=null;renderCapSelect();$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오는 중입니다.</td></tr>';try{await ensureData(sheet,force);renderCapSelect();renderSheet();}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}}
+function normalizeSearch(v){return String(v||'').trim().toLowerCase().replace(/\s+/g,'');}
+function searchScore(stock,q){
+  const name=normalizeSearch(stock.name),ticker=normalizeSearch(stock.ticker),symbol=normalizeSearch(stock.symbol),needle=normalizeSearch(q);if(!needle)return -Infinity;
+  if(name===needle||ticker===needle||symbol===needle)return 1000;
+  if(name.startsWith(needle))return 900-Math.min(100,name.length-needle.length);
+  if(symbol.startsWith(needle)||ticker.startsWith(needle))return 880;
+  if(name.includes(needle))return 760-Math.min(100,name.indexOf(needle));
+  if(symbol.includes(needle)||ticker.includes(needle))return 720;
+  let j=0;for(const ch of name)if(ch===needle[j])j++;return j===needle.length?500-String(name).length:-Infinity;
+}
+async function findBestStock(query){
+  await ensureAllData();let best=null,bestScore=-Infinity;
+  CATEGORY_KEYS.forEach(category=>(state.data[category]?.items||[]).forEach(stock=>{const score=searchScore(stock,query);if(score>bestScore||(score===bestScore&&Number(stock.market_size_krw||0)>Number(best?.market_size_krw||0))){best={...stock,category:stock.category||category};bestScore=score;}}));
+  return bestScore>0?best:null;
+}
+async function jumpToSearch(query){
+  const input=$('#formulaInput'),q=String(query||'').trim();if(!q)return;const previous=input.value;input.value='검색 중...';input.disabled=true;
+  try{const best=await findBestStock(q);if(!best){input.value=previous;$('#bottomStatus').textContent=`'${q}' 검색 결과 없음`;return;}
+    const cat=best.category;state.capMin[sizeMode(cat)]=Number(CAP_FILTER_PRESETS[sizeMode(cat)][0][0]);await switchSheet(cat,false);state.searchOverrideTicker=best.ticker;state.selectedTicker=best.ticker;renderCapSelect();renderSheet();await selectRow(best.ticker,{scroll:true});$('#bottomStatus').textContent=`검색: ${best.name} (${best.symbol||best.ticker})`;
+  }catch(err){console.error(err);input.value=previous;$('#bottomStatus').textContent='종목 검색 실패';}finally{input.disabled=false;input.focus();input.select();}
+}
+
+async function switchSheet(sheet,force=false){
+  state.sheet=sheet;$$('.sheet-tab').forEach(b=>b.classList.toggle('active',b.dataset.sheet===sheet));
+  if(sheet==='QUIZ'){$('#marketSheetView').hidden=true;$('#quizSheetView').hidden=false;hideChartOverlay();$('#nameBox').textContent='A1';$('#formulaInput').value='Quiz · SuperTrend(14,2) · 1문제 / 보기 5개';return;}
+  $('#quizSheetView').hidden=true;$('#marketSheetView').hidden=false;state.category=sheet;state.selectedTicker=null;state.searchOverrideTicker=null;renderCapSelect();hideChartOverlay();$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오는 중입니다.</td></tr>';
+  try{await ensureData(sheet,force);renderCapSelect();renderSheet();$('#formulaInput').value='';$('#nameBox').textContent='A1';}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}
+}
 
 // -----------------------------------------------------------------------------
 // Quiz mode
@@ -160,42 +255,6 @@ function quizRows(stock, start, count=QUIZ_WINDOW_DAYS) {
     });
   }
   return rows;
-}
-
-function quizBollinger(stock, start, count=QUIZ_WINDOW_DAYS) {
-  const closes = (stock.c || []).map(Number);
-  return Array.from({length:count}, (_, offset) => {
-    const idx = start + offset;
-    if (idx < 19) return { mid:NaN, upper:NaN, lower:NaN };
-    const w = closes.slice(idx - 19, idx + 1).filter(Number.isFinite);
-    if (w.length !== 20) return { mid:NaN, upper:NaN, lower:NaN };
-    const mid = w.reduce((a,b) => a+b, 0) / w.length;
-    const variance = w.reduce((a,b) => a + (b-mid)*(b-mid), 0) / w.length;
-    const sd = Math.sqrt(Math.max(0, variance));
-    return { mid, upper:mid + 2*sd, lower:mid - 2*sd };
-  });
-}
-
-function quizVolumeProfile(rows) {
-  if (!rows?.length) return null;
-  const pmin = Math.min(...rows.map(r => r.low));
-  const pmax = Math.max(...rows.map(r => r.high));
-  if (!(pmax > pmin)) return null;
-  const edges = Array.from({length:11}, (_, i) => pmin + (pmax-pmin)*i/10);
-  const values = Array(10).fill(0);
-  rows.forEach((r) => {
-    const span = r.high - r.low;
-    if (span > 1e-12) {
-      for (let b=0;b<10;b++) {
-        const overlap = Math.max(0, Math.min(r.high, edges[b+1]) - Math.max(r.low, edges[b]));
-        values[b] += r.volume * overlap / span;
-      }
-    } else {
-      const b = Math.max(0, Math.min(9, Math.floor((r.close-pmin)/(pmax-pmin)*10)));
-      values[b] += r.volume;
-    }
-  });
-  return { pmin, pmax, edges, values, max:Math.max(...values, 1) };
 }
 
 function quizResidualSignature(values) {
@@ -401,9 +460,6 @@ async function buildQuizQuestion(pool) {
       entry,
       stock,
       rows,
-      bb:quizBollinger(stock, start),
-      // Volume profile is intentionally calculated ONLY from the visible D1-D60.
-      profile:quizVolumeProfile(rows.slice(0, hiddenStart)),
       start,
       hiddenPart,
       hiddenStart,
@@ -420,143 +476,72 @@ function quizPath(values, X, Y) {
   return values.map((v,i) => Number.isFinite(v) ? `${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}` : '').filter(Boolean).join(' ');
 }
 
-function renderQuizOption(option, index, correctIndex, selectedIndex, answered) {
-  const values = option?.closes || [];
-  const candles = option?.candles || [];
-  const W=260, H=126, pad={l:32,r:32,t:12,b:12};
-  const extrema = candles.flatMap(c => [Number(c.low), Number(c.high)]).filter(Number.isFinite);
-  const fitted = extrema.length ? extrema : values.filter(Number.isFinite);
-  let lo=Math.min(...fitted), hi=Math.max(...fitted);
-  if (!(hi>lo)) { lo*=.99; hi*=1.01; }
-  const extra=(hi-lo)*.08 || Math.abs(hi)*.01 || 1;
-  lo-=extra; hi+=extra;
-  const plotW=W-pad.l-pad.r;
-  const step=plotW/Math.max(1,values.length);
-  const X=i=>pad.l+(i+.5)*step;
-  const Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo);
-  const selected = selectedIndex === index;
-  const klass = answered ? (index===correctIndex ? ' correct' : selected ? ' wrong' : '') : selected ? ' selected' : '';
-  const bodyW=Math.max(2.2,Math.min(5.5,step*.58));
-  let candleSvg='';
-  candles.forEach((r,i)=>{
-    if (![r.open,r.high,r.low,r.close].every(Number.isFinite)) return;
-    const x=X(i),yo=Y(r.open),yc=Y(r.close),yh=Y(r.high),yl=Y(r.low);
-    const up=r.close>=r.open, ck=up?'quiz-candle-up':'quiz-candle-down';
-    const top=Math.min(yo,yc),bh=Math.max(1.2,Math.abs(yc-yo));
-    candleSvg+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-option-wick ${ck}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="quiz-option-body ${ck}" rx=".35"/>`;
-  });
-  return `<button class="quiz-choice${klass}" type="button" data-quiz-choice="${index}" ${answered?'disabled':''}>
-    <span class="quiz-choice-key">${index+1}</span>
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="보기 ${index+1}">
-      <line x1="${pad.l}" x2="${W-pad.r}" y1="${pad.t}" y2="${pad.t}" class="quiz-option-grid"/>
-      <line x1="${pad.l}" x2="${W-pad.r}" y1="${H/2}" y2="${H/2}" class="quiz-option-grid"/>
-      <line x1="${pad.l}" x2="${W-pad.r}" y1="${H-pad.b}" y2="${H-pad.b}" class="quiz-option-grid"/>
-      ${candleSvg}
-      <path d="${quizPath(values,X,Y)}" class="quiz-option-line"/>
-    </svg>
-  </button>`;
+function quizSupertrend(candles, length=14, multiplier=2.0) {
+  const n=candles?.length||0, atr=Array(n).fill(NaN), upper=Array(n).fill(NaN), lower=Array(n).fill(NaN), st=Array(n).fill(NaN), dir=Array(n).fill(0), tr=Array(n).fill(NaN);
+  if(!n)return {atr,upper,lower,st,dir};
+  for(let i=0;i<n;i++){
+    const h=Number(candles[i].high),l=Number(candles[i].low),c=Number(candles[i].close),pc=i?Number(candles[i-1].close):NaN;
+    if(![h,l,c].every(Number.isFinite))continue;
+    tr[i]=i===0||!Number.isFinite(pc)?h-l:Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));
+  }
+  if(n<length)return {atr,upper,lower,st,dir};
+  const seed=tr.slice(0,length);if(seed.some(v=>!Number.isFinite(v)))return {atr,upper,lower,st,dir};
+  atr[length-1]=seed.reduce((a,b)=>a+b,0)/length;
+  for(let i=length;i<n;i++)if(Number.isFinite(tr[i]))atr[i]=(atr[i-1]*(length-1)+tr[i])/length;
+  const first=length-1;
+  for(let i=first;i<n;i++){
+    const h=Number(candles[i].high),l=Number(candles[i].low),c=Number(candles[i].close),pc=i?Number(candles[i-1].close):NaN;
+    if(![h,l,c,atr[i]].every(Number.isFinite))continue;
+    const hl2=(h+l)/2,bu=hl2+multiplier*atr[i],bl=hl2-multiplier*atr[i];
+    if(i===first){upper[i]=bu;lower[i]=bl;dir[i]=-1;st[i]=upper[i];continue;}
+    upper[i]=(bu<upper[i-1]||pc>upper[i-1])?bu:upper[i-1];
+    lower[i]=(bl>lower[i-1]||pc<lower[i-1])?bl:lower[i-1];
+    if(Math.abs(st[i-1]-upper[i-1])<=1e-10*Math.max(1,Math.abs(st[i-1]))){
+      if(c>upper[i]){dir[i]=1;st[i]=lower[i];}else{dir[i]=-1;st[i]=upper[i];}
+    }else{
+      if(c<lower[i]){dir[i]=-1;st[i]=upper[i];}else{dir[i]=1;st[i]=lower[i];}
+    }
+  }
+  return {atr,upper,lower,st,dir};
+}
+function quizSTPaths(stData,startIndex,count,X,Y,upClass,downClass){
+  let up='',down='',u=false,d=false;
+  for(let j=0;j<count;j++){
+    const i=startIndex+j,v=Number(stData.st[i]),direction=Number(stData.dir[i]);
+    if(!Number.isFinite(v)){u=d=false;continue;}
+    if(direction>0){up+=`${u?'L':'M'}${X(j).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}
+    else if(direction<0){down+=`${d?'L':'M'}${X(j).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}else{u=d=false;}
+  }
+  return `<path d="${up}" class="${upClass}"/><path d="${down}" class="${downClass}"/>`;
+}
+
+function renderQuizOption(option, index, correctIndex, selectedIndex, answered, question) {
+  const candles=option?.candles||[], visible=question?.rows?.slice(0,question.hiddenStart)||[];
+  const combined=[...visible.map(r=>({open:Number(r.open),high:Number(r.high),low:Number(r.low),close:Number(r.close)})),...candles];
+  const stData=quizSupertrend(combined,14,2.0),startIndex=visible.length;
+  const W=260,H=126,pad={l:18,r:18,t:11,b:10};
+  const extrema=candles.flatMap((c,j)=>[Number(c.low),Number(c.high),Number(stData.st[startIndex+j])]).filter(Number.isFinite);
+  let lo=Math.min(...extrema),hi=Math.max(...extrema);if(!(hi>lo)){lo*=.99;hi*=1.01;}const extra=(hi-lo)*.08||1;lo-=extra;hi+=extra;
+  const step=(W-pad.l-pad.r)/Math.max(1,candles.length),X=i=>pad.l+(i+.5)*step,Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo),bodyW=Math.max(2.2,Math.min(5.5,step*.58));
+  const selected=selectedIndex===index,klass=answered?(index===correctIndex?' correct':selected?' wrong':''):selected?' selected':'';let candleSvg='';
+  candles.forEach((r,i)=>{if(![r.open,r.high,r.low,r.close].every(Number.isFinite))return;const x=X(i),yo=Y(r.open),yc=Y(r.close),yh=Y(r.high),yl=Y(r.low),up=r.close>=r.open,ck=up?'quiz-candle-up':'quiz-candle-down',top=Math.min(yo,yc),bh=Math.max(1.2,Math.abs(yc-yo));candleSvg+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-option-wick ${ck}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="quiz-option-body ${ck}" rx=".35"/>`;});
+  return `<button class="quiz-choice${klass}" type="button" data-quiz-choice="${index}" ${answered?'disabled':''}><span class="quiz-choice-key">${index+1}</span><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="보기 ${index+1}"><line x1="${pad.l}" x2="${W-pad.r}" y1="${pad.t}" y2="${pad.t}" class="quiz-option-grid"/><line x1="${pad.l}" x2="${W-pad.r}" y1="${H/2}" y2="${H/2}" class="quiz-option-grid"/><line x1="${pad.l}" x2="${W-pad.r}" y1="${H-pad.b}" y2="${H-pad.b}" class="quiz-option-grid"/>${candleSvg}${quizSTPaths(stData,startIndex,candles.length,X,Y,'quiz-option-st-up','quiz-option-st-down')}</svg></button>`;
 }
 
 function renderQuizMainChart(question, answered=false) {
-  const el = $('#quizMainChart');
-  if (!el || !question) return;
-  const {rows,bb,profile,hiddenStart,hiddenEnd,selectedIndex,options} = question;
-  const preview = (!answered && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < options.length) ? options[selectedIndex] : null;
-  const W=1000,H=430,pad={l:18,r:72,t:22,b:32};
-  const vals = rows.flatMap((r,i)=>[r.low,r.high,bb[i]?.lower,bb[i]?.upper]).filter(Number.isFinite);
-  let lo=Math.min(...vals), hi=Math.max(...vals);
-  if (preview?.candles?.length) {
-    preview.candles.forEach((r) => { vals.push(r.low, r.high); });
-    lo = Math.min(lo, ...preview.candles.map((r) => r.low));
-    hi = Math.max(hi, ...preview.candles.map((r) => r.high));
-  }
-  if (!(hi>lo)) { lo*=.99; hi*=1.01; }
-  const extra=(hi-lo)*.055; lo-=extra; hi+=extra;
-  const plotW=W-pad.l-pad.r, plotH=H-pad.t-pad.b;
-  const X=i=>pad.l+(i+.5)*plotW/rows.length;
-  const Y=v=>pad.t+(hi-v)*plotH/(hi-lo);
-  const candleStep=plotW/rows.length;
-  const bodyW=Math.max(2.1,candleStep*.56);
-  const hiddenX1=pad.l+hiddenStart*candleStep;
-  const hiddenX2=pad.l+hiddenEnd*candleStep;
-  const isHidden=i=>!answered && i>=hiddenStart && i<hiddenEnd;
-
-  let grid='';
-  for(let g=0;g<5;g++){
-    const y=pad.t+g*plotH/4;
-    const v=hi-g*(hi-lo)/4;
-    const label=question.stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(v>=100?0:1)}`;
-    grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="quiz-chart-grid"/><text x="${W-pad.r+7}" y="${y+4}" class="quiz-price-axis">${label}</text>`;
-  }
-
-  let profileSvg='';
-  if(profile){
-    const maxWidth=plotW*.23;
-    const visibleCurrent=rows[Math.max(0, hiddenStart - 1)]?.close;
-    const currentBin=Math.max(0,Math.min(9,Math.floor((visibleCurrent-profile.pmin)/(profile.pmax-profile.pmin)*10)));
-    for(let b=0;b<10;b++){
-      const y1=Y(profile.edges[b+1]), y2=Y(profile.edges[b]);
-      const barH=Math.max(1,Math.abs(y2-y1)-1);
-      const bw=maxWidth*(profile.values[b]/profile.max);
-      // Left-side volume profile: it stays entirely inside the visible 2/3 zone.
-      profileSvg+=`<rect x="${pad.l}" y="${Math.min(y1,y2)+.5}" width="${bw}" height="${barH}" class="quiz-profile-bar${b===currentBin?' current':''}"/>`;
-    }
-  }
-
-  function bbPath(key){
-    let out='',drawing=false;
-    for(let i=0;i<rows.length;i++){
-      const v=Number(bb[i]?.[key]);
-      if(!Number.isFinite(v)||isHidden(i)){drawing=false;continue;}
-      out+=`${drawing?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;
-      drawing=true;
-    }
-    return out.trim();
-  }
-
-  let candles='';
-  rows.forEach((r,i)=>{
-    if(isHidden(i)) return;
-    const up=r.close>=r.open;
-    const klass=up?'quiz-candle-up':'quiz-candle-down';
-    const x=X(i), yo=Y(r.open), yc=Y(r.close), yh=Y(r.high), yl=Y(r.low);
-    const top=Math.min(yo,yc), bh=Math.max(1.4,Math.abs(yc-yo));
-    candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-candle-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".5"/>`;
-  });
-
-  let previewSvg='';
-  if (preview?.candles?.length) {
-    const previewCloses = preview.closes || [];
-    previewSvg += `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-preview-zone"/>`;
-    preview.candles.forEach((r, localIndex) => {
-      if (![r.open,r.high,r.low,r.close].every(Number.isFinite)) return;
-      const i = hiddenStart + localIndex;
-      const x = X(i), yo = Y(r.open), yc = Y(r.close), yh = Y(r.high), yl = Y(r.low);
-      const up = r.close >= r.open;
-      const klass = up ? 'quiz-candle-up' : 'quiz-candle-down';
-      const top = Math.min(yo, yc), bh = Math.max(1.4, Math.abs(yc - yo));
-      previewSvg += `<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-preview-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="quiz-preview-body ${klass}" rx=".5"/>`;
-    });
-    const previewPath = previewCloses.length ? quizPath(previewCloses, (idx) => X(hiddenStart + idx), Y) : '';
-    if (previewPath) previewSvg += `<path d="${previewPath}" class="quiz-preview-line"/>`;
-  }
-
-  const dateIndices=[0,44,89];
-  const dates=dateIndices.map((i)=>{
-    const label=answered?(rows[i]?.date?.slice(2)||''):`D${i+1}`;
-    const anchor=i===0?'start':i===89?'end':'middle';
-    return `<text x="${i===0?pad.l:i===89?W-pad.r:X(i)}" y="${H-9}" text-anchor="${anchor}" class="quiz-date-axis">${escapeHtml(label)}</text>`;
-  }).join('');
-
-  const hiddenOverlay = answered
-    ? `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-reveal-zone"/>`
-    : (!preview ? `<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-hidden-block"/><text x="${(hiddenX1+hiddenX2)/2}" y="${pad.t+plotH/2}" text-anchor="middle" class="quiz-hidden-label">HIDDEN</text>` : '');
-
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    ${grid}
-    <path d="${bbPath('upper')}" class="quiz-bb-line"/><path d="${bbPath('lower')}" class="quiz-bb-line"/><path d="${bbPath('mid')}" class="quiz-bb-mid"/>
-    ${candles}${hiddenOverlay}${previewSvg}${profileSvg}${dates}
-  </svg><div class="quiz-chart-legend"><span>CANDLE</span><span>BB 20,2</span><span>VISIBLE 60D · 10-ZONE PROFILE</span></div>`;
+  const el=$('#quizMainChart');if(!el||!question)return;
+  const {rows,hiddenStart,hiddenEnd,selectedIndex,options}=question;
+  const preview=(!answered&&Number.isInteger(selectedIndex)&&selectedIndex>=0&&selectedIndex<options.length)?options[selectedIndex]:null;
+  const shownCandles=answered?rows.map(r=>({open:Number(r.open),high:Number(r.high),low:Number(r.low),close:Number(r.close)})):[...rows.slice(0,hiddenStart).map(r=>({open:Number(r.open),high:Number(r.high),low:Number(r.low),close:Number(r.close)})),...(preview?.candles||[])];
+  const stData=quizSupertrend(shownCandles,14,2.0);
+  const W=1000,H=430,pad={l:18,r:72,t:22,b:32},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length,X=i=>pad.l+(i+.5)*step;
+  const vals=[];shownCandles.forEach((r,i)=>{vals.push(r.low,r.high,stData.st[i]);});let lo=Math.min(...vals.filter(Number.isFinite)),hi=Math.max(...vals.filter(Number.isFinite));if(!(hi>lo)){lo*=.99;hi*=1.01;}const extra=(hi-lo)*.055||1;lo-=extra;hi+=extra;const Y=v=>pad.t+(hi-v)*plotH/(hi-lo),bodyW=Math.max(2.1,step*.56),hiddenX1=pad.l+hiddenStart*step,hiddenX2=pad.l+hiddenEnd*step;
+  let grid='';for(let g=0;g<5;g++){const y=pad.t+g*plotH/4,v=hi-g*(hi-lo)/4,label=question.stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(v>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="quiz-chart-grid"/><text x="${W-pad.r+7}" y="${y+4}" class="quiz-price-axis">${label}</text>`;}
+  let candles='';shownCandles.forEach((r,i)=>{const x=X(i),yo=Y(r.open),yc=Y(r.close),yh=Y(r.high),yl=Y(r.low),up=r.close>=r.open,klass=up?'quiz-candle-up':'quiz-candle-down',top=Math.min(yo,yc),bh=Math.max(1.4,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="quiz-candle-wick ${klass}"/><rect x="${x-bodyW/2}" y="${top}" width="${bodyW}" height="${bh}" class="${klass}" rx=".5"/>`;});
+  function mainSTPaths(){let up='',down='',u=false,d=false;for(let i=0;i<shownCandles.length;i++){const v=Number(stData.st[i]),direction=Number(stData.dir[i]);if(!Number.isFinite(v)){u=d=false;continue;}if(direction>0){up+=`${u?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}else if(direction<0){down+=`${d?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}}return `<path d="${up}" class="quiz-st-up"/><path d="${down}" class="quiz-st-down"/>`;}
+  const dateIndices=[0,44,89],dates=dateIndices.map(i=>{const label=answered?(rows[i]?.date?.slice(2)||''):`D${i+1}`,anchor=i===0?'start':i===89?'end':'middle';return `<text x="${i===0?pad.l:i===89?W-pad.r:X(i)}" y="${H-9}" text-anchor="${anchor}" class="quiz-date-axis">${escapeHtml(label)}</text>`;}).join('');
+  const hiddenOverlay=answered?`<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-reveal-zone"/>`:(!preview?`<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-hidden-block"/><text x="${(hiddenX1+hiddenX2)/2}" y="${pad.t+plotH/2}" text-anchor="middle" class="quiz-hidden-label">HIDDEN</text>`:`<rect x="${hiddenX1}" y="${pad.t}" width="${hiddenX2-hiddenX1}" height="${plotH}" class="quiz-preview-zone"/>`);
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${mainSTPaths()}${hiddenOverlay}${dates}</svg><div class="quiz-chart-legend"><span>CANDLE</span><span>SuperTrend 14,2</span><span>상승 ST 빨강 · 하락 ST 파랑</span></div>`;
 }
 
 function renderQuizQuestion() {
@@ -572,11 +557,11 @@ function renderQuizQuestion() {
   const instruction=$('#quizInstructionSub');
   if(instruction){
     instruction.textContent=state.quiz.answered
-      ? '제출 후 실제 다음 30거래일 캔들과 정답을 공개합니다.'
-      : '앞 60거래일을 보고 5개 보기 중 다음 30거래일을 고르세요. 보기를 누르면 빈 구간에 미리 적용됩니다.';
+      ? '제출 후 실제 다음 30거래일 캔들과 SuperTrend를 공개합니다.'
+      : '앞 60거래일의 캔들과 SuperTrend(14,2)를 보고 5개 보기 중 다음 30거래일을 고르세요.';
   }
   renderQuizMainChart(q,state.quiz.answered);
-  $('#quizChoices').innerHTML=q.options.map((option,i)=>renderQuizOption(option,i,q.correctIndex,q.selectedIndex,state.quiz.answered)).join('');
+  $('#quizChoices').innerHTML=q.options.map((option,i)=>renderQuizOption(option,i,q.correctIndex,q.selectedIndex,state.quiz.answered,q)).join('');
   const submitBtn = $('#quizSubmitBtn');
   if (submitBtn) submitBtn.disabled = state.quiz.answered || !Number.isInteger(q.selectedIndex);
   const selectedHint = $('#quizSelectedHint');
@@ -585,13 +570,13 @@ function renderQuizQuestion() {
       ? `제출 완료 · 선택한 보기 ${Number.isInteger(q.selectedIndex) ? q.selectedIndex + 1 : '—'}번`
       : Number.isInteger(q.selectedIndex)
         ? `${q.selectedIndex + 1}번 보기를 차트에 적용했습니다. 마음에 들면 정답 제출을 누르세요.`
-        : '보기를 선택하면 가려진 구간에 해당 차트가 먼저 채워집니다.';
+        : '보기를 선택하면 캔들과 SuperTrend가 가려진 구간에 함께 적용됩니다.';
   }
   const feedback=$('#quizFeedback');
   if(state.quiz.answered){
     feedback.hidden=false;
     const ok=q.selectedIndex===q.correctIndex;
-    feedback.innerHTML=`<b>${ok?'정답입니다.':'오답입니다.'}</b> 정답은 ${q.correctIndex+1}번입니다. 실제 종목은 ${escapeHtml(q.stock.name)} (${escapeHtml(q.stock.symbol || q.stock.ticker)})이며, 가려진 30거래일 캔들을 공개했습니다.`;
+    feedback.innerHTML=`<b>${ok?'정답입니다.':'오답입니다.'}</b> 정답은 ${q.correctIndex+1}번입니다. 실제 종목은 ${escapeHtml(q.stock.name)} (${escapeHtml(q.stock.symbol || q.stock.ticker)})이며, 가려진 30거래일 캔들과 SuperTrend(14,2)를 공개했습니다.`;
   }else{
     feedback.hidden=true;
     feedback.textContent='';
@@ -636,13 +621,17 @@ async function newQuizQuestion(forcePool=false) {
 
 
 
-$('#capSelect')?.addEventListener('change',e=>{state.capMin[sizeMode()]=Number(e.target.value)||0;state.selectedTicker=null;renderSheet();});
+$('#capSelect')?.addEventListener('change',e=>{state.capMin[sizeMode()]=Number(e.target.value)||0;state.selectedTicker=null;state.searchOverrideTicker=null;hideChartOverlay();renderSheet();});
 $('.sheet-nav')?.addEventListener('click',e=>{const b=e.target.closest('[data-sheet]');if(b)void switchSheet(b.dataset.sheet);});
-$('#sheetBody')?.addEventListener('click',e=>{const external=e.target.closest('[data-open-external]');if(external){e.stopPropagation();const stock=stockByTicker(external.dataset.openExternal);if(stock)openExternal(stock);return;}const row=e.target.closest('tr[data-ticker]');if(row)void selectRow(row.dataset.ticker);});
+$('.header-row')?.addEventListener('click',e=>{const th=e.target.closest('[data-sort]');if(!th)return;const key=th.dataset.sort;if(!SORT_KEYS.has(key))return;if(state.sort.key===key)state.sort.dir=state.sort.dir==='asc'?'desc':'asc';else{state.sort.key=key;state.sort.dir=sortDirectionForNewKey(key);}renderSheet();});
+$('#sheetBody')?.addEventListener('click',e=>{const row=e.target.closest('tr[data-ticker]');if(row)void selectRow(row.dataset.ticker);});
+$('#sheetChartOverlay')?.addEventListener('click',e=>{const external=e.target.closest('[data-open-external]');if(!external)return;e.preventDefault();e.stopPropagation();const stock=stockByTicker(external.dataset.openExternal);if(stock)openExternal(stock);});
+$('#formulaInput')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();void jumpToSearch(e.currentTarget.value);}});
+$('#formulaInput')?.addEventListener('focus',e=>{e.currentTarget.select();});
 $('#newQuizBtn')?.addEventListener('click',()=>void newQuizQuestion(false));
 $('#quizChoices')?.addEventListener('click',e=>{const b=e.target.closest('[data-quiz-choice]');if(!b||state.quiz.answered||!state.quiz.question)return;const i=Number(b.dataset.quizChoice);if(!Number.isInteger(i)||i<0||i>4)return;state.quiz.question.selectedIndex=i;renderQuizQuestion();});
 $('#quizSubmitBtn')?.addEventListener('click',()=>{if(!state.quiz.question||state.quiz.answered||!Number.isInteger(state.quiz.question.selectedIndex))return;state.quiz.answered=true;renderQuizQuestion();});
 
-window.addEventListener('resize',()=>{const stock=stockByTicker(state.selectedTicker);const row=state.selectedTicker?$('#sheetBody')?.querySelector(`tr[data-ticker="${CSS.escape(state.selectedTicker)}"]`):null;const detail=stock?state.detailCache.get(`${stock.category}:${stock.ticker}`):null;if(stock&&row&&detail)drawSheetChart($('[data-row-chart]',row),detail,stock);});
+window.addEventListener('resize',()=>{if(state.selectedTicker)requestAnimationFrame(()=>void hydrateSelectedChart(state.selectedTicker));});
 
 void switchSheet('KR');

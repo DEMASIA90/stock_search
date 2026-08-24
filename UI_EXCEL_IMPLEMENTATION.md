@@ -1,0 +1,22 @@
+# DTC v14.4.1 Excel UI implementation
+
+- Workbook title / PWA title: `DTC.xlsx`.
+- Ribbon chrome rebuilt to mirror the supplied desktop Excel reference: green title/menu bars, Home ribbon groups, formula bar and worksheet column letters.
+- Ribbon controls are visual-only; market sheet tabs, worksheet sorting, market-cap filter, stock search and chart selection remain functional.
+- A1 contains the market-cap filter. Row 2 columns are:
+  - A opinion
+  - B stock
+  - C sector
+  - D price
+  - E change
+  - F change %
+  - G market cap
+  - H ST_D
+  - I ST_W
+  - J ADX(14)
+  - K Backtest
+  - L chart
+- Clicking a row does not resize it. The chart is overlaid/pasted across the L-column area for roughly twelve worksheet rows.
+- Formula bar search accepts stock name / ticker and jumps across all four market sheets regardless of the active market-cap filter.
+- Every data header is sortable. Opinion sorting toggles between buy-first and sell-first semantic order.
+- Quiz remains one question at a time with five choices and now renders only candles + SuperTrend(14,2); Bollinger Band and volume profile were removed from quiz rendering.
