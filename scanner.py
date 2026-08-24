@@ -1393,28 +1393,32 @@ def scan_category(
         f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,}"
     )
 
-    if category in {"US", "US_ETF"} and scan_universe:
+    if scan_universe:
+        provider_label = "TradingView" if category in {"US", "US_ETF"} else "Toss c-chart"
         probe_error = ""
+        # Shared transport/protocol failures must be discovered before opening
+        # dozens of batches. Two bounded probes distinguish a short transient
+        # from a persistent endpoint/CI-IP problem without hammering the source.
         for probe_attempt in range(1, 3):
             try:
                 probe_ok, probe_total = exact_source_preflight(scan_universe, category, timeout=18)
                 print(
-                    f"[{category}] TradingView preflight OK: {probe_ok}/{probe_total} "
+                    f"[{category}] {provider_label} preflight OK: {probe_ok}/{probe_total} "
                     f"sample symbols returned candles"
                 )
                 probe_error = ""
-                time.sleep(random.uniform(0.55, 0.95))
+                time.sleep(random.uniform(0.45, 0.85))
                 break
             except Exception as exc:
                 probe_error = f"{type(exc).__name__}: {exc}"
                 print(
-                    f"[{category}] TradingView preflight {probe_attempt}/2 failed: {probe_error}"
+                    f"[{category}] {provider_label} preflight {probe_attempt}/2 failed: {probe_error}"
                 )
                 if probe_attempt < 2:
                     time.sleep(4.0)
         if probe_error:
             raise RuntimeError(
-                f"{category} TradingView exact-source preflight failed twice; {probe_error}. "
+                f"{category} {provider_label} exact-source preflight failed twice; {probe_error}. "
                 "Existing site data was not overwritten."
             )
 
@@ -1431,13 +1435,14 @@ def scan_category(
             print(f"[{category}] exact-source batch {batch_no}/{total_batches} failed: {last_source_error}")
             missing.extend(tickers)
             consecutive_source_batch_failures += 1
-            # Three complete US batch failures represent a shared TradingView
-            # transport/protocol problem, not 144 independent unavailable
-            # symbols. Abort before hammering the public websocket with the
-            # remaining universe and a second 500-symbol retry wave.
-            if category in {"US", "US_ETF"} and consecutive_source_batch_failures >= 3:
+            # Repeated complete batch failures represent a shared source problem,
+            # not dozens of independent unavailable symbols. KR uses a stricter
+            # threshold because c-chart HTTP errors/rate limits should not be
+            # amplified into thousands of follow-up requests.
+            source_failure_limit = 3 if category in {"US", "US_ETF"} else 2
+            if consecutive_source_batch_failures >= source_failure_limit:
                 raise RuntimeError(
-                    f"{category} TradingView exact-source unavailable across "
+                    f"{category} {source_name} unavailable across "
                     f"{consecutive_source_batch_failures} consecutive batches; "
                     f"last error: {last_source_error}. Existing site data was not overwritten."
                 )

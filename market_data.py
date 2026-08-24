@@ -40,7 +40,9 @@ except Exception:  # pragma: no cover - surfaced at runtime by the US adapter
 
 TOSS_WTS_BASE = "https://wts-info-api.tossinvest.com"
 TOSS_C_CHART_MAX = 500
-TOSS_WORKERS = 6
+TOSS_WORKERS = max(1, min(6, int(os.environ.get("DTC_TOSS_WORKERS", "4"))))
+TOSS_HTTP_RETRIES = max(1, min(3, int(os.environ.get("DTC_TOSS_HTTP_RETRIES", "2"))))
+TOSS_RETRYABLE_STATUS = {500, 502, 503, 504}
 TOSS_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -150,7 +152,24 @@ def _parse_toss_candles(candles: Any) -> pd.DataFrame:
     return _frame_from_rows(rows)
 
 
+def _response_detail(response: requests.Response, limit: int = 420) -> str:
+    try:
+        text = (response.text or "").strip().replace("\n", " ")
+    except Exception:
+        text = ""
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text
+
+
 def _toss_page(product_code: str, count: int, from_datetime: str | None, timeout: float) -> tuple[pd.DataFrame, str | None]:
+    """Fetch one public Toss WTS candle page with bounded transport retries.
+
+    4xx responses are never hidden or blindly retried. In particular, 403/429
+    usually means the public endpoint has rejected the current CI request/IP;
+    hammering 2,570 symbols only makes that condition worse. 5xx and network
+    timeouts receive one short bounded retry because they are commonly transient.
+    """
     params: dict[str, Any] = {
         "count": int(min(TOSS_C_CHART_MAX, max(1, count))),
         "session": "all",
@@ -160,19 +179,66 @@ def _toss_page(product_code: str, count: int, from_datetime: str | None, timeout
     if from_datetime:
         params["from"] = from_datetime
     url = f"{TOSS_WTS_BASE}/api/v1/c-chart/kr-s/{product_code}/day:1?{urlencode(params)}"
-    response = requests.get(url, headers=TOSS_HEADERS, timeout=timeout)
-    response.raise_for_status()
-    payload = response.json()
-    result = payload.get("result") if isinstance(payload, dict) else None
-    if not isinstance(result, dict):
-        result = payload if isinstance(payload, dict) else {}
-    candles = result.get("candles") or []
-    frame = _parse_toss_candles(candles)
 
-    # Some chart responses expose a cursor; prefer it.  If absent, the caller
-    # derives a cursor from the oldest returned candle.
-    cursor = result.get("nextFrom") or result.get("nextBefore") or result.get("nextDateTime")
-    return frame, str(cursor) if cursor else None
+    last_exc: Exception | None = None
+    for attempt in range(1, TOSS_HTTP_RETRIES + 1):
+        try:
+            response = requests.get(url, headers=TOSS_HEADERS, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < TOSS_HTTP_RETRIES:
+                time.sleep(0.8 * attempt)
+                continue
+            raise ExactMarketDataError(
+                f"Toss c-chart transport failed for {product_code}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        if response.status_code >= 400:
+            detail = _response_detail(response)
+            msg = (
+                f"Toss c-chart HTTP {response.status_code} for {product_code}"
+                f"{': ' + detail if detail else ''}"
+            )
+            if response.status_code in TOSS_RETRYABLE_STATUS and attempt < TOSS_HTTP_RETRIES:
+                last_exc = ExactMarketDataError(msg)
+                time.sleep(0.8 * attempt)
+                continue
+            if response.status_code in {403, 429}:
+                msg += "; public endpoint rejected/rate-limited this request; stop bulk retries"
+            raise ExactMarketDataError(msg)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ExactMarketDataError(
+                f"Toss c-chart returned non-JSON for {product_code}: {_response_detail(response)}"
+            ) from exc
+
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            raise ExactMarketDataError(
+                f"Toss c-chart unexpected response for {product_code}: missing object result"
+            )
+        candles = result.get("candles")
+        if not isinstance(candles, list):
+            raise ExactMarketDataError(
+                f"Toss c-chart unexpected response for {product_code}: result.candles is not a list"
+            )
+        frame = _parse_toss_candles(candles)
+        if candles and frame.empty:
+            keys = sorted({str(k) for c in candles[:3] if isinstance(c, dict) for k in c.keys()})
+            raise ExactMarketDataError(
+                f"Toss c-chart candle schema unsupported for {product_code}; observed keys={keys[:20]}"
+            )
+
+        # Some chart responses expose a cursor; prefer it. If absent, the caller
+        # derives a cursor from the oldest returned candle.
+        cursor = result.get("nextFrom") or result.get("nextBefore") or result.get("nextDateTime")
+        return frame, str(cursor) if cursor else None
+
+    if last_exc is not None:
+        raise ExactMarketDataError(f"Toss c-chart failed for {product_code}: {last_exc}")
+    raise ExactMarketDataError(f"Toss c-chart failed for {product_code}")
 
 
 def fetch_toss_kr_daily(stock: Any, bars: int = 720, timeout: float = 28.0) -> pd.DataFrame:
@@ -208,6 +274,7 @@ def fetch_toss_kr_daily(stock: Any, bars: int = 720, timeout: float = 28.0) -> p
 
 def _download_toss_group(stocks: list[Any], bars: int, timeout: float) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
+    failures: list[str] = []
     with ThreadPoolExecutor(max_workers=min(TOSS_WORKERS, max(1, len(stocks)))) as pool:
         futs = {pool.submit(fetch_toss_kr_daily, stock, bars, timeout): stock for stock in stocks}
         for fut in as_completed(futs):
@@ -216,9 +283,23 @@ def _download_toss_group(stocks: list[Any], bars: int, timeout: float) -> dict[s
                 df = fut.result()
                 if not df.empty:
                     out[str(stock.ticker)] = df
-            except Exception:
-                # Per-symbol failures are reflected in scanner coverage/retry.
-                pass
+                else:
+                    failures.append(f"{stock.ticker}: empty candle result")
+            except Exception as exc:
+                failures.append(f"{stock.ticker}: {type(exc).__name__}: {exc}")
+
+    # A whole group failing is a shared transport/protocol event until proven
+    # otherwise. Surface it immediately so scanner preflight/circuit-breaker can
+    # stop instead of silently burning 30 minutes on thousands of requests.
+    if stocks and not out and failures:
+        summary = " | ".join(failures[:3])
+        if len(failures) > 3:
+            summary += f" | +{len(failures)-3} more failures"
+        raise ExactMarketDataError(
+            f"all Toss c-chart requests failed for {len(stocks)} symbols; {summary}"
+        )
+    if failures:
+        print(f"[Toss] batch partial: priced={len(out)}/{len(stocks)}, failures={len(failures)}; {failures[0]}")
     return out
 
 
@@ -576,20 +657,32 @@ def _download_tradingview_group(stocks: list[Any], bars: int, timeout: float) ->
     return out
 
 def exact_source_preflight(stocks: Iterable[Any], category: str, timeout: float = 18.0) -> tuple[int, int]:
-    """Fast exact-source connectivity/protocol probe used before a US scan.
+    """Fast exact-source connectivity/protocol probe before a large scan.
 
-    It intentionally requests only five bars for at most three real universe
-    symbols. This catches handshake/protocol-wide failures before the scanner
-    spends dozens of websocket connections on a universe that cannot succeed.
+    KR preferentially probes Samsung Electronics (005930) when present because
+    it is a stable Toss product code. US probes up to three actual universe
+    symbols. Any shared HTTP/transport/protocol failure is surfaced verbatim.
     """
-    sample = list(stocks)[:3]
-    if not sample:
+    stock_list = list(stocks)
+    if not stock_list:
         return 0, 0
-    frames = download_market_frames(sample, category, bars=5, timeout=timeout)
-    usable = sum(1 for stock in sample if (frames.get(str(stock.ticker)) is not None and not frames[str(stock.ticker)].empty))
+    cat = str(category).upper()
+    if cat in {"KR", "KR_ETF"}:
+        preferred = [
+            s for s in stock_list
+            if re.sub(r"\.(KS|KQ)$", "", str(getattr(s, "symbol", "")).upper()) == "005930"
+        ]
+        sample = (preferred + [s for s in stock_list if s not in preferred])[:2]
+    else:
+        sample = stock_list[:3]
+    frames = download_market_frames(sample, cat, bars=5, timeout=timeout)
+    usable = sum(
+        1 for stock in sample
+        if frames.get(str(stock.ticker)) is not None and not frames[str(stock.ticker)].empty
+    )
     if usable <= 0:
         raise ExactMarketDataError(
-            f"{str(category).upper()} exact-source preflight returned 0/{len(sample)} usable symbols"
+            f"{cat} exact-source preflight returned 0/{len(sample)} usable symbols"
         )
     return usable, len(sample)
 

@@ -59,6 +59,44 @@ class MarketDataAdapterTests(unittest.TestCase):
         self.assertIsNone(calls[0])
         self.assertIsNotNone(calls[1])
 
+
+    def test_toss_page_surfaces_http_429_without_hiding(self):
+        class Resp:
+            status_code = 429
+            text = '{"message":"rate limited"}'
+            def json(self):
+                return {"message": "rate limited"}
+        with patch.object(md.requests, 'get', return_value=Resp()):
+            with self.assertRaises(md.ExactMarketDataError) as ctx:
+                md._toss_page('A005930', 5, None, 1)
+        self.assertIn('HTTP 429', str(ctx.exception))
+        self.assertIn('stop bulk retries', str(ctx.exception))
+
+    def test_toss_group_surfaces_total_transport_failure(self):
+        stocks = [self.stock('005930', '005930.KS', 'KOSPI')]
+        with patch.object(md, 'fetch_toss_kr_daily', side_effect=md.ExactMarketDataError('HTTP 403 blocked')):
+            with self.assertRaises(md.ExactMarketDataError) as ctx:
+                md._download_toss_group(stocks, bars=5, timeout=1)
+        self.assertIn('all Toss c-chart requests failed', str(ctx.exception))
+        self.assertIn('HTTP 403 blocked', str(ctx.exception))
+
+    def test_kr_preflight_prefers_samsung_when_available(self):
+        stocks = [
+            self.stock('000660', '000660.KS', 'KOSPI'),
+            self.stock('005930', '005930.KS', 'KOSPI'),
+            self.stock('035420', '035420.KS', 'KOSPI'),
+        ]
+        seen = []
+        def fake_download(sample, category, bars, timeout):
+            seen.extend([s.ticker for s in sample])
+            idx = pd.DatetimeIndex([pd.Timestamp('2026-08-24')])
+            frame = pd.DataFrame({'Open':[1.0],'High':[1.0],'Low':[1.0],'Close':[1.0],'Volume':[1.0]}, index=idx)
+            return {s.ticker: frame for s in sample}
+        with patch.object(md, 'download_market_frames', side_effect=fake_download):
+            usable, total = md.exact_source_preflight(stocks, 'KR', timeout=1)
+        self.assertEqual((usable, total), (2, 2))
+        self.assertEqual(seen[0], '005930.KS')
+
     def test_tradingview_symbol_mapping(self):
         self.assertEqual(md.tradingview_symbol(self.stock('AAPL','AAPL','NASDAQ')), 'NASDAQ:AAPL')
         self.assertEqual(md.tradingview_symbol(self.stock('JPM','JPM','NYSE')), 'NYSE:JPM')
