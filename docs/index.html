@@ -14,7 +14,7 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=20260825-v14_4_2_pwa_install" />
+  <link rel="stylesheet" href="./styles.css?v=20260825-v14_4_5_ui_algo" />
 </head>
 <body>
   <svg class="excel-icon-defs" aria-hidden="true">
@@ -165,8 +165,8 @@
               <tr class="filter-row">
                 <th class="row-number">1</th>
                 <td class="filter-cell"><select id="capSelect" aria-label="시가총액 필터"></select></td>
-                <td id="sheetStatusCell" colspan="10" class="sheet-status-cell">데이터를 불러오는 중입니다.</td>
-                <td class="chart-title-cell">선택 종목 차트</td>
+                <td id="sheetStatusCell" class="sheet-status-cell">데이터 로드 중</td>
+                <td colspan="10" class="chart-title-cell">선택 종목 차트 영역 · C열부터 표시</td>
               </tr>
               <tr class="header-row">
                 <th class="row-number">2</th>
@@ -229,7 +229,7 @@
   </div>
 
   <script src="./runtime-config.js?v=20260825-v14_4_1_excel_exact_ui"></script>
-  <script src="./app.js?v=20260825-v14_4_1_excel_exact_ui"></script>
+  <script src="./app.js?v=20260825-v14_4_5_ui_algo"></script>
   <script src="./pwa.js?v=20260825-v14_4_2_pwa_install"></script>
 </body>
 </html>

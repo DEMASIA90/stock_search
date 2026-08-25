@@ -12,23 +12,28 @@ const CONFIGURED_DATA_ORIGIN = String(window.DTC_DATA_ORIGIN || '').trim().repla
 const IS_ANDROID_APP = location.hostname === 'localhost' || location.protocol === 'capacitor:';
 const DATA_BASE = (location.hostname.endsWith('github.io') || IS_ANDROID_APP) ? (CONFIGURED_DATA_ORIGIN || '.') : '.';
 const CAP_FILTER_PRESETS = {
-  equity: [
+  KR: [
+    [1_000_000_000_000,'1조 이상'],[10_000_000_000_000,'10조 이상'],[50_000_000_000_000,'50조 이상'],
+    [100_000_000_000_000,'100조 이상'],[500_000_000_000_000,'500조 이상'],[1_000_000_000_000_000,'1000조 이상'],
+  ],
+  US: [
     [10_000_000_000_000,'10조 이상'],[50_000_000_000_000,'50조 이상'],[100_000_000_000_000,'100조 이상'],
     [500_000_000_000_000,'500조 이상'],[1_000_000_000_000_000,'1000조 이상'],
   ],
-  etf: [[0,'전체'],[100_000_000_000,'0.1조 이상'],[500_000_000_000,'0.5조 이상'],[1_000_000_000_000,'1조 이상'],[5_000_000_000_000,'5조 이상']],
+  KR_ETF: [[0,'전체'],[100_000_000_000,'0.1조 이상'],[500_000_000_000,'0.5조 이상'],[1_000_000_000_000,'1조 이상'],[5_000_000_000_000,'5조 이상']],
+  US_ETF: [[0,'전체'],[100_000_000_000,'0.1조 이상'],[500_000_000_000,'0.5조 이상'],[1_000_000_000_000,'1조 이상'],[5_000_000_000_000,'5조 이상']],
 };
 const QUIZ_WINDOW_DAYS = 90;
 const QUIZ_HIDDEN_DAYS = 30;
 const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr','kr-etf','us','us-etf'];
-const OPINION_ORDER = {BUY:0,SHORT_BUY:1,LONG_BUY:1,HOLD:2,SELL_CONSIDER:3,SELL:4};
-const OPINION_TEXT = {BUY:'매수',SHORT_BUY:'단기 매수',LONG_BUY:'장기 매수',HOLD:'HOLD',SELL_CONSIDER:'매도 고려',SELL:'매도'};
+const OPINION_ORDER = {BUY:0,HOLD:1,SHORT_BUY:1,LONG_BUY:1,SELL_CONSIDER:2,SELL:3};
+const OPINION_TEXT = {BUY:'BUY',SHORT_BUY:'BUY',LONG_BUY:'HOLD',HOLD:'HOLD',SELL_CONSIDER:'Consider Sell',SELL:'Sell'};
 const SORT_KEYS = new Set(['opinion','name','sector','close','day_change_amount','day_change_pct','market_size_krw','st_d_direction','st_w_direction','adx','backtest']);
 
 const state = {
   sheet:'KR', category:'KR', data:{KR:null,KR_ETF:null,US:null,US_ETF:null},
-  capMin:{equity:100_000_000_000_000,etf:0}, selectedTicker:null, detailCache:new Map(),
+  capMin:{KR:1_000_000_000_000,KR_ETF:0,US:10_000_000_000_000,US_ETF:0}, selectedTicker:null, detailCache:new Map(),
   sort:{key:'opinion',dir:'asc'}, searchOverrideTicker:null,
   quiz:{pool:null,detailCache:new Map(),question:null,answered:false,loading:false},
 };
@@ -37,8 +42,7 @@ function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':
 function dataUrl(path,force=false){const clean=String(path).replace(/^\.\//,'').replace(/^\//,'');const base=DATA_BASE==='.'?'.':DATA_BASE.replace(/\/$/,'');const url=`${base}/${clean}`;return force?`${url}${url.includes('?')?'&':'?'}ts=${Date.now()}`:url;}
 function numberOrNaN(v){if(v===null||v===undefined||v==='')return Number.NaN;const n=Number(v);return Number.isFinite(n)?n:Number.NaN;}
 function isEtfCategory(c=state.category){return c==='KR_ETF'||c==='US_ETF';}
-function sizeMode(c=state.category){return isEtfCategory(c)?'etf':'equity';}
-function currentCapMin(){return Number(state.capMin[sizeMode()]||0);}
+function currentCapMin(){return Number(state.capMin[state.category]||0);}
 function currentData(){return state.data[state.category];}
 function stockByTicker(ticker){return (currentData()?.items||[]).find(x=>String(x.ticker)===String(ticker))||null;}
 
@@ -52,7 +56,7 @@ function pct(v,d=2){const n=numberOrNaN(v);if(!Number.isFinite(n))return '—';r
 function marketSize(v){const n=numberOrNaN(v);if(!Number.isFinite(n))return '—';if(n>=1e12)return `${(n/1e12).toFixed(n>=100e12?0:1)}조`;if(n>=1e8)return `${(n/1e8).toFixed(0)}억`;return Math.round(n).toLocaleString('ko-KR');}
 function changeClass(v){const n=numberOrNaN(v);return n>0?'change-up':n<0?'change-down':'';}
 function stClass(v){return String(v)==='상승'?'st-up':String(v)==='하락'?'st-down':'';}
-function opinionClass(text){const s=String(text||'');if(s.includes('매수'))return 'opinion-buy';if(s.includes('매도'))return 'opinion-sell';return 'opinion-hold';}
+function opinionClass(text){const s=String(text||'').trim().toUpperCase();if(s.startsWith('BUY'))return 'opinion-buy';if(s.includes('SELL'))return 'opinion-sell';return 'opinion-hold';}
 function backtestValue(stock){return numberOrNaN(stock?.supertrend?.backtest?.median_max_return_pct);}
 function backtestText(stock){const bt=stock?.supertrend?.backtest||{};const med=backtestValue(stock);const n=Number(bt.completed_events||0);return Number.isFinite(med)?`최고수익 중위 ${pct(med,1)} · ${n}회`:'—';}
 function opinionCode(stock){return String(stock?.opinion_code||'HOLD').toUpperCase();}
@@ -60,10 +64,19 @@ function opinionRank(stock){return Number(stock?.rank_level??OPINION_ORDER[opini
 function stRank(v){return String(v)==='상승'?0:String(v)==='하락'?2:1;}
 function localeCompare(a,b){return String(a??'').localeCompare(String(b??''),'ko',{numeric:true,sensitivity:'base'});}
 
-function renderCapSelect(){const select=$('#capSelect');if(!select)return;const presets=CAP_FILTER_PRESETS[sizeMode()];const active=currentCapMin();select.innerHTML=presets.map(([v,label])=>`<option value="${v}" ${Number(v)===active?'selected':''}>${escapeHtml(label)}</option>`).join('');}
+function renderCapSelect(){const select=$('#capSelect');if(!select)return;const presets=CAP_FILTER_PRESETS[state.category]||[];const active=currentCapMin();select.innerHTML=presets.map(([v,label])=>`<option value="${v}" ${Number(v)===active?'selected':''}>${escapeHtml(label)}</option>`).join('');}
 function sortDirectionForNewKey(key){return ['name','sector','opinion','st_d_direction','st_w_direction'].includes(key)?'asc':'desc';}
 function compareStocks(a,b,key){
-  if(key==='opinion') return opinionRank(a)-opinionRank(b) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
+  if(key==='opinion') {
+    const rankDiff=opinionRank(a)-opinionRank(b);if(rankDiff)return rankDiff;
+    if(opinionCode(a)==='BUY'&&opinionCode(b)==='BUY'){
+      const aa=numberOrNaN(a.buy_age_days),bb=numberOrNaN(b.buy_age_days);
+      if(Number.isFinite(aa)&&Number.isFinite(bb)&&aa!==bb)return aa-bb;
+      if(Number.isFinite(aa)&&!Number.isFinite(bb))return -1;
+      if(!Number.isFinite(aa)&&Number.isFinite(bb))return 1;
+    }
+    return (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
+  }
   if(key==='name') return localeCompare(a.name,b.name);
   if(key==='sector') return localeCompare(a.sector,b.sector) || localeCompare(a.name,b.name);
   if(key==='st_d_direction') return stRank(a.st_d_direction)-stRank(b.st_d_direction) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
@@ -100,7 +113,7 @@ function renderSheet(){
     return `<tr class="stock-row${selectedClass}" data-ticker="${escapeHtml(s.ticker)}"><th class="row-number">${row}</th>
 <td class="center ${opinionClass(opinion)}">${escapeHtml(opinion)}</td>
 <td class="stock-name-cell">${escapeHtml(s.name)} <small>${escapeHtml(s.symbol||s.ticker)}</small></td>
-<td>${escapeHtml(s.sector||'—')}</td>
+<td data-chart-start>${escapeHtml(s.sector||'—')}</td>
 <td class="num">${money(s.close,s.currency)}</td>
 <td class="num ${changeClass(s.day_change_amount)}">${changeAmount(s.day_change_amount,s.currency)}</td>
 <td class="num ${changeClass(s.day_change_pct)}">${pct(s.day_change_pct,2)}</td>
@@ -109,7 +122,7 @@ function renderSheet(){
 <td class="center ${stClass(s.st_w_direction)}">${escapeHtml(s.st_w_direction||'—')}</td>
 <td class="num">${Number.isFinite(numberOrNaN(s.adx))?Number(s.adx).toFixed(1):'—'}</td>
 <td class="backtest-cell">${escapeHtml(backtestText(s))}</td>
-<td class="chart-anchor-cell${String(s.ticker)===String(selected)?' selected-anchor':''}" data-chart-anchor>${String(s.ticker)===String(selected)?'차트 표시 중':' '}</td></tr>`;
+<td class="chart-anchor-cell"> </td></tr>`;
   }).join('');
   const status=`${CATEGORY[state.category].short} · ${data?.market_date||'—'} · ${items.length.toLocaleString()}개 · 가격수신 ${Number(data?.coverage_pct||0).toFixed(1)}%`;
   $('#sheetStatusCell').textContent=status;$('#bottomStatus').textContent=status;updateSortHeaders();
@@ -118,10 +131,11 @@ function renderSheet(){
 
 function hideChartOverlay(){const overlay=$('#sheetChartOverlay');if(overlay){overlay.hidden=true;overlay.innerHTML='';}}
 function positionChartOverlay(row){
-  const overlay=$('#sheetChartOverlay'),scroll=$('#sheetScroll'),cell=$('[data-chart-anchor]',row);if(!overlay||!scroll||!cell)return false;
+  const overlay=$('#sheetChartOverlay'),scroll=$('#sheetScroll'),cell=$('[data-chart-start]',row);if(!overlay||!scroll||!cell)return false;
   const sr=scroll.getBoundingClientRect(),cr=cell.getBoundingClientRect();
   const top=cr.top-sr.top+scroll.scrollTop, left=cr.left-sr.left+scroll.scrollLeft;
-  overlay.style.top=`${Math.round(top)}px`;overlay.style.left=`${Math.round(left)}px`;overlay.style.width=`${Math.max(520,Math.round(cr.width))}px`;
+  const visibleWidth=Math.max(760,Math.round(sr.right-Math.max(sr.left,cr.left)-8));
+  overlay.style.top=`${Math.round(top)}px`;overlay.style.left=`${Math.round(left)}px`;overlay.style.width=`${visibleWidth}px`;
   overlay.style.height='324px';overlay.hidden=false;return true;
 }
 async function hydrateSelectedChart(ticker){
@@ -143,15 +157,45 @@ function drawSheetChart(el,detail,stock){
   for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+5}" y="${y+3}" class="price-axis">${label}</text>`;}
   const bw=Math.max(1.2,Math.min(4.8,step*.58));let candles='';rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,cls=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${cls}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${cls}"><title>${escapeHtml(r.date)} O ${o} H ${h} L ${l} C ${c}</title></rect>`;});
   function paths(valueKey,dirKey,upClass,downClass){let up='',down='',u=false,d=false;rows.forEach((r,i)=>{const v=numberOrNaN(r[valueKey]),dir=numberOrNaN(r[dirKey]);if(!Number.isFinite(v)){u=d=false;return;}if(dir>0){up+=`${u?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}else if(dir<0){down+=`${d?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}else{u=d=false;}});return `<path d="${up}" class="${upClass}"/><path d="${down}" class="${downClass}"/>`;}
-  const dates=`<text x="${X(0)}" y="${H-4}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-4}" text-anchor="end" class="date-axis">${escapeHtml(rows.at(-1).date.slice(5))}</text>`;const isUS=String(stock.category||'').startsWith('US');
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${paths('weekly_supertrend','weekly_direction','st-w-up','st-w-down')}${dates}</svg><div class="chart-legend"><span>ST_D 실선</span><span>ST_W 점선</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-open-hint">${isUS?'TradingView':'토스증권'} 차트 열기 ↗</div><button class="chart-open-hit" type="button" data-open-external="${escapeHtml(stock.ticker)}" aria-label="외부 차트 열기"></button>`;
+  const dates=`<text x="${X(0)}" y="${H-4}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-4}" text-anchor="end" class="date-axis">${escapeHtml(rows.at(-1).date.slice(5))}</text>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${paths('weekly_supertrend','weekly_direction','st-w-up','st-w-down')}${dates}</svg><div class="chart-legend"><span>ST_D 실선</span><span>ST_W 점선</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-actions"><button class="chart-action-btn toss" type="button" data-open-external="${escapeHtml(stock.ticker)}">토스증권 열기 ↗</button><button class="chart-action-btn close" type="button" data-close-chart>닫기</button></div>`;
 }
 
-function tossProductCode(stock){const existing=String(stock?.toss_product_code||'').trim().toUpperCase();if(existing)return existing;const raw=String(stock?.symbol||stock?.ticker||'').trim().toUpperCase().replace(/\.(KS|KQ)$/i,'');if(/^[0-9A-Z]{6}$/.test(raw))return `A${raw}`;if(/^A[0-9A-Z]{6}$/.test(raw))return raw;return '';}
-function openTossChart(stock){const code=tossProductCode(stock);window.open(code?`https://www.tossinvest.com/stocks/${encodeURIComponent(code)}/order`:'https://www.tossinvest.com/','_blank','noopener,noreferrer');}
-function tradingViewSymbol(stock){const raw=String(stock?.symbol||stock?.ticker||'').trim().replace(/-/g,'.').replace(/\.(KS|KQ)$/i,'');const ex=String(stock?.exchange||'').toUpperCase();let p='NASDAQ';if(ex==='NYSE')p='NYSE';else if(ex.includes('AMERICAN')||ex.includes('ARCA')||ex==='AMEX')p='AMEX';else if(ex.includes('CBOE')||ex.includes('BZX')||ex==='BATS')p='BATS';return `${p}:${raw}`;}
-function openTradingView(stock){window.open(`https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tradingViewSymbol(stock))}`,'_blank','noopener,noreferrer');}
-function openExternal(stock){if(String(stock?.category||'').startsWith('US'))openTradingView(stock);else openTossChart(stock);}
+function tossProductCode(stock){const existing=String(stock?.toss_product_code||'').trim().toUpperCase();if(existing)return existing;const raw=String(stock?.symbol||stock?.ticker||'').trim().toUpperCase().replace(/\.(KS|KQ)$/i,'');if(String(stock?.category||'').startsWith('KR')){if(/^[0-9A-Z]{6}$/.test(raw))return `A${raw}`;if(/^A[0-9A-Z]{6}$/.test(raw))return raw;}return '';}
+function tossDisplaySymbol(stock){return String(stock?.symbol||stock?.ticker||'').trim().toUpperCase().replace(/\.(KS|KQ)$/i,'').replace(/-/g,'.');}
+function tossSearchHits(payload){if(Array.isArray(payload))return payload.filter(x=>x&&typeof x==='object');if(!payload||typeof payload!=='object')return [];for(const key of ['result','data'])if(Array.isArray(payload[key]))return payload[key].filter(x=>x&&typeof x==='object');return [];}
+function tossInfoResult(payload){if(!payload||typeof payload!=='object')return null;const value=payload.result&&typeof payload.result==='object'&&!Array.isArray(payload.result)?payload.result:payload;return value&&typeof value==='object'?value:null;}
+async function resolveTossProductCode(stock){
+  const direct=tossProductCode(stock);if(direct)return direct;
+  const ticker=tossDisplaySymbol(stock);if(!ticker)return '';
+  // Current Toss WTS exposes a symbol-to-product-code resolver. Prefer it for US stocks/ETFs.
+  try{
+    const response=await fetch(`https://wts-info-api.tossinvest.com/api/v2/stock-infos/code-or-symbol/${encodeURIComponent(ticker)}`,{headers:{'Accept':'application/json'}});
+    if(response.ok){
+      const info=tossInfoResult(await response.json());
+      const code=String(info?.code||info?.stockCode||'').trim().toUpperCase();
+      if(code){stock.toss_product_code=code;return code;}
+    }
+  }catch(_){/* fall through to search resolver */}
+  try{
+    const response=await fetch('https://wts-info-api.tossinvest.com/api/v1/search-all/wts-auto-complete',{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({query:ticker})});
+    if(!response.ok)return '';
+    const hits=tossSearchHits(await response.json());
+    const tickerNorm=ticker.replace(/\./g,'-');
+    const chosen=hits.find(h=>String(h.symbol||'').trim().toUpperCase().replace(/\./g,'-')===tickerNorm&&h.stockCode)||hits.find(h=>h.stockCode);
+    const code=String(chosen?.stockCode||'').trim().toUpperCase();if(code)stock.toss_product_code=code;return code;
+  }catch(_){return '';}
+}
+async function openTossChart(stock){
+  const popup=window.open('about:blank','_blank');if(!popup)return;
+  try{popup.document.title='토스증권 여는 중';popup.document.body.innerHTML='<p style="font-family:sans-serif;padding:20px">토스증권 종목 페이지를 여는 중입니다...</p>';}catch(_){/* ignore */}
+  const code=await resolveTossProductCode(stock);
+  const symbol=tossDisplaySymbol(stock);
+  if(!code&&navigator.clipboard?.writeText&&symbol){navigator.clipboard.writeText(symbol).catch(()=>{});$('#bottomStatus').textContent=`토스 종목코드를 찾지 못해 ${symbol} 티커를 복사했습니다.`;}
+  const url=code?`https://www.tossinvest.com/stocks/${encodeURIComponent(code)}/order`:'https://www.tossinvest.com/';
+  try{popup.location.replace(url);}catch(_){popup.location.href=url;}
+}
+function openExternal(stock){return openTossChart(stock);}
 
 function normalizeSearch(v){return String(v||'').trim().toLowerCase().replace(/\s+/g,'');}
 function searchScore(stock,q){
@@ -171,7 +215,7 @@ async function findBestStock(query){
 async function jumpToSearch(query){
   const input=$('#formulaInput'),q=String(query||'').trim();if(!q)return;const previous=input.value;input.value='검색 중...';input.disabled=true;
   try{const best=await findBestStock(q);if(!best){input.value=previous;$('#bottomStatus').textContent=`'${q}' 검색 결과 없음`;return;}
-    const cat=best.category;state.capMin[sizeMode(cat)]=Number(CAP_FILTER_PRESETS[sizeMode(cat)][0][0]);await switchSheet(cat,false);state.searchOverrideTicker=best.ticker;state.selectedTicker=best.ticker;renderCapSelect();renderSheet();await selectRow(best.ticker,{scroll:true});$('#bottomStatus').textContent=`검색: ${best.name} (${best.symbol||best.ticker})`;
+    const cat=best.category;state.capMin[cat]=Number(CAP_FILTER_PRESETS[cat]?.[0]?.[0]||0);await switchSheet(cat,false);state.searchOverrideTicker=best.ticker;state.selectedTicker=best.ticker;renderCapSelect();renderSheet();await selectRow(best.ticker,{scroll:true});$('#bottomStatus').textContent=`검색: ${best.name} (${best.symbol||best.ticker})`;
   }catch(err){console.error(err);input.value=previous;$('#bottomStatus').textContent='종목 검색 실패';}finally{input.disabled=false;input.focus();input.select();}
 }
 
@@ -621,11 +665,14 @@ async function newQuizQuestion(forcePool=false) {
 
 
 
-$('#capSelect')?.addEventListener('change',e=>{state.capMin[sizeMode()]=Number(e.target.value)||0;state.selectedTicker=null;state.searchOverrideTicker=null;hideChartOverlay();renderSheet();});
+$('#capSelect')?.addEventListener('change',e=>{state.capMin[state.category]=Number(e.target.value)||0;state.selectedTicker=null;state.searchOverrideTicker=null;hideChartOverlay();renderSheet();});
 $('.sheet-nav')?.addEventListener('click',e=>{const b=e.target.closest('[data-sheet]');if(b)void switchSheet(b.dataset.sheet);});
 $('.header-row')?.addEventListener('click',e=>{const th=e.target.closest('[data-sort]');if(!th)return;const key=th.dataset.sort;if(!SORT_KEYS.has(key))return;if(state.sort.key===key)state.sort.dir=state.sort.dir==='asc'?'desc':'asc';else{state.sort.key=key;state.sort.dir=sortDirectionForNewKey(key);}renderSheet();});
 $('#sheetBody')?.addEventListener('click',e=>{const row=e.target.closest('tr[data-ticker]');if(row)void selectRow(row.dataset.ticker);});
-$('#sheetChartOverlay')?.addEventListener('click',e=>{const external=e.target.closest('[data-open-external]');if(!external)return;e.preventDefault();e.stopPropagation();const stock=stockByTicker(external.dataset.openExternal);if(stock)openExternal(stock);});
+$('#sheetChartOverlay')?.addEventListener('click',e=>{
+  const close=e.target.closest('[data-close-chart]');if(close){e.preventDefault();e.stopPropagation();state.selectedTicker=null;hideChartOverlay();renderSheet();return;}
+  const external=e.target.closest('[data-open-external]');if(!external)return;e.preventDefault();e.stopPropagation();const stock=stockByTicker(external.dataset.openExternal);if(stock)void openExternal(stock);
+});
 $('#formulaInput')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();void jumpToSearch(e.currentTarget.value);}});
 $('#formulaInput')?.addEventListener('focus',e=>{e.currentTarget.select();});
 $('#newQuizBtn')?.addEventListener('click',()=>void newQuizQuestion(false));
