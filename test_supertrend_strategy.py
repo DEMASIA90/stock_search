@@ -5,7 +5,7 @@ import pandas as pd
 from supertrend_strategy import (
     SUPER_TREND_PERIOD, SUPER_TREND_MULTIPLIER, adx, supertrend,
     add_up_flip_reference, weekly_supertrend_asof_daily, classify_dual_supertrend,
-    signal_series, compute_buy_cycles, analyze,
+    signal_series, compute_buy_cycles, analyze, _current_case1_age,
 )
 
 
@@ -73,15 +73,24 @@ class DualSupertrendTests(unittest.TestCase):
         self.assertEqual(int(a.W_ST_DIR), int(b.W_ST_DIR))
 
     def test_opinion_table(self):
-        # Both directions DOWN -> 매도
-        self.assertEqual(classify_dual_supertrend(-1,90,100,2,-1,95,100,2)[0],"SELL")
-        # Exactly one DOWN -> 매도 고려, even if other timeframe gate passes.
-        self.assertEqual(classify_dual_supertrend(1,110,100,2,-1,95,100,2)[0],"SELL_CONSIDER")
-        # Both UP: case combinations.
+        # CASE1 has absolute priority regardless of CASE2 / weekly direction.
+        self.assertEqual(classify_dual_supertrend(1,110,100,2,-1,95,100,2)[0],"BUY")
         self.assertEqual(classify_dual_supertrend(1,110,100,2,1,120,110,2)[0],"BUY")
-        self.assertEqual(classify_dual_supertrend(1,110,100,2,1,105,110,2)[0],"SHORT_BUY")
-        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,120,110,2)[0],"LONG_BUY")
-        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,105,110,2)[0],"HOLD")
+        # CASE2 only + ST_D UP -> HOLD.
+        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,120,110,2)[0],"HOLD")
+        # CASE2 only + ST_D DOWN -> Consider Sell.
+        self.assertEqual(classify_dual_supertrend(-1,95,100,2,1,120,110,2)[0],"SELL_CONSIDER")
+        # Everything else -> Sell.
+        self.assertEqual(classify_dual_supertrend(-1,90,100,2,-1,95,100,2)[0],"SELL")
+        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,105,110,2)[0],"SELL")
+
+    def test_buy_age_uses_first_current_case1_day_and_calendar_days(self):
+        idx = pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"])
+        d = pd.DataFrame({"CASE1":[False, True, True, True]}, index=idx)
+        signal_date, age_days, age_sessions = _current_case1_age(d)
+        self.assertEqual(signal_date, "2026-08-21")
+        self.assertEqual(age_days, 4)  # weekend is included in (+N)
+        self.assertEqual(age_sessions, 2)
 
     def test_backtest_buy_to_sell(self):
         idx=pd.bdate_range("2025-01-01",periods=8)
@@ -90,7 +99,7 @@ class DualSupertrendTests(unittest.TestCase):
             "High":[101,103,108,112,115,111,109,108],
             "Low":[99,100,101,102,103,104,105,106],
             "Close":[100,102,105,108,110,109,108,107],
-            "opinion_code":["HOLD","BUY","SHORT_BUY","HOLD","SELL_CONSIDER","SELL_CONSIDER","SELL","HOLD"],
+            "opinion_code":["SELL","BUY","BUY","HOLD","SELL_CONSIDER","SELL_CONSIDER","SELL","HOLD"],
         },index=idx)
         out=compute_buy_cycles(d,years=2)
         self.assertEqual(out["completed_events"],1)
@@ -104,13 +113,17 @@ class DualSupertrendTests(unittest.TestCase):
         sig=signal_series(df)
         for col in ("ADX","W_ST","W_ST_DIR","CASE1","CASE2","opinion_code"):
             self.assertIn(col,sig.columns)
-        self.assertIn(str(sig.iloc[-1].opinion_code),{"BUY","SHORT_BUY","LONG_BUY","HOLD","SELL_CONSIDER","SELL"})
+        self.assertIn(str(sig.iloc[-1].opinion_code),{"BUY","HOLD","SELL_CONSIDER","SELL"})
         result=analyze(df)
         self.assertTrue(result["available"])
         self.assertEqual(len(result["chart"]),126)
         self.assertIn("weekly_supertrend",result["chart"][-1])
         self.assertIn("st_d_direction",result)
         self.assertIn("st_w_direction",result)
+        self.assertIn("buy_age_days",result)
+        self.assertIn("buy_signal_date",result)
+        if result["opinion_code"] == "BUY":
+            self.assertRegex(result["opinion_label"], r"^BUY \(\+\d+\)$")
 
 
 if __name__ == '__main__':

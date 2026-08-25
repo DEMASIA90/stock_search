@@ -47,10 +47,11 @@ TOSS_BROWSER_HEADERS = {
 # Opinion engine: daily + weekly SuperTrend(14,2) gates. ADX(14,14) is reference-only.
 #   CASE1 = ST_D UP and current ST_D >= final DOWN ST_D immediately before latest flip.
 #   CASE2 = ST_W UP and current ST_W >= final DOWN ST_W immediately before latest flip.
-#   CASE1&2 -> 매수; CASE1 only -> 단기 매수; CASE2 only -> 장기 매수.
-#   ST_D/ST_W both DOWN -> 매도; exactly one DOWN -> 매도 고려; otherwise HOLD.
-# Ranking: 매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도, then market size.
-# Backtest: 2Y first 매수(CASE1&2) -> first 매도(both DOWN); completed-cycle peak-return median.
+#   CASE1 -> BUY (CASE2 irrelevant).
+#   CASE2 + CASE1 false + ST_D UP -> HOLD.
+#   CASE2 + CASE1 false + ST_D DOWN -> Consider Sell. Everything else -> Sell.
+# Ranking: BUY (+N smallest first) -> HOLD -> Consider Sell -> Sell, then market size.
+# Backtest: 2Y first BUY(CASE1) -> first Sell under the same opinion table.
 # KR OHLC: Toss WTS c-chart. US OHLC: TradingView public chart websocket.
 # Chart: ~6 months source-native OHLC + ST_D solid + developing ST_W dashed.
 # -----------------------------------------------------------------------------
@@ -84,8 +85,14 @@ NAVER_ETF_MARKET_SUM_UNIT_KRW = 100_000_000.0  # marketSum is reported in KRW 10
 MIN_TRADING_DAYS = 604  # required by SuperTrend spec: ~504 test bars + 100 discarded warm-up bars
 DISPLAY_META_TOP_N = 1000
 MIN_PRICE_KRW = 1_000.0
-MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0  # equities only, inherited universe rule
+KR_MIN_MARKET_SIZE_KRW = 1_000_000_000_000.0
+US_MIN_MARKET_SIZE_KRW = 10_000_000_000_000.0
 ETF_CATEGORIES = {"KR_ETF", "US_ETF"}
+
+
+def equity_market_size_min_krw(category: str) -> float:
+    """Hard server-side market-size floor for ordinary equities only."""
+    return KR_MIN_MARKET_SIZE_KRW if str(category).upper() == "KR" else US_MIN_MARKET_SIZE_KRW
 
 # A symbol that survives the official exchange filters but still has no Yahoo
 # daily data after a healthy FULL scan is temporarily quarantined. This stops
@@ -742,7 +749,7 @@ def _prefilter_us_equities_from_yahoo_screener(
 ) -> tuple[list[Stock], dict]:
     """Best-effort bulk prefilter for US equities using Yahoo's screener API.
 
-    We query at 80% of the app's hard 10T-KRW threshold, then intersect the
+    We query at 80% of the app's hard US 10T-KRW threshold, then intersect the
     result with the Nasdaq Trader common-equity universe. The 20% buffer avoids
     boundary omissions from FX/intraday market-cap differences. If yfinance's
     screener is unavailable, pagination is incomplete, or the result is
@@ -756,7 +763,7 @@ def _prefilter_us_equities_from_yahoo_screener(
     if not callable(screen_fn) or query_cls is None:
         return universe, {"used": False, "reason": "yfinance_screen_api_unavailable"}
 
-    min_native = (MIN_MARKET_SIZE_KRW / fx) * 0.80
+    min_native = (equity_market_size_min_krw("US") / fx) * 0.80
     page_size = 250
     max_pages = 20
     quotes: list[dict] = []
@@ -832,13 +839,13 @@ def _prefilter_us_equities_from_yahoo_screener(
             raise RuntimeError(f"Yahoo screener intersection implausibly small: {len(selected)}")
         print(
             f"[US] Yahoo bulk market-cap prefilter: {len(universe):,} -> {len(selected):,} "
-            f"(query floor ~KRW {MIN_MARKET_SIZE_KRW*0.80/1e12:.1f}T, exact 10T filter still applied later)"
+            f"(query floor ~KRW {equity_market_size_min_krw('US')*0.80/1e12:.1f}T, exact 10T filter still applied later)"
         )
         return selected, {
             "used": True,
             "input": len(universe),
             "selected": len(selected),
-            "query_floor_krw": MIN_MARKET_SIZE_KRW * 0.80,
+            "query_floor_krw": equity_market_size_min_krw("US") * 0.80,
             "quotes": len(quotes),
             "reported_total": total,
         }
@@ -861,7 +868,7 @@ def _cached_quick_size_prefilter(
     """
     if scan_mode != "QUICK" or category != "US":
         return universe, 0
-    cutoff = MIN_MARKET_SIZE_KRW * 0.75
+    cutoff = equity_market_size_min_krw("US") * 0.75
     kept: list[Stock] = []
     skipped = 0
     for stock in universe:
@@ -901,8 +908,9 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if size_info is None:
             return None, "market_size_unavailable"
         market_size_native, market_size_krw, market_size_basis = size_info
-        if market_size_krw < MIN_MARKET_SIZE_KRW:
-            return None, "market_size_lt_10t"
+        min_market_size = equity_market_size_min_krw(stock.category)
+        if market_size_krw < min_market_size:
+            return None, "market_size_lt_min"
 
     # DTC v14.4: exact-source OHLC + daily/weekly SuperTrend(14,2); ADX(14,14) is reference-only.
     st_data = analyze_supertrend(frame, period=14, multiplier=2.0, market=stock.category)
@@ -927,8 +935,11 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "_supertrend_research": st_research,
         "opinion": st_data.get("opinion", "Hold"),
         "opinion_code": st_data.get("opinion_code", "HOLD"),
-        "opinion_label": st_data.get("opinion_label", "Hold"),
-        "rank_level": int(st_data.get("rank_level", OPINION_ORDER["HOLD"])),
+        "opinion_label": st_data.get("opinion_label", "Sell"),
+        "rank_level": int(st_data.get("rank_level", OPINION_ORDER["SELL"])),
+        "buy_signal_date": st_data.get("buy_signal_date"),
+        "buy_age_days": st_data.get("buy_age_days"),
+        "buy_age_sessions": st_data.get("buy_age_sessions"),
         "adx": clean(st_data.get("adx"), 2),
         "st_d_direction": st_data.get("st_d_direction"),
         "st_w_direction": st_data.get("st_w_direction"),
@@ -1027,10 +1038,13 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "day_change_amount": item.get("day_change_amount"),
         "day_change_pct": item["day_change_pct"],
         "rank": item["rank"],
-        "opinion": item.get("opinion", "Hold"),
-        "opinion_code": item.get("opinion_code", "HOLD"),
-        "opinion_label": item.get("opinion_label", "Hold"),
-        "rank_level": item.get("rank_level", OPINION_ORDER["HOLD"]),
+        "opinion": item.get("opinion", "Sell"),
+        "opinion_code": item.get("opinion_code", "SELL"),
+        "opinion_label": item.get("opinion_label", "Sell"),
+        "rank_level": item.get("rank_level", OPINION_ORDER["SELL"]),
+        "buy_signal_date": item.get("buy_signal_date", st.get("buy_signal_date")),
+        "buy_age_days": item.get("buy_age_days", st.get("buy_age_days")),
+        "buy_age_sessions": item.get("buy_age_sessions", st.get("buy_age_sessions")),
         "adx": item.get("adx", st.get("adx")),
         "st_d_direction": item.get("st_d_direction", st.get("st_d_direction")),
         "st_w_direction": item.get("st_w_direction", st.get("st_w_direction")),
@@ -1063,15 +1077,13 @@ def _atomic_copy(src: Path, dst: Path) -> None:
 
 
 def _daily_opinion_distribution(items: list[dict]) -> list[dict]:
-    c = Counter(str(item.get("opinion_code") or "HOLD") for item in items)
+    c = Counter(str(item.get("opinion_code") or "SELL") for item in items)
     if not items:
         return []
     date = max((str(item.get("date") or "") for item in items), default="")
     return [{
         "date": date,
         "BUY": int(c["BUY"]),
-        "SHORT_BUY": int(c["SHORT_BUY"]),
-        "LONG_BUY": int(c["LONG_BUY"]),
         "HOLD": int(c["HOLD"]),
         "SELL_CONSIDER": int(c["SELL_CONSIDER"]),
         "SELL": int(c["SELL"]),
@@ -1095,10 +1107,10 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
         "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
         "completed_cycles": int(len(completed)),
         "signal_cycles": int(len(events)),
-        "entry": "first 매수(CASE1&CASE2) while flat; signal-day close",
-        "exit": "first 매도(ST_D DOWN and ST_W DOWN); signal-day close",
+        "entry": "first BUY(CASE1) while flat; signal-day close",
+        "exit": "first Sell under current CASE1/CASE2 table; signal-day close",
         "max_return": "maximum daily High return from entry through exit",
-        "headline": "median of completed 매수->매도 cycle maximum returns",
+        "headline": "median of completed BUY->Sell cycle maximum returns",
         "current_opinion_distribution": _daily_opinion_distribution(items),
     }
 
@@ -1117,32 +1129,30 @@ def _supertrend_report_markdown(category: str, diag: dict) -> str:
         "- ST_W: 주봉 SuperTrend(14,2), 현재 진행 중인 주 포함",
         "- CASE1: ST_D 상승 + 현재 ST_D >= 직전 하락 레그 마지막 ST_D",
         "- CASE2: ST_W 상승 + 현재 ST_W >= 직전 하락 레그 마지막 ST_W",
-        "- CASE1 & CASE2: 매수",
-        "- CASE1만: 단기 매수",
-        "- CASE2만: 장기 매수",
-        "- ST_D/ST_W 모두 하락: 매도",
-        "- 둘 중 하나만 하락: 매도 고려",
-        "- 나머지: HOLD",
+        "- CASE1 충족(CASE2 무관): BUY",
+        "- CASE2 충족 + CASE1 불충족 + ST_D 상승: HOLD",
+        "- CASE2 충족 + CASE1 불충족 + ST_D 하락: Consider Sell",
+        "- 그 외 전부: Sell",
+        "- BUY는 CASE1 최초 충족일을 +0으로 하여 현재까지 달력 일수 BUY (+N) 표시",
         "- ADX(14,14)는 표에만 표시하며 의견 판정에는 사용하지 않음",
         "",
-        "## 2년 매수→매도 Cycle Backtest",
+        "## 2년 BUY→Sell Cycle Backtest",
         "",
         f"- **완료 사이클 최고수익률 중위값: {med_text}**",
         f"- 완료 사이클: {diag.get('completed_cycles', 0)}회 / 신호 사이클: {diag.get('signal_cycles', 0)}회",
-        "- 진입: 포지션이 없을 때 최초 매수(CASE1&CASE2) 신호일 종가",
-        "- 청산: 최초 매도(ST_D와 ST_W 모두 하락) 신호일 종가",
+        "- 진입: 포지션이 없을 때 최초 BUY(CASE1) 신호일 종가",
+        "- 청산: 현재 4단계 의견표에서 최초 Sell 신호일 종가",
         "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 그 집합의 중위값",
         "- 미청산 사이클은 중위값에서 제외",
         "",
         "## 현재 의견 분포",
         "",
-        "| 날짜 | 매수 | 단기 매수 | 장기 매수 | HOLD | 매도 고려 | 매도 | 합계 |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| 날짜 | BUY | HOLD | Consider Sell | Sell | 합계 |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for row in diag.get("current_opinion_distribution") or []:
         lines.append(
-            f"| {row['date']} | {row['BUY']} | {row['SHORT_BUY']} | {row['LONG_BUY']} | {row['HOLD']} | "
-            f"{row['SELL_CONSIDER']} | {row['SELL']} | {row['total']} |"
+            f"| {row['date']} | {row['BUY']} | {row['HOLD']} | {row['SELL_CONSIDER']} | {row['SELL']} | {row['total']} |"
         )
     lines += [
         "",
@@ -1338,9 +1348,9 @@ def scan_category(
     print("=" * 76)
     print(f"DTC v14.4 Excel Dual-ST | {category} | mode={scan_mode} | universe={len(universe):,} | restricted={len(restricted):,}")
     if category in ETF_CATEGORIES:
-        print("ETF universe = fixed user whitelist; equity 10T market-size filter = exempt")
+        print("ETF universe = fixed user whitelist; equity market-size filter = exempt")
     else:
-        print(f"equity market-size filter >= KRW {MIN_MARKET_SIZE_KRW/1e12:.0f}T")
+        print(f"equity market-size filter >= KRW {equity_market_size_min_krw(category)/1e12:.0f}T")
     print("=" * 76)
 
     results: dict[str, dict] = {}
@@ -1367,9 +1377,9 @@ def scan_category(
             if str(entry.get("source") or "") != "krx_MDCSTAT01501":
                 return True
             cap = finite(entry.get("value"))
-            return not np.isfinite(cap) or cap >= MIN_MARKET_SIZE_KRW
+            return not np.isfinite(cap) or cap >= equity_market_size_min_krw("KR")
         scan_universe = [s for s in scan_universe if official_cap_ok(s)]
-        rejection["krx_market_size_lt_10t_prefilter"] += before - len(scan_universe)
+        rejection["krx_market_size_lt_min_prefilter"] += before - len(scan_universe)
 
     us_bulk_prefilter_meta = {"used": False, "reason": "not_us"}
     if category == "US":
@@ -1393,7 +1403,7 @@ def scan_category(
     print(
         f"[{category}] exact-price universe={len(scan_universe):,} | source={source_name} "
         f"| KRX-stale={rejection['not_in_current_krx_snapshot']:,} "
-        f"| size-prefilter={rejection['krx_market_size_lt_10t_prefilter'] + rejection['cached_small_quick_prefilter']:,}"
+        f"| size-prefilter={rejection['krx_market_size_lt_min_prefilter'] + rejection['cached_small_quick_prefilter']:,}"
     )
 
     if scan_universe:
@@ -1552,8 +1562,8 @@ def scan_category(
 
 
     if category not in ETF_CATEGORIES:
-        size_attempted = rejection["market_size_lt_10t"] + rejection["market_size_unavailable"] + len(results)
-        size_success = rejection["market_size_lt_10t"] + len(results)
+        size_attempted = rejection["market_size_lt_min"] + rejection["market_size_unavailable"] + len(results)
+        size_success = rejection["market_size_lt_min"] + len(results)
         size_coverage = size_success / max(1, size_attempted)
         if size_attempted >= 10 and size_coverage < MARKET_SIZE_MIN_LOOKUP_COVERAGE:
             raise RuntimeError(
@@ -1563,16 +1573,17 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Dual-ST opinion ranking: 매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도.
-    # Same-level default is market cap/AUM descending.
+    # Opinion ranking: BUY -> HOLD -> Consider Sell -> Sell.
+    # BUY rows are ordered by the smallest (+N) age first, then market size.
     unsorted_items = list(results.values())
     backtest_refreshed = True
     backtest_diagnostics = _aggregate_supertrend_backtest(category, unsorted_items)
 
     def _rank_key(item: dict):
-        level = int(item.get("rank_level", OPINION_ORDER["HOLD"]))
+        level = int(item.get("rank_level", OPINION_ORDER["SELL"]))
         cap = finite(item.get("market_size_krw"), -1.0)
-        return (level, -cap, item.get("symbol", ""))
+        buy_age = finite(item.get("buy_age_days"), float("inf")) if str(item.get("opinion_code") or "").upper() == "BUY" else float("inf")
+        return (level, buy_age, -cap, item.get("symbol", ""))
 
     items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
@@ -1633,7 +1644,7 @@ def scan_category(
         "universe_count": len(universe),
         "price_download_universe_count": expected_price_count,
         "krx_stale_prefilter_count": rejection["not_in_current_krx_snapshot"],
-        "market_size_prefilter_count": rejection["krx_market_size_lt_10t_prefilter"] + rejection["cached_small_quick_prefilter"],
+        "market_size_prefilter_count": rejection["krx_market_size_lt_min_prefilter"] + rejection["cached_small_quick_prefilter"],
         "us_bulk_marketcap_prefilter": us_bulk_prefilter_meta,
         "yahoo_quarantine_count": 0,
         "market_data_source": source_name,
@@ -1642,8 +1653,8 @@ def scan_category(
         "coverage_pct": round(coverage * 100, 1),
         "passed_count": len(items),
         "quiz_pool_count_ge_100t": quiz_count,
-        "market_size_min_krw": None if category in ETF_CATEGORIES else MIN_MARKET_SIZE_KRW,
-        "market_size_filter": "exempt" if category in ETF_CATEGORIES else "krw_10t_min",
+        "market_size_min_krw": None if category in ETF_CATEGORIES else equity_market_size_min_krw(category),
+        "market_size_filter": "exempt" if category in ETF_CATEGORIES else f"krw_{equity_market_size_min_krw(category)/1e12:g}t_min",
         "market_size_lookup_coverage_pct": round(size_coverage * 100, 1) if np.isfinite(size_coverage) else None,
         "usdkrw_source": usdkrw_source if category.startswith("US") else None,
         "thresholds": thresholds,
@@ -1653,18 +1664,16 @@ def scan_category(
             "supertrend_daily": "14,2",
             "supertrend_weekly": "14,2 (developing current week included)",
             "adx": "ADX(14,14), reference only",
-            "opinion_order": ["BUY", "SHORT_BUY", "LONG_BUY", "HOLD", "SELL_CONSIDER", "SELL"],
+            "opinion_order": ["BUY", "HOLD", "SELL_CONSIDER", "SELL"],
             "case1": "ST_D UP and current ST_D >= last DOWN ST_D immediately before the latest DOWN->UP flip",
             "case2": "ST_W UP and current ST_W >= last DOWN ST_W immediately before the latest DOWN->UP flip",
-            "buy": "CASE1 & CASE2",
-            "short_buy": "CASE1 only while both timeframes remain UP",
-            "long_buy": "CASE2 only while both timeframes remain UP",
-            "sell": "ST_D DOWN and ST_W DOWN",
-            "sell_consider": "exactly one of ST_D/ST_W is DOWN",
-            "otherwise": "HOLD",
-            "ranking": "매수 -> 단기/장기 매수 -> HOLD -> 매도 고려 -> 매도; same level market size descending",
-            "ohlc_source": "Toss WTS c-chart for KR/KR_ETF; TradingView public chart websocket for US/US_ETF; no Yahoo fallback",
-            "chart": "126 source-native daily candles + ST_D solid + live ST_W dashed; KR chart opens Toss, US chart opens TradingView",
+            "buy": "CASE1; CASE2 irrelevant; label BUY (+N) from first CASE1-satisfied calendar date",
+            "hold": "CASE2 true, CASE1 false, ST_D UP",
+            "sell_consider": "CASE2 true, CASE1 false, ST_D DOWN",
+            "sell": "all remaining states",
+            "ranking": "BUY -> HOLD -> Consider Sell -> Sell; BUY ordered by smaller +N first, then market size descending",
+            "ohlc_source": "Toss WTS c-chart for KR/KR_ETF; TradingView public chart websocket for US/US_ETF; no Yahoo OHLC fallback",
+            "chart": "126 source-native daily candles + ST_D solid + live ST_W dashed; external chart button always opens TossInvest",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },

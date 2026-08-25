@@ -20,20 +20,22 @@ MIN_REQUIRED_BARS = 604
 
 OPINION_ORDER = {
     "BUY": 0,
+    "HOLD": 1,
+    "SELL_CONSIDER": 2,
+    "SELL": 3,
+    # Legacy codes are retained only so an old cached summary remains sortable
+    # if a market refresh is intentionally rolled back.
     "SHORT_BUY": 1,
     "LONG_BUY": 1,
-    "HOLD": 2,
-    "SELL_CONSIDER": 3,
-    "SELL": 4,
 }
 
 OPINION_LABEL = {
-    "BUY": "매수",
-    "SHORT_BUY": "단기 매수",
-    "LONG_BUY": "장기 매수",
+    "BUY": "BUY",
     "HOLD": "HOLD",
-    "SELL_CONSIDER": "매도 고려",
-    "SELL": "매도",
+    "SELL_CONSIDER": "Consider Sell",
+    "SELL": "Sell",
+    "SHORT_BUY": "BUY",
+    "LONG_BUY": "HOLD",
 }
 
 
@@ -456,25 +458,25 @@ def classify_dual_supertrend(
     w_ref: Any,
     w_age: Any,
 ) -> tuple[str, str, bool, bool]:
-    """Daily/weekly gate opinion table requested for DTC v14.4."""
+    """DTC dual-SuperTrend opinion table.
+
+    CASE1 has absolute priority. CASE2 is consulted only when CASE1 is false:
+      1) CASE1 -> BUY (CASE2 irrelevant)
+      2) CASE2 + ST_D UP -> HOLD
+      3) CASE2 + ST_D DOWN -> Consider Sell
+      4) everything else -> Sell
+    """
     d_dir, w_dir = int(d_direction), int(w_direction)
     case1 = _gate(d_dir, d_st, d_ref, d_age)
     case2 = _gate(w_dir, w_st, w_ref, w_age)
 
-    # Directional sell states have priority.  Thus one timeframe DOWN cannot be
-    # labeled a buy merely because the other timeframe has passed its gate.
-    if d_dir == -1 and w_dir == -1:
-        return "SELL", "ST_D 하락 · ST_W 하락", case1, case2
-    if d_dir == -1 or w_dir == -1:
-        return "SELL_CONSIDER", "ST_D 또는 ST_W 중 하나가 하락", case1, case2
-    if d_dir == 1 and w_dir == 1:
-        if case1 and case2:
-            return "BUY", "CASE1 · CASE2 동시 충족", case1, case2
-        if case1:
-            return "SHORT_BUY", "CASE1만 충족", case1, case2
-        if case2:
-            return "LONG_BUY", "CASE2만 충족", case1, case2
-    return "HOLD", "양 시간축 매수 게이트 미충족", case1, case2
+    if case1:
+        return "BUY", "CASE1 충족 (CASE2 무관)", case1, case2
+    if case2 and d_dir == 1:
+        return "HOLD", "CASE2 충족 · CASE1 불충족 · ST_D 상승", case1, case2
+    if case2 and d_dir == -1:
+        return "SELL_CONSIDER", "CASE2 충족 · CASE1 불충족 · ST_D 하락", case1, case2
+    return "SELL", "CASE1/CASE2 매수·보유 조건 외", case1, case2
 
 
 def signal_series(
@@ -517,8 +519,8 @@ def _date_text(ts: Any) -> str:
 def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> dict[str, Any]:
     """Backtest the strongest combined BUY opinion under the new dual-ST rules.
 
-    Entry is the first BUY (CASE1&CASE2) while flat at signal-day Close.  Exit is
-    the first full SELL (both ST_D and ST_W DOWN) at signal-day Close.  The
+    Entry is the first BUY (CASE1) while flat at signal-day Close. Exit is
+    the first Sell opinion under the current four-state table at signal-day Close. The
     headline result preserves DTC's existing convention: median of each completed
     cycle's maximum High return from entry through exit.
     """
@@ -562,7 +564,7 @@ def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> d
                 "_entry_ts": pd.Timestamp(d.index[i]),
                 "time": _date_text(d.index[i]),
                 "opinion_code": "BUY",
-                "opinion": "매수",
+                "opinion": "BUY",
                 "entry_price": close,
                 "completed": False,
                 "exit_time": "",
@@ -600,6 +602,25 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _current_case1_age(signals: pd.DataFrame) -> tuple[str | None, int | None, int | None]:
+    """Return current CASE1 run start date, calendar days and trading sessions.
+
+    The first day CASE1 becomes true is +0. Calendar-day age is shown to the
+    user; trading-session age is retained as useful diagnostic metadata.
+    """
+    if signals is None or signals.empty or "CASE1" not in signals.columns:
+        return None, None, None
+    flags = signals["CASE1"].fillna(False).astype(bool).to_numpy()
+    if len(flags) == 0 or not bool(flags[-1]):
+        return None, None, None
+    start = len(flags) - 1
+    while start > 0 and bool(flags[start - 1]):
+        start -= 1
+    start_ts = pd.Timestamp(signals.index[start]).normalize()
+    now_ts = pd.Timestamp(signals.index[-1]).normalize()
+    return start_ts.date().isoformat(), max(0, int((now_ts - start_ts).days)), int(len(flags) - 1 - start)
+
+
 def analyze(
     df: pd.DataFrame,
     period: int = SUPER_TREND_PERIOD,
@@ -622,8 +643,10 @@ def analyze(
             "rank_level": OPINION_ORDER["HOLD"],
         }
     row = signals.iloc[-1]
-    op = str(row.get("opinion_code") or "HOLD")
+    op = str(row.get("opinion_code") or "SELL")
     reason = str(row.get("reason") or "")
+    buy_signal_date, buy_age_days, buy_age_sessions = _current_case1_age(signals) if op == "BUY" else (None, None, None)
+    opinion_label = f"BUY (+{buy_age_days})" if op == "BUY" and buy_age_days is not None else OPINION_LABEL.get(op, op)
     adx_value = _safe_float(row.get("ADX"))
     d_st = _safe_float(row.get("ST")); w_st = _safe_float(row.get("W_ST"))
     d_dir = int(row.get("ST_DIR", 0) or 0); w_dir = int(row.get("W_ST_DIR", 0) or 0)
@@ -659,8 +682,11 @@ def analyze(
         "model": "Dual SuperTrend Gate",
         "period": int(period), "multiplier": float(multiplier),
         "adx_di_length": ADX_DI_LENGTH, "adx_smoothing": ADX_SMOOTHING,
-        "opinion": OPINION_LABEL.get(op, op), "opinion_code": op, "opinion_label": OPINION_LABEL.get(op, op),
-        "rank_level": int(OPINION_ORDER.get(op, OPINION_ORDER["HOLD"])),
+        "opinion": opinion_label, "opinion_code": op, "opinion_label": opinion_label,
+        "rank_level": int(OPINION_ORDER.get(op, OPINION_ORDER["SELL"])),
+        "buy_signal_date": buy_signal_date,
+        "buy_age_days": buy_age_days,
+        "buy_age_sessions": buy_age_sessions,
         "reason": reason,
         "current_close": _safe_float(row.get("Close")),
         "st_d_direction": "상승" if d_dir == 1 else "하락" if d_dir == -1 else None,
@@ -674,9 +700,9 @@ def analyze(
             "median_max_return_pct": cycles["median_max_return_pct"],
             "completed_events": int(cycles["completed_events"]),
             "event_count": int(len(cycles["events"])),
-            "entry_rule": "first 매수(CASE1&CASE2) while flat; signal-day close",
-            "exit_rule": "first 매도(ST_D and ST_W both DOWN); signal-day close",
-            "median_rule": "median of completed BUY->SELL cycle peak High returns",
+            "entry_rule": "first BUY(CASE1) while flat; signal-day close",
+            "exit_rule": "first Sell opinion under current CASE1/CASE2 table; signal-day close",
+            "median_rule": "median of completed BUY->Sell cycle peak High returns",
         },
         "chart": chart,
         "chart_events": chart_events,
