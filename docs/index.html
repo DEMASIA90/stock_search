@@ -155,18 +155,18 @@
               <col class="row-num-col" />
               <col class="col-a" /><col class="col-b" /><col class="col-c" /><col class="col-d" />
               <col class="col-e" /><col class="col-f" /><col class="col-g" /><col class="col-h" />
-              <col class="col-i" /><col class="col-j" /><col class="col-k" /><col class="col-l" />
+              <col class="col-j" /><col class="col-k" /><col class="col-l" />
             </colgroup>
             <thead>
               <tr class="column-letter-row">
                 <th class="corner-cell"></th>
-                <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th><th>L</th>
+                <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th>
               </tr>
               <tr class="filter-row">
                 <th class="row-number">1</th>
                 <td class="filter-cell"><select id="capSelect" aria-label="시가총액 필터"></select></td>
                 <td id="sheetStatusCell" class="sheet-status-cell">데이터 로드 중</td>
-                <td colspan="10" class="chart-title-cell">선택 종목 차트 영역 · C열부터 표시</td>
+                <td colspan="9" class="chart-title-cell">선택 종목 차트 영역 · C열부터 표시</td>
               </tr>
               <tr class="header-row">
                 <th class="row-number">2</th>
@@ -177,8 +177,7 @@
                 <th data-sort="day_change_amount">등락액 <span class="sort-indicator">⌄</span></th>
                 <th data-sort="day_change_pct">등락율 <span class="sort-indicator">⌄</span></th>
                 <th data-sort="market_size_krw">시가총액 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="st_d_direction">ST_D <span class="sort-indicator">⌄</span></th>
-                <th data-sort="st_w_direction">ST_W <span class="sort-indicator">⌄</span></th>
+                <th data-sort="st_d_direction">ST(20,4) <span class="sort-indicator">⌄</span></th>
                 <th data-sort="adx">ADX(14) <span class="sort-indicator">⌄</span></th>
                 <th data-sort="backtest">Backtest 결과 <span class="sort-indicator">⌄</span></th>
                 <th>차트</th>
@@ -229,7 +228,7 @@
   </div>
 
   <script src="./runtime-config.js?v=20260825-v14_4_1_excel_exact_ui"></script>
-  <script src="./app.js?v=20260826-v14_4_6_auto_refresh"></script>
+  <script src="./app.js?v=20260826-v14_4_7_st20_4"></script>
   <script src="./pwa.js?v=20260825-v14_4_2_pwa_install"></script>
 </body>
 </html>

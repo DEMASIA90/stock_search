@@ -1,9 +1,9 @@
-const CACHE_NAME = 'dtc-pwa-v14-4-6-auto-refresh';
+const CACHE_NAME = 'dtc-pwa-v14-4-7-st20-4';
 const SHELL_FILES = [
   './','./index.html',
   './styles.css?v=20260825-v14_4_5_ui_algo',
   './runtime-config.js?v=20260825-v14_4_1_excel_exact_ui',
-  './app.js?v=20260826-v14_4_6_auto_refresh',
+  './app.js?v=20260826-v14_4_7_st20_4',
   './news-config.js?v=20260825-v14_4_1_excel_exact_ui',
   './pwa.js?v=20260825-v14_4_2_pwa_install',
   './manifest.webmanifest','./icons/favicon-64.png','./icons/icon-192.png','./icons/icon-512.png','./icons/icon-512-maskable.png'

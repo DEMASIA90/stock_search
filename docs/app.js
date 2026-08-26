@@ -27,9 +27,9 @@ const QUIZ_WINDOW_DAYS = 90;
 const QUIZ_HIDDEN_DAYS = 30;
 const QUIZ_MIN_MARKET_SIZE = 100_000_000_000_000;
 const QUIZ_SHARDS = ['kr','kr-etf','us','us-etf'];
-const OPINION_ORDER = {BUY:0,HOLD:1,SHORT_BUY:1,LONG_BUY:1,SELL_CONSIDER:2,SELL:3};
+const OPINION_ORDER = {BUY:0,SELL:1,HOLD:1,SHORT_BUY:0,LONG_BUY:1,SELL_CONSIDER:1};
 const OPINION_TEXT = {BUY:'BUY',SHORT_BUY:'BUY',LONG_BUY:'HOLD',HOLD:'HOLD',SELL_CONSIDER:'Consider Sell',SELL:'Sell'};
-const SORT_KEYS = new Set(['opinion','name','sector','close','day_change_amount','day_change_pct','market_size_krw','st_d_direction','st_w_direction','adx','backtest']);
+const SORT_KEYS = new Set(['opinion','name','sector','close','day_change_amount','day_change_pct','market_size_krw','st_d_direction','adx','backtest']);
 const AUTO_REFRESH_INTERVAL_MS = 60_000;
 const AUTO_REFRESH_MIN_GAP_MS = 20_000;
 const DISPLAY_TIME_ZONE = 'Asia/Seoul';
@@ -96,7 +96,7 @@ function stRank(v){return String(v)==='상승'?0:String(v)==='하락'?2:1;}
 function localeCompare(a,b){return String(a??'').localeCompare(String(b??''),'ko',{numeric:true,sensitivity:'base'});}
 
 function renderCapSelect(){const select=$('#capSelect');if(!select)return;const presets=CAP_FILTER_PRESETS[state.category]||[];const active=currentCapMin();select.innerHTML=presets.map(([v,label])=>`<option value="${v}" ${Number(v)===active?'selected':''}>${escapeHtml(label)}</option>`).join('');}
-function sortDirectionForNewKey(key){return ['name','sector','opinion','st_d_direction','st_w_direction'].includes(key)?'asc':'desc';}
+function sortDirectionForNewKey(key){return ['name','sector','opinion','st_d_direction'].includes(key)?'asc':'desc';}
 function compareStocks(a,b,key){
   if(key==='opinion') {
     const rankDiff=opinionRank(a)-opinionRank(b);if(rankDiff)return rankDiff;
@@ -111,7 +111,6 @@ function compareStocks(a,b,key){
   if(key==='name') return localeCompare(a.name,b.name);
   if(key==='sector') return localeCompare(a.sector,b.sector) || localeCompare(a.name,b.name);
   if(key==='st_d_direction') return stRank(a.st_d_direction)-stRank(b.st_d_direction) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
-  if(key==='st_w_direction') return stRank(a.st_w_direction)-stRank(b.st_w_direction) || (Number(b.market_size_krw)||-1)-(Number(a.market_size_krw)||-1);
   const av=key==='backtest'?backtestValue(a):numberOrNaN(a[key]);
   const bv=key==='backtest'?backtestValue(b):numberOrNaN(b[key]);
   if(Number.isFinite(av)&&Number.isFinite(bv))return av-bv;
@@ -150,7 +149,6 @@ function renderSheet(){
 <td class="num ${changeClass(s.day_change_pct)}">${pct(s.day_change_pct,2)}</td>
 <td class="num">${marketSize(s.market_size_krw)}</td>
 <td class="center ${stClass(s.st_d_direction)}">${escapeHtml(s.st_d_direction||'—')}</td>
-<td class="center ${stClass(s.st_w_direction)}">${escapeHtml(s.st_w_direction||'—')}</td>
 <td class="num">${Number.isFinite(numberOrNaN(s.adx))?Number(s.adx).toFixed(1):'—'}</td>
 <td class="backtest-cell">${escapeHtml(backtestText(s))}</td>
 <td class="chart-anchor-cell"> </td></tr>`;
@@ -185,13 +183,13 @@ async function selectRow(ticker,{scroll=false}={}){
 
 function drawSheetChart(el,detail,stock){
   const st=detail?.supertrend||{},rows=st.chart||[];if(rows.length<15){el.innerHTML='<div class="chart-empty">차트 데이터 부족</div>';return;}
-  const vals=rows.flatMap(r=>[numberOrNaN(r.low),numberOrNaN(r.high),numberOrNaN(r.supertrend),numberOrNaN(r.weekly_supertrend)]).filter(Number.isFinite);let lo=Math.min(...vals),hi=Math.max(...vals);if(!(hi>lo)){lo*=.99;hi*=1.01;}const ext=(hi-lo)*.06||1;lo-=ext;hi+=ext;
+  const vals=rows.flatMap(r=>[numberOrNaN(r.low),numberOrNaN(r.high),numberOrNaN(r.supertrend)]).filter(Number.isFinite);let lo=Math.min(...vals),hi=Math.max(...vals);if(!(hi>lo)){lo*=.99;hi*=1.01;}const ext=(hi-lo)*.06||1;lo-=ext;hi+=ext;
   const W=760,H=316,pad={l:9,r:58,t:13,b:22},plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,step=plotW/rows.length,X=i=>pad.l+(i+.5)*step,Y=v=>pad.t+(hi-v)*plotH/(hi-lo);let grid='';
   for(let g=0;g<4;g++){const y=pad.t+g*plotH/3,v=hi-g*(hi-lo)/3,label=stock.currency==='KRW'?Math.round(v).toLocaleString('ko-KR'):`$${v.toFixed(Math.abs(v)>=100?0:1)}`;grid+=`<line x1="${pad.l}" x2="${W-pad.r}" y1="${y}" y2="${y}" class="chart-grid"/><text x="${W-pad.r+5}" y="${y+3}" class="price-axis">${label}</text>`;}
   const bw=Math.max(1.2,Math.min(4.8,step*.58));let candles='';rows.forEach((r,i)=>{const o=Number(r.open),h=Number(r.high),l=Number(r.low),c=Number(r.close);if(![o,h,l,c].every(Number.isFinite))return;const x=X(i),yo=Y(o),yc=Y(c),yh=Y(h),yl=Y(l),up=c>=o,cls=up?'chart-candle-up':'chart-candle-down',top=Math.min(yo,yc),bh=Math.max(1.1,Math.abs(yc-yo));candles+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" class="chart-candle-wick ${cls}"/><rect x="${x-bw/2}" y="${top}" width="${bw}" height="${bh}" class="${cls}"><title>${escapeHtml(r.date)} O ${o} H ${h} L ${l} C ${c}</title></rect>`;});
   function paths(valueKey,dirKey,upClass,downClass){let up='',down='',u=false,d=false;rows.forEach((r,i)=>{const v=numberOrNaN(r[valueKey]),dir=numberOrNaN(r[dirKey]);if(!Number.isFinite(v)){u=d=false;return;}if(dir>0){up+=`${u?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;u=true;d=false;}else if(dir<0){down+=`${d?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `;d=true;u=false;}else{u=d=false;}});return `<path d="${up}" class="${upClass}"/><path d="${down}" class="${downClass}"/>`;}
   const dates=`<text x="${X(0)}" y="${H-4}" text-anchor="start" class="date-axis">${escapeHtml(rows[0].date.slice(5))}</text><text x="${X(rows.length-1)}" y="${H-4}" text-anchor="end" class="date-axis">${escapeHtml(rows.at(-1).date.slice(5))}</text>`;
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${paths('weekly_supertrend','weekly_direction','st-w-up','st-w-down')}${dates}</svg><div class="chart-legend"><span>ST_D 실선</span><span>ST_W 점선</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-actions"><button class="chart-action-btn toss" type="button" data-open-external="${escapeHtml(stock.ticker)}">토스증권 열기 ↗</button><button class="chart-action-btn close" type="button" data-close-chart>닫기</button></div>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${candles}${paths('supertrend','direction','st-d-up','st-d-down')}${dates}</svg><div class="chart-legend"><span>SuperTrend(20,4)</span><span>양봉 빨강 · 음봉 파랑</span></div><div class="chart-actions"><button class="chart-action-btn toss" type="button" data-open-external="${escapeHtml(stock.ticker)}">토스증권 열기 ↗</button><button class="chart-action-btn close" type="button" data-close-chart>닫기</button></div>`;
 }
 
 function tossProductCode(stock){const existing=String(stock?.toss_product_code||'').trim().toUpperCase();if(existing)return existing;const raw=String(stock?.symbol||stock?.ticker||'').trim().toUpperCase().replace(/\.(KS|KQ)$/i,'');if(String(stock?.category||'').startsWith('KR')){if(/^[0-9A-Z]{6}$/.test(raw))return `A${raw}`;if(/^A[0-9A-Z]{6}$/.test(raw))return raw;}return '';}
@@ -255,8 +253,8 @@ async function jumpToSearch(query){
 async function switchSheet(sheet,force=false){
   state.sheet=sheet;$$('.sheet-tab').forEach(b=>b.classList.toggle('active',b.dataset.sheet===sheet));
   if(sheet==='QUIZ'){$('#marketSheetView').hidden=true;$('#quizSheetView').hidden=false;hideChartOverlay();$('#nameBox').textContent='A1';$('#formulaInput').value='Quiz · SuperTrend(14,2) · 1문제 / 보기 5개';return;}
-  $('#quizSheetView').hidden=true;$('#marketSheetView').hidden=false;state.category=sheet;state.selectedTicker=null;state.searchOverrideTicker=null;renderCapSelect();hideChartOverlay();$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오는 중입니다.</td></tr>';
-  try{await ensureData(sheet,force||Boolean(state.data[sheet]));renderCapSelect();renderSheet();$('#formulaInput').value='';$('#nameBox').textContent='A1';}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}
+  $('#quizSheetView').hidden=true;$('#marketSheetView').hidden=false;state.category=sheet;state.selectedTicker=null;state.searchOverrideTicker=null;renderCapSelect();hideChartOverlay();$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="11">데이터를 불러오는 중입니다.</td></tr>';
+  try{await ensureData(sheet,force||Boolean(state.data[sheet]));renderCapSelect();renderSheet();$('#formulaInput').value='';$('#nameBox').textContent='A1';}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="11">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}
 }
 
 // -----------------------------------------------------------------------------
