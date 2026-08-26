@@ -30,6 +30,9 @@ const QUIZ_SHARDS = ['kr','kr-etf','us','us-etf'];
 const OPINION_ORDER = {BUY:0,HOLD:1,SHORT_BUY:1,LONG_BUY:1,SELL_CONSIDER:2,SELL:3};
 const OPINION_TEXT = {BUY:'BUY',SHORT_BUY:'BUY',LONG_BUY:'HOLD',HOLD:'HOLD',SELL_CONSIDER:'Consider Sell',SELL:'Sell'};
 const SORT_KEYS = new Set(['opinion','name','sector','close','day_change_amount','day_change_pct','market_size_krw','st_d_direction','st_w_direction','adx','backtest']);
+const AUTO_REFRESH_INTERVAL_MS = 60_000;
+const AUTO_REFRESH_MIN_GAP_MS = 20_000;
+const DISPLAY_TIME_ZONE = 'Asia/Seoul';
 
 const state = {
   sheet:'KR', category:'KR', data:{KR:null,KR_ETF:null,US:null,US_ETF:null},
@@ -46,7 +49,35 @@ function currentCapMin(){return Number(state.capMin[state.category]||0);}
 function currentData(){return state.data[state.category];}
 function stockByTicker(ticker){return (currentData()?.items||[]).find(x=>String(x.ticker)===String(ticker))||null;}
 
-async function ensureData(category,force=false){if(state.data[category]&&!force)return state.data[category];const r=await fetch(dataUrl(`data/${CATEGORY[category].dir}/summary.json`,force),{cache:force?'no-store':'default'});if(!r.ok)throw new Error(`${category} summary ${r.status}`);const d=await r.json();state.data[category]=d;return d;}
+function summaryGeneratedMs(data){const ms=Date.parse(String(data?.generated_at_utc||''));return Number.isFinite(ms)?ms:0;}
+function formatGeneratedAtKst(data){
+  const ms=summaryGeneratedMs(data);if(!ms)return String(data?.market_date||'—');
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:DISPLAY_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,hourCycle:'h23'}).formatToParts(new Date(ms));
+  const pick=t=>parts.find(x=>x.type===t)?.value||'';
+  return `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}`;
+}
+async function fetchSummary(category){
+  const r=await fetch(dataUrl(`data/${CATEGORY[category].dir}/summary.json`,true),{cache:'no-store',headers:{'Cache-Control':'no-cache'}});
+  if(!r.ok)throw new Error(`${category} summary ${r.status}`);
+  return r.json();
+}
+async function ensureData(category,force=false){if(state.data[category]&&!force)return state.data[category];const d=await fetchSummary(category);state.data[category]=d;return d;}
+function clearDetailCacheForCategory(category){for(const key of [...state.detailCache.keys()])if(String(key).startsWith(`${category}:`))state.detailCache.delete(key);}
+async function refreshCategoryData(category){
+  if(!CATEGORY[category])return false;
+  const previous=state.data[category];
+  const next=await fetchSummary(category);
+  const previousMs=summaryGeneratedMs(previous),nextMs=summaryGeneratedMs(next);
+  const changed=!previous || (nextMs>0&&nextMs>previousMs) || (!nextMs&&JSON.stringify(next)!==JSON.stringify(previous));
+  state.data[category]=next;
+  if(!changed)return false;
+  clearDetailCacheForCategory(category);
+  if(state.category===category&&state.sheet!=='QUIZ'){
+    if(state.selectedTicker&&!stockByTicker(state.selectedTicker)){state.selectedTicker=null;state.searchOverrideTicker=null;hideChartOverlay();}
+    renderCapSelect();renderSheet();
+  }
+  return true;
+}
 async function ensureAllData(){await Promise.all(CATEGORY_KEYS.map(c=>ensureData(c,false).catch(()=>null)));}
 async function ensureDetail(stock,force=false){const key=`${stock.category}:${stock.ticker}`;if(state.detailCache.has(key)&&!force)return state.detailCache.get(key);const r=await fetch(dataUrl(stock.detail_path,force),{cache:force?'no-store':'default'});if(!r.ok)throw new Error(`detail ${r.status}`);const d=await r.json();state.detailCache.set(key,d);return d;}
 
@@ -124,8 +155,10 @@ function renderSheet(){
 <td class="backtest-cell">${escapeHtml(backtestText(s))}</td>
 <td class="chart-anchor-cell"> </td></tr>`;
   }).join('');
-  const status=`${CATEGORY[state.category].short} · ${data?.market_date||'—'} · ${items.length.toLocaleString()}개 · 가격수신 ${Number(data?.coverage_pct||0).toFixed(1)}%`;
-  $('#sheetStatusCell').textContent=status;$('#bottomStatus').textContent=status;updateSortHeaders();
+  const updatedAt=formatGeneratedAtKst(data),mode=String(data?.scan_mode||'').toUpperCase();
+  const b1=`${updatedAt}${mode?` · ${mode}`:''}`;
+  const status=`${CATEGORY[state.category].short} · 업데이트 ${updatedAt} KST${mode?` · ${mode}`:''} · ${items.length.toLocaleString()}개 · 가격수신 ${Number(data?.coverage_pct||0).toFixed(1)}%`;
+  $('#sheetStatusCell').textContent=b1;$('#sheetStatusCell').title=status;$('#bottomStatus').textContent=status;updateSortHeaders();
   if(selected){requestAnimationFrame(()=>void hydrateSelectedChart(selected));}else hideChartOverlay();
 }
 
@@ -223,7 +256,7 @@ async function switchSheet(sheet,force=false){
   state.sheet=sheet;$$('.sheet-tab').forEach(b=>b.classList.toggle('active',b.dataset.sheet===sheet));
   if(sheet==='QUIZ'){$('#marketSheetView').hidden=true;$('#quizSheetView').hidden=false;hideChartOverlay();$('#nameBox').textContent='A1';$('#formulaInput').value='Quiz · SuperTrend(14,2) · 1문제 / 보기 5개';return;}
   $('#quizSheetView').hidden=true;$('#marketSheetView').hidden=false;state.category=sheet;state.selectedTicker=null;state.searchOverrideTicker=null;renderCapSelect();hideChartOverlay();$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오는 중입니다.</td></tr>';
-  try{await ensureData(sheet,force);renderCapSelect();renderSheet();$('#formulaInput').value='';$('#nameBox').textContent='A1';}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}
+  try{await ensureData(sheet,force||Boolean(state.data[sheet]));renderCapSelect();renderSheet();$('#formulaInput').value='';$('#nameBox').textContent='A1';}catch(err){console.error(err);$('#sheetBody').innerHTML='<tr><th class="row-number">3</th><td colspan="12">데이터를 불러오지 못했습니다.</td></tr>';$('#sheetStatusCell').textContent='데이터 로드 실패';}
 }
 
 // -----------------------------------------------------------------------------
@@ -680,5 +713,20 @@ $('#quizChoices')?.addEventListener('click',e=>{const b=e.target.closest('[data-
 $('#quizSubmitBtn')?.addEventListener('click',()=>{if(!state.quiz.question||state.quiz.answered||!Number.isInteger(state.quiz.question.selectedIndex))return;state.quiz.answered=true;renderQuizQuestion();});
 
 window.addEventListener('resize',()=>{if(state.selectedTicker)requestAnimationFrame(()=>void hydrateSelectedChart(state.selectedTicker));});
+
+let autoRefreshBusy=false,lastAutoRefreshAt=0;
+async function autoRefreshCurrentCategory(force=false){
+  if(autoRefreshBusy||state.sheet==='QUIZ'||document.visibilityState==='hidden')return;
+  const now=Date.now();if(!force&&now-lastAutoRefreshAt<AUTO_REFRESH_MIN_GAP_MS)return;
+  autoRefreshBusy=true;lastAutoRefreshAt=now;
+  try{
+    const changed=await refreshCategoryData(state.category);
+    if(changed)console.info(`[DTC] ${state.category} summary auto-refreshed at ${formatGeneratedAtKst(currentData())} KST`);
+  }catch(err){console.warn('[DTC] automatic summary refresh failed',err);}
+  finally{autoRefreshBusy=false;}
+}
+setInterval(()=>void autoRefreshCurrentCategory(false),AUTO_REFRESH_INTERVAL_MS);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')void autoRefreshCurrentCategory(true);});
+window.addEventListener('focus',()=>void autoRefreshCurrentCategory(true));
 
 void switchSheet('KR');
