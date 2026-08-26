@@ -42,13 +42,14 @@ TOSS_BROWSER_HEADERS = {
 }
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v14.4.7 · Excel workbook UI + single daily SuperTrend
+# Dongtan Trading Center (DTC) scanner v14.4.8 · Excel workbook UI + ST(20,4) + ST_LONG
 # -----------------------------------------------------------------------------
 # Opinion engine: daily SuperTrend(20,4) breakout only. ADX(14,14) is reference-only.
-#   BUY = current ST(20,4) is UP and current ST >= final DOWN ST immediately before latest flip.
-#   All other states = Sell.
-# Ranking: BUY (+N smallest first) -> Sell, then market size.
-# Backtest: 2Y first BUY -> first subsequent Sell.
+#   BUY = original daily ST(20,4) breakout rule.
+#   ST_LONG = daily ST(20,4) UP + developing weekly ST(10,3) UP + daily ST > weekly ST.
+#   SUPER_BUY = BUY and ST_LONG simultaneously.
+# Ranking: smaller +N first -> Super Buy -> Long Buy -> BUY -> market size.
+# Backtest: 2Y first buy-family signal -> first subsequent Sell.
 # KR OHLC: Toss WTS c-chart. US OHLC: TradingView public chart websocket.
 # Chart: ~6 months source-native OHLC + daily ST(20,4) only.
 # -----------------------------------------------------------------------------
@@ -909,7 +910,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if market_size_krw < min_market_size:
             return None, "market_size_lt_min"
 
-    # DTC v14.4.7: exact-source OHLC + daily SuperTrend(20,4); ADX(14,14) is reference-only.
+    # DTC v14.4.8: original ST(20,4) breakout + ST_LONG using developing weekly ST(10,3).
     st_data = analyze_supertrend(frame, period=20, multiplier=4.0, market=stock.category)
     st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
@@ -940,6 +941,10 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "adx": clean(st_data.get("adx"), 2),
         "st_d_direction": st_data.get("st_d_direction"),
         "case1": bool(st_data.get("case1", False)),
+        "st_long": bool(st_data.get("st_long", False)),
+        "super_buy": bool(st_data.get("super_buy", False)),
+        "st_w_long_direction": st_data.get("st_w_long_direction"),
+        "st_w_long_value": clean(st_data.get("st_w_long_value"), 4),
         "reason": st_data.get("reason") or "",
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
@@ -1043,6 +1048,10 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "adx": item.get("adx", st.get("adx")),
         "st_d_direction": item.get("st_d_direction", st.get("st_d_direction")),
         "case1": bool(item.get("case1", st.get("case1", False))),
+        "st_long": bool(item.get("st_long", st.get("st_long", False))),
+        "super_buy": bool(item.get("super_buy", st.get("super_buy", False))),
+        "st_w_long_direction": item.get("st_w_long_direction", st.get("st_w_long_direction")),
+        "st_w_long_value": item.get("st_w_long_value", st.get("st_w_long_value")),
         "reason": item.get("reason", st.get("reason") or ""),
         "supertrend": st,
         "sector": item.get("sector") or "—",
@@ -1076,9 +1085,9 @@ def _daily_opinion_distribution(items: list[dict]) -> list[dict]:
     date = max((str(item.get("date") or "") for item in items), default="")
     return [{
         "date": date,
+        "SUPER_BUY": int(c["SUPER_BUY"]),
+        "LONG_BUY": int(c["LONG_BUY"]),
         "BUY": int(c["BUY"]),
-        "HOLD": int(c["HOLD"]),
-        "SELL_CONSIDER": int(c["SELL_CONSIDER"]),
         "SELL": int(c["SELL"]),
         "total": int(sum(c.values())),
     }]
@@ -1095,15 +1104,15 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
     completed = [finite(e.get("max_return_pct")) for e in events if e.get("completed")]
     completed = [float(x) for x in completed if np.isfinite(x)]
     return {
-        "model": "ST20_4_BREAKOUT_DAILYSOURCE_V14_4_7",
+        "model": "ST20_4_BREAKOUT_PLUS_ST_LONG_V14_4_8",
         "window": "last 2 calendar years",
         "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
         "completed_cycles": int(len(completed)),
         "signal_cycles": int(len(events)),
-        "entry": "first ST(20,4) breakout BUY while flat; signal-day close",
+        "entry": "first Super Buy / Long Buy / BUY while flat; signal-day close",
         "exit": "first subsequent Sell; signal-day close",
         "max_return": "maximum daily High return from entry through exit",
-        "headline": "median of completed BUY->Sell cycle maximum returns",
+        "headline": "median of completed buy-family->Sell cycle maximum returns",
         "current_opinion_distribution": _daily_opinion_distribution(items),
     }
 
@@ -1112,43 +1121,46 @@ def _supertrend_report_markdown(category: str, diag: dict) -> str:
     med = diag.get("median_max_return_pct")
     med_text = "—" if med is None else f"{float(med):.2f}%"
     lines = [
-        f"# DTC SuperTrend(20,4) Breakout 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        f"# DTC ST(20,4) + ST_LONG 백테스트 — {CATEGORY_LABEL.get(category, category)}",
         "",
         f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
         "## 알고리즘",
         "",
-        "- ST_D: 일봉 SuperTrend(20,4)",
-        "- BUY: 현재 ST_D 상승 + 현재 ST_D >= 직전 하락 레그의 마지막 ST_D",
-        "- 그 외 전부: Sell",
-        "- BUY 돌파 최초 충족일을 +0으로 하여 현재까지 달력 일수 BUY (+N) 표시",
-        "- 주봉 SuperTrend는 계산/판정/차트에서 사용하지 않음",
+        "- 기존 BUY: 일봉 ST(20,4) 상승 + 현재 ST >= 직전 하락 레그 마지막 ST",
+        "- ST_LONG: 일봉 ST(20,4) 상승 + 진행 중 주봉 ST(10,3) 상승 + 일봉 ST > 주봉 ST",
+        "- Super Buy: 기존 BUY와 ST_LONG 동시 충족",
+        "- Long Buy: ST_LONG만 충족",
+        "- BUY: 기존 BUY만 충족",
+        "- 그 외: Sell",
+        "- 각 최종 신호가 처음 시작된 날을 +0으로 하여 (+N) 표시",
+        "- 정렬: N 작은 순서 → Super Buy → Long Buy → BUY → 시총 큰 순서",
+        "- 주봉 ST(10,3)는 각 과거 일자까지의 진행 중 주봉만 사용해 룩어헤드를 방지",
         "- ADX(14,14)는 표에만 표시하며 의견 판정에는 사용하지 않음",
         "",
-        "## 2년 BUY→Sell Cycle Backtest",
+        "## 2년 Buy-family→Sell Cycle Backtest",
         "",
         f"- **완료 사이클 최고수익률 중위값: {med_text}**",
         f"- 완료 사이클: {diag.get('completed_cycles', 0)}회 / 신호 사이클: {diag.get('signal_cycles', 0)}회",
-        "- 진입: 포지션이 없을 때 최초 ST(20,4) 돌파 BUY 신호일 종가",
+        "- 진입: 포지션이 없을 때 최초 Super Buy / Long Buy / BUY 신호일 종가",
         "- 청산: 이후 최초 Sell 신호일 종가",
-        "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 그 집합의 중위값",
-        "- 미청산 사이클은 중위값에서 제외",
+        "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 중위값 계산",
         "",
         "## 현재 의견 분포",
         "",
-        "| 날짜 | BUY | HOLD | Consider Sell | Sell | 합계 |",
+        "| 날짜 | Super Buy | Long Buy | BUY | Sell | 합계 |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for row in diag.get("current_opinion_distribution") or []:
         lines.append(
-            f"| {row['date']} | {row['BUY']} | {row['HOLD']} | {row['SELL_CONSIDER']} | {row['SELL']} | {row['total']} |"
+            f"| {row['date']} | {row['SUPER_BUY']} | {row['LONG_BUY']} | {row['BUY']} | {row['SELL']} | {row['total']} |"
         )
     lines += [
         "",
         "## 주의",
         "",
         "- 현재 유니버스로 과거를 재구성하므로 생존 편향이 존재합니다.",
-        "- 주봉 상태는 각 과거 일자 시점의 진행 중 주봉만 사용해 룩어헤드를 방지합니다.",
+        "- 진행 중 주봉은 각 일자의 당일까지 집계해 미래 주봉 데이터를 사용하지 않습니다.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1562,17 +1574,18 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Opinion ranking: BUY -> Sell.
-    # BUY rows are ordered by the smallest (+N) age first, then market size.
+    # Requested ranking: smaller (+N) first, then Super Buy -> Long Buy -> BUY,
+    # then market size descending. Sell rows follow buy-family rows.
     unsorted_items = list(results.values())
     backtest_refreshed = True
     backtest_diagnostics = _aggregate_supertrend_backtest(category, unsorted_items)
 
     def _rank_key(item: dict):
-        level = int(item.get("rank_level", OPINION_ORDER["SELL"]))
+        code = str(item.get("opinion_code") or "SELL").upper()
+        level = int(OPINION_ORDER.get(code, OPINION_ORDER["SELL"]))
         cap = finite(item.get("market_size_krw"), -1.0)
-        buy_age = finite(item.get("buy_age_days"), float("inf")) if str(item.get("opinion_code") or "").upper() == "BUY" else float("inf")
-        return (level, buy_age, -cap, item.get("symbol", ""))
+        age = finite(item.get("buy_age_days"), float("inf")) if code in {"SUPER_BUY", "LONG_BUY", "BUY"} else float("inf")
+        return (age, level, -cap, item.get("symbol", ""))
 
     items = sorted(unsorted_items, key=_rank_key)
     for rank, item in enumerate(items, 1):
@@ -1649,15 +1662,18 @@ def scan_category(
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "strategy_model": {
-            "name": "SuperTrend(20,4) Breakout",
+            "name": "ST(20,4) Breakout + ST_LONG",
             "supertrend_daily": "20,4",
+            "supertrend_weekly_long": "10,3 developing weekly",
             "adx": "ADX(14,14), reference only",
-            "opinion_order": ["BUY", "SELL"],
-            "buy": "daily ST(20,4) UP and current ST >= final ST of the immediately preceding DOWN leg; label BUY (+N) from first breakout calendar date",
-            "sell": "all remaining states",
-            "ranking": "BUY -> Sell; BUY ordered by smaller +N first, then market size descending",
+            "opinion_order": ["SUPER_BUY", "LONG_BUY", "BUY", "SELL"],
+            "buy": "daily ST(20,4) UP and current ST >= final ST of the immediately preceding DOWN leg",
+            "st_long": "daily ST(20,4) UP + weekly ST(10,3) UP + daily ST > weekly ST",
+            "super_buy": "original BUY and ST_LONG both true",
+            "sell": "neither buy rule is active",
+            "ranking": "smaller +N first -> Super Buy -> Long Buy -> BUY -> market size descending",
             "ohlc_source": "Toss WTS c-chart for KR/KR_ETF; TradingView public chart websocket for US/US_ETF; no Yahoo OHLC fallback",
-            "chart": "126 source-native daily candles + daily ST(20,4); external chart button always opens TossInvest",
+            "chart": "126 source-native daily candles + daily ST(20,4) + developing weekly ST(10,3); external chart button always opens TossInvest",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },

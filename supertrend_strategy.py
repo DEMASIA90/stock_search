@@ -6,9 +6,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-# DTC v14.4.7 single-timeframe SuperTrend breakout specification.
+# DTC v14.4.8 composite SuperTrend specification.
 SUPER_TREND_PERIOD = 20
 SUPER_TREND_MULTIPLIER = 4.0
+ST_LONG_WEEKLY_PERIOD = 10
+ST_LONG_WEEKLY_MULTIPLIER = 3.0
 ADX_DI_LENGTH = 14
 ADX_SMOOTHING = 14
 BACKTEST_YEARS = 2
@@ -19,23 +21,26 @@ CHART_SESSIONS = 126
 MIN_REQUIRED_BARS = 604
 
 OPINION_ORDER = {
-    "BUY": 0,
-    "SELL": 1,
-    # Legacy codes remain sortable when an old cached snapshot is restored.
-    "HOLD": 1,
-    "SELL_CONSIDER": 1,
-    "SHORT_BUY": 0,
+    "SUPER_BUY": 0,
     "LONG_BUY": 1,
+    "BUY": 2,
+    "SELL": 3,
+    # Legacy codes remain sortable when an old cached snapshot is restored.
+    "HOLD": 3,
+    "SELL_CONSIDER": 3,
+    "SHORT_BUY": 2,
 }
 
 OPINION_LABEL = {
+    "SUPER_BUY": "Super Buy",
+    "LONG_BUY": "Long Buy",
     "BUY": "BUY",
     "SELL": "Sell",
     "HOLD": "Sell",
     "SELL_CONSIDER": "Sell",
     "SHORT_BUY": "BUY",
-    "LONG_BUY": "Sell",
 }
+
 
 
 def _num(series: pd.Series) -> pd.Series:
@@ -314,14 +319,127 @@ def add_up_flip_reference(
     return d
 
 
-def _gate(direction: int, st_value: Any, ref_value: Any, age: Any = None) -> bool:
-    """Single daily ST(20,4) breakout gate.
 
-    BUY is true whenever the current SuperTrend is UP and its ST value has
-    reached or exceeded the final ST value of the immediately preceding DOWN
-    leg.  The flip bar itself is allowed to qualify if it already satisfies the
-    price-level comparison.
+def weekly_supertrend_asof_daily(
+    df: pd.DataFrame,
+    length: int = SUPER_TREND_PERIOD,
+    multiplier: float = SUPER_TREND_MULTIPLIER,
+) -> pd.DataFrame:
+    """Developing weekly SuperTrend aligned to every daily observation.
+
+    Each daily row uses only information available through that day.  The
+    current (incomplete) Monday-Friday week is aggregated as a developing weekly
+    candle.  This avoids using Friday's completed weekly candle on Monday in
+    backtests while matching the live weekly chart semantics.
     """
+    d = _ohlc(df)
+    out = pd.DataFrame(index=d.index)
+    n = len(d)
+    for c in ("W_ATR", "W_ST_UPPER", "W_ST_LOWER", "W_ST", "W_UP_FLIP_REF", "W_UP_FLIP_AGE"):
+        out[c] = np.nan
+    out["W_ST_DIR"] = 0
+    if n == 0:
+        return out
+
+    first = int(length) - 1
+    week_index = 0
+    current_key = None
+    partial = None
+    tr_history: list[float] = []
+
+    prev_close = np.nan
+    prev_atr = np.nan
+    prev_upper = np.nan
+    prev_lower = np.nan
+    prev_st = np.nan
+    prev_dir = 0
+    prev_ref = np.nan
+    prev_age = np.nan
+    last_state = None
+
+    def week_key(ts):
+        return pd.Timestamp(ts).to_period("W-FRI")
+
+    for i, (ts, row) in enumerate(d.iterrows()):
+        key = week_key(ts)
+        if current_key is None or key != current_key:
+            if current_key is not None and partial is not None and last_state is not None:
+                # Finalize the preceding week using its last daily snapshot.
+                tr_history.append(float(last_state["tr"]))
+                prev_close = float(partial["Close"])
+                prev_atr = float(last_state["atr"]) if np.isfinite(last_state["atr"]) else np.nan
+                prev_upper = float(last_state["upper"]) if np.isfinite(last_state["upper"]) else np.nan
+                prev_lower = float(last_state["lower"]) if np.isfinite(last_state["lower"]) else np.nan
+                prev_st = float(last_state["st"]) if np.isfinite(last_state["st"]) else np.nan
+                prev_dir = int(last_state["dir"])
+                prev_ref = float(last_state["ref"]) if np.isfinite(last_state["ref"]) else np.nan
+                prev_age = float(last_state["age"]) if np.isfinite(last_state["age"]) else np.nan
+                week_index += 1
+            current_key = key
+            partial = {
+                "Open": float(row["Open"]), "High": float(row["High"]), "Low": float(row["Low"]),
+                "Close": float(row["Close"]), "Volume": float(row.get("Volume", 0.0) or 0.0),
+            }
+        else:
+            partial["High"] = max(float(partial["High"]), float(row["High"]))
+            partial["Low"] = min(float(partial["Low"]), float(row["Low"]))
+            partial["Close"] = float(row["Close"])
+            partial["Volume"] = float(partial["Volume"]) + float(row.get("Volume", 0.0) or 0.0)
+
+        high = float(partial["High"])
+        low = float(partial["Low"])
+        close = float(partial["Close"])
+        tr = high - low if not np.isfinite(prev_close) else max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+        atr = upper = lower = st = ref = age = np.nan
+        direction = 0
+        if week_index == first:
+            seed = tr_history[-first:] + [float(tr)] if first > 0 else [float(tr)]
+            if len(seed) == int(length):
+                atr = float(np.mean(seed))
+                hl2 = (high + low) / 2.0
+                upper = hl2 + float(multiplier) * atr
+                lower = hl2 - float(multiplier) * atr
+                direction = -1
+                st = upper
+        elif week_index > first and np.isfinite(prev_atr) and np.isfinite(prev_upper) and np.isfinite(prev_lower) and np.isfinite(prev_st):
+            atr = (prev_atr * (int(length) - 1) + float(tr)) / float(length)
+            hl2 = (high + low) / 2.0
+            basic_upper = hl2 + float(multiplier) * atr
+            basic_lower = hl2 - float(multiplier) * atr
+            upper = basic_upper if (basic_upper < prev_upper or prev_close > prev_upper) else prev_upper
+            lower = basic_lower if (basic_lower > prev_lower or prev_close < prev_lower) else prev_lower
+            if math.isclose(prev_st, prev_upper, rel_tol=1e-12, abs_tol=1e-12):
+                if close > upper:
+                    direction, st = 1, lower
+                else:
+                    direction, st = -1, upper
+            else:
+                if close < lower:
+                    direction, st = -1, upper
+                else:
+                    direction, st = 1, lower
+
+            is_flip = prev_dir == -1 and direction == 1 and np.isfinite(prev_st)
+            if is_flip:
+                ref, age = float(prev_st), 0.0
+            elif direction == 1 and prev_dir == 1 and np.isfinite(prev_ref):
+                ref = float(prev_ref)
+                age = float(prev_age + 1.0) if np.isfinite(prev_age) else 1.0
+
+        out.iloc[i, out.columns.get_loc("W_ATR")] = atr
+        out.iloc[i, out.columns.get_loc("W_ST_UPPER")] = upper
+        out.iloc[i, out.columns.get_loc("W_ST_LOWER")] = lower
+        out.iloc[i, out.columns.get_loc("W_ST")] = st
+        out.iloc[i, out.columns.get_loc("W_ST_DIR")] = direction
+        out.iloc[i, out.columns.get_loc("W_UP_FLIP_REF")] = ref
+        out.iloc[i, out.columns.get_loc("W_UP_FLIP_AGE")] = age
+        last_state = {"tr": tr, "atr": atr, "upper": upper, "lower": lower, "st": st, "dir": direction, "ref": ref, "age": age}
+
+    return out
+
+def _gate(direction: int, st_value: Any, ref_value: Any, age: Any = None) -> bool:
+    """Legacy ST(20,4) breakout gate used by the original BUY signal."""
     try:
         return (
             int(direction) == 1
@@ -333,17 +451,66 @@ def _gate(direction: int, st_value: Any, ref_value: Any, age: Any = None) -> boo
         return False
 
 
+def _st_long_gate(
+    daily_direction: int,
+    daily_st: Any,
+    weekly_direction: int,
+    weekly_st: Any,
+) -> bool:
+    """ST_LONG gate.
+
+    Long Buy is active only when the daily ST(20,4) is in an UP regime, the
+    developing weekly ST(10,3) is also UP, and the daily ST price is strictly
+    above the weekly ST price.  Strict ``>`` is deliberate because the user
+    specified "보다 높으면" rather than "이상".
+    """
+    try:
+        return (
+            int(daily_direction) == 1
+            and int(weekly_direction) == 1
+            and np.isfinite(float(daily_st))
+            and np.isfinite(float(weekly_st))
+            and float(daily_st) > float(weekly_st)
+        )
+    except Exception:
+        return False
+
+
+def classify_supertrend_composite(
+    daily_direction: int,
+    daily_st: Any,
+    breakout_ref: Any,
+    weekly_direction: int,
+    weekly_st: Any,
+) -> tuple[str, str, bool, bool, bool]:
+    """Combine the original ST(20,4) breakout with ST_LONG.
+
+    - original BUY: daily ST(20,4) is UP and >= prior DOWN leg's final ST
+    - ST_LONG: daily ST(20,4) is UP, weekly ST(10,3) is UP, daily ST > weekly ST
+    - both: Super Buy
+    - ST_LONG only: Long Buy
+    - original only: BUY
+    - neither: Sell
+    """
+    base_buy = _gate(daily_direction, daily_st, breakout_ref)
+    long_buy = _st_long_gate(daily_direction, daily_st, weekly_direction, weekly_st)
+    super_buy = bool(base_buy and long_buy)
+    if super_buy:
+        return "SUPER_BUY", "기존 ST 돌파 BUY + ST_LONG 동시 충족", base_buy, long_buy, super_buy
+    if long_buy:
+        return "LONG_BUY", "ST_LONG 충족: ST_D(20,4) 상승 + ST_W(10,3) 상승 + ST_D > ST_W", base_buy, long_buy, super_buy
+    if base_buy:
+        return "BUY", "기존 ST(20,4) 돌파 BUY 충족", base_buy, long_buy, super_buy
+    return "SELL", "기존 BUY 및 ST_LONG 조건 불충족", base_buy, long_buy, super_buy
+
+
 def classify_supertrend(
     direction: int,
     st_value: Any,
     ref_value: Any,
     age: Any = None,
 ) -> tuple[str, str, bool]:
-    """DTC single-SuperTrend opinion table.
-
-    BUY: current daily ST(20,4) is UP and current ST >= previous DOWN leg's
-    final ST value.  Every other state is Sell.
-    """
+    """Compatibility wrapper for the original single-ST BUY classifier."""
     buy = _gate(direction, st_value, ref_value, age)
     if buy:
         return "BUY", "ST(20,4) 상승 · 직전 하락 ST 마지막 값 돌파", True
@@ -365,36 +532,49 @@ def signal_series(
         daily_adx[col] = daily_st[col]
     daily_adx = add_up_flip_reference(daily_adx)
 
-    ops, labels, reasons, buy_flags = [], [], [], []
+    weekly = weekly_supertrend_asof_daily(
+        daily_adx[["Open", "High", "Low", "Close", "Volume"]],
+        ST_LONG_WEEKLY_PERIOD,
+        ST_LONG_WEEKLY_MULTIPLIER,
+    )
+    for col in weekly.columns:
+        daily_adx[col] = weekly[col]
+
+    ops, labels, reasons = [], [], []
+    base_flags, long_flags, super_flags = [], [], []
     for _, row in daily_adx.iterrows():
-        op, reason, buy = classify_supertrend(
+        op, reason, base_buy, long_buy, super_buy = classify_supertrend_composite(
             int(row.get("ST_DIR", 0) or 0),
             row.get("ST"),
             row.get("ST_UP_FLIP_REF"),
-            row.get("ST_UP_FLIP_AGE"),
+            int(row.get("W_ST_DIR", 0) or 0),
+            row.get("W_ST"),
         )
         ops.append(op)
         labels.append(OPINION_LABEL[op])
         reasons.append(reason)
-        buy_flags.append(bool(buy))
+        base_flags.append(bool(base_buy))
+        long_flags.append(bool(long_buy))
+        super_flags.append(bool(super_buy))
     daily_adx["opinion_code"] = ops
     daily_adx["opinion"] = labels
     daily_adx["reason"] = reasons
-    # CASE1 is retained as a compatibility alias for the current BUY gate.
-    daily_adx["CASE1"] = buy_flags
+    daily_adx["BASE_BUY"] = base_flags
+    daily_adx["ST_LONG"] = long_flags
+    daily_adx["SUPER_BUY"] = super_flags
+    # CASE1 remains a compatibility alias for the original ST(20,4) breakout.
+    daily_adx["CASE1"] = base_flags
     return daily_adx
-
 
 def _date_text(ts: Any) -> str:
     return pd.Timestamp(ts).strftime("%Y-%m-%d")
 
 
 def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> dict[str, Any]:
-    """Backtest the single ST(20,4) breakout BUY rule.
+    """Backtest the composite BUY family.
 
-    Entry is the first BUY while flat at signal-day Close. Exit is the first
-    subsequent Sell at signal-day Close. The headline result is the median of
-    each completed cycle's maximum High return from entry through exit.
+    Entry is the first Super Buy / Long Buy / BUY while flat at signal-day
+    Close. Exit is the first subsequent Sell at signal-day Close.
     """
     if enriched is None or enriched.empty:
         return {"events": [], "median_max_return_pct": None, "completed_events": 0}
@@ -427,7 +607,7 @@ def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> d
                 active = None
             continue
 
-        if op == "BUY":
+        if op in {"SUPER_BUY", "LONG_BUY", "BUY"}:
             close = float(row["Close"]) if pd.notna(row.get("Close")) else float("nan")
             if not np.isfinite(close) or close <= 0:
                 continue
@@ -435,8 +615,8 @@ def compute_buy_cycles(enriched: pd.DataFrame, years: int = BACKTEST_YEARS) -> d
             active = {
                 "_entry_ts": pd.Timestamp(d.index[i]),
                 "time": _date_text(d.index[i]),
-                "opinion_code": "BUY",
-                "opinion": "BUY",
+                "opinion_code": op,
+                "opinion": OPINION_LABEL.get(op, op),
                 "entry_price": close,
                 "completed": False,
                 "exit_time": "",
@@ -474,15 +654,11 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _current_case1_age(signals: pd.DataFrame) -> tuple[str | None, int | None, int | None]:
-    """Return current CASE1 run start date, calendar days and trading sessions.
-
-    The first day CASE1 becomes true is +0. Calendar-day age is shown to the
-    user; trading-session age is retained as useful diagnostic metadata.
-    """
-    if signals is None or signals.empty or "CASE1" not in signals.columns:
+def _current_flag_age(signals: pd.DataFrame, flag_col: str) -> tuple[str | None, int | None, int | None]:
+    """Return current continuous signal run start date and +N ages."""
+    if signals is None or signals.empty or flag_col not in signals.columns:
         return None, None, None
-    flags = signals["CASE1"].fillna(False).astype(bool).to_numpy()
+    flags = signals[flag_col].fillna(False).astype(bool).to_numpy()
     if len(flags) == 0 or not bool(flags[-1]):
         return None, None, None
     start = len(flags) - 1
@@ -492,6 +668,17 @@ def _current_case1_age(signals: pd.DataFrame) -> tuple[str | None, int | None, i
     now_ts = pd.Timestamp(signals.index[-1]).normalize()
     return start_ts.date().isoformat(), max(0, int((now_ts - start_ts).days)), int(len(flags) - 1 - start)
 
+
+def _current_case1_age(signals: pd.DataFrame) -> tuple[str | None, int | None, int | None]:
+    """Compatibility alias for the original BUY age."""
+    return _current_flag_age(signals, "CASE1")
+
+
+def _current_opinion_age(signals: pd.DataFrame, opinion_code: str) -> tuple[str | None, int | None, int | None]:
+    flag = {"SUPER_BUY": "SUPER_BUY", "LONG_BUY": "ST_LONG", "BUY": "BASE_BUY"}.get(str(opinion_code))
+    if not flag:
+        return None, None, None
+    return _current_flag_age(signals, flag)
 
 def analyze(
     df: pd.DataFrame,
@@ -517,12 +704,18 @@ def analyze(
     row = signals.iloc[-1]
     op = str(row.get("opinion_code") or "SELL")
     reason = str(row.get("reason") or "")
-    buy_signal_date, buy_age_days, buy_age_sessions = _current_case1_age(signals) if op == "BUY" else (None, None, None)
-    opinion_label = f"BUY (+{buy_age_days})" if op == "BUY" and buy_age_days is not None else OPINION_LABEL.get(op, op)
+    signal_date, signal_age_days, signal_age_sessions = _current_opinion_age(signals, op)
+    if op in {"SUPER_BUY", "LONG_BUY", "BUY"} and signal_age_days is not None:
+        opinion_label = f"{OPINION_LABEL[op]} (+{signal_age_days})"
+    else:
+        opinion_label = OPINION_LABEL.get(op, op)
+
     adx_value = _safe_float(row.get("ADX"))
     d_st = _safe_float(row.get("ST"))
     d_ref = _safe_float(row.get("ST_UP_FLIP_REF"))
     d_dir = int(row.get("ST_DIR", 0) or 0)
+    w_st = _safe_float(row.get("W_ST"))
+    w_dir = int(row.get("W_ST_DIR", 0) or 0)
     cycles = compute_buy_cycles(signals, years=BACKTEST_YEARS)
 
     chart_start = max(0, len(signals) - CHART_SESSIONS)
@@ -538,8 +731,10 @@ def analyze(
             "open": o, "high": h, "low": l, "close": c,
             "supertrend": _safe_float(sr.get("ST")),
             "direction": int(sr.get("ST_DIR", 0) or 0),
+            "weekly_supertrend": _safe_float(sr.get("W_ST")),
+            "weekly_direction": int(sr.get("W_ST_DIR", 0) or 0),
             "adx": _safe_float(sr.get("ADX")),
-            "opinion_code": str(sr.get("opinion_code") or "HOLD"),
+            "opinion_code": str(sr.get("opinion_code") or "SELL"),
         })
 
     chart_dates = {r["date"] for r in chart}
@@ -550,20 +745,29 @@ def analyze(
 
     result = {
         "available": True,
-        "model": "SuperTrend(20,4) Breakout",
+        "model": "ST(20,4) Breakout + ST_LONG",
         "period": int(period), "multiplier": float(multiplier),
+        "st_long_weekly_period": ST_LONG_WEEKLY_PERIOD,
+        "st_long_weekly_multiplier": ST_LONG_WEEKLY_MULTIPLIER,
         "adx_di_length": ADX_DI_LENGTH, "adx_smoothing": ADX_SMOOTHING,
         "opinion": opinion_label, "opinion_code": op, "opinion_label": opinion_label,
         "rank_level": int(OPINION_ORDER.get(op, OPINION_ORDER["SELL"])),
-        "buy_signal_date": buy_signal_date,
-        "buy_age_days": buy_age_days,
-        "buy_age_sessions": buy_age_sessions,
+        "buy_signal_date": signal_date,
+        "buy_age_days": signal_age_days,
+        "buy_age_sessions": signal_age_sessions,
+        "signal_date": signal_date,
+        "signal_age_days": signal_age_days,
+        "signal_age_sessions": signal_age_sessions,
         "reason": reason,
         "current_close": _safe_float(row.get("Close")),
         "st_d_direction": "상승" if d_dir == 1 else "하락" if d_dir == -1 else None,
         "st_d_value": d_st,
         "st_reference_value": d_ref,
-        "case1": bool(row.get("CASE1", False)),
+        "st_w_long_direction": "상승" if w_dir == 1 else "하락" if w_dir == -1 else None,
+        "st_w_long_value": w_st,
+        "case1": bool(row.get("BASE_BUY", False)),
+        "st_long": bool(row.get("ST_LONG", False)),
+        "super_buy": bool(row.get("SUPER_BUY", False)),
         "adx": adx_value,
         "backtest": {
             "available": True,
@@ -571,12 +775,13 @@ def analyze(
             "median_max_return_pct": cycles["median_max_return_pct"],
             "completed_events": int(cycles["completed_events"]),
             "event_count": int(len(cycles["events"])),
-            "entry_rule": "first ST(20,4) breakout BUY while flat; signal-day close",
+            "entry_rule": "first Super Buy / Long Buy / BUY while flat; signal-day close",
             "exit_rule": "first subsequent Sell; signal-day close",
-            "median_rule": "median of completed BUY->Sell cycle peak High returns",
+            "median_rule": "median of completed buy-signal->Sell cycle peak High returns",
         },
         "chart": chart,
         "chart_events": chart_events,
         "_research": {"events": cycles["events"]},
     }
     return result
+
