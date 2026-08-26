@@ -42,18 +42,15 @@ TOSS_BROWSER_HEADERS = {
 }
 
 # -----------------------------------------------------------------------------
-# Dongtan Trading Center (DTC) scanner v14.4 · Excel workbook UI + dual timeframe SuperTrend
+# Dongtan Trading Center (DTC) scanner v14.4.7 · Excel workbook UI + single daily SuperTrend
 # -----------------------------------------------------------------------------
-# Opinion engine: daily + weekly SuperTrend(14,2) gates. ADX(14,14) is reference-only.
-#   CASE1 = ST_D UP and current ST_D >= final DOWN ST_D immediately before latest flip.
-#   CASE2 = ST_W UP and current ST_W >= final DOWN ST_W immediately before latest flip.
-#   CASE1 -> BUY (CASE2 irrelevant).
-#   CASE2 + CASE1 false + ST_D UP -> HOLD.
-#   CASE2 + CASE1 false + ST_D DOWN -> Consider Sell. Everything else -> Sell.
-# Ranking: BUY (+N smallest first) -> HOLD -> Consider Sell -> Sell, then market size.
-# Backtest: 2Y first BUY(CASE1) -> first Sell under the same opinion table.
+# Opinion engine: daily SuperTrend(20,4) breakout only. ADX(14,14) is reference-only.
+#   BUY = current ST(20,4) is UP and current ST >= final DOWN ST immediately before latest flip.
+#   All other states = Sell.
+# Ranking: BUY (+N smallest first) -> Sell, then market size.
+# Backtest: 2Y first BUY -> first subsequent Sell.
 # KR OHLC: Toss WTS c-chart. US OHLC: TradingView public chart websocket.
-# Chart: ~6 months source-native OHLC + ST_D solid + developing ST_W dashed.
+# Chart: ~6 months source-native OHLC + daily ST(20,4) only.
 # -----------------------------------------------------------------------------
 
 FULL_HISTORY_CALENDAR_DAYS = 1120  # retained for Yahoo metadata/FX helpers only
@@ -912,8 +909,8 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         if market_size_krw < min_market_size:
             return None, "market_size_lt_min"
 
-    # DTC v14.4: exact-source OHLC + daily/weekly SuperTrend(14,2); ADX(14,14) is reference-only.
-    st_data = analyze_supertrend(frame, period=14, multiplier=2.0, market=stock.category)
+    # DTC v14.4.7: exact-source OHLC + daily SuperTrend(20,4); ADX(14,14) is reference-only.
+    st_data = analyze_supertrend(frame, period=20, multiplier=4.0, market=stock.category)
     st_research = st_data.pop("_research", {})
     prev_close = finite(frame["Close"].iloc[-2]) if len(frame) >= 2 else np.nan
     day_change_amount = close - prev_close if np.isfinite(prev_close) else np.nan
@@ -942,9 +939,7 @@ def analyze_prepared(stock: Stock, frame: pd.DataFrame, thresholds: dict, size_c
         "buy_age_sessions": st_data.get("buy_age_sessions"),
         "adx": clean(st_data.get("adx"), 2),
         "st_d_direction": st_data.get("st_d_direction"),
-        "st_w_direction": st_data.get("st_w_direction"),
         "case1": bool(st_data.get("case1", False)),
-        "case2": bool(st_data.get("case2", False)),
         "reason": st_data.get("reason") or "",
         "sector": "ETF" if stock.category in ETF_CATEGORIES else "—",
         "market_size_krw": clean(market_size_krw, 0),
@@ -1047,9 +1042,7 @@ def _summary_item(item: dict, detail_path: str) -> dict:
         "buy_age_sessions": item.get("buy_age_sessions", st.get("buy_age_sessions")),
         "adx": item.get("adx", st.get("adx")),
         "st_d_direction": item.get("st_d_direction", st.get("st_d_direction")),
-        "st_w_direction": item.get("st_w_direction", st.get("st_w_direction")),
         "case1": bool(item.get("case1", st.get("case1", False))),
-        "case2": bool(item.get("case2", st.get("case2", False))),
         "reason": item.get("reason", st.get("reason") or ""),
         "supertrend": st,
         "sector": item.get("sector") or "—",
@@ -1102,13 +1095,13 @@ def _aggregate_supertrend_backtest(category: str, items: list[dict]) -> dict:
     completed = [finite(e.get("max_return_pct")) for e in events if e.get("completed")]
     completed = [float(x) for x in completed if np.isfinite(x)]
     return {
-        "model": "DUAL_ST_D_W_GATE_ST14_2_DUALSOURCE_V14_4",
+        "model": "ST20_4_BREAKOUT_DAILYSOURCE_V14_4_7",
         "window": "last 2 calendar years",
         "median_max_return_pct": clean(float(np.median(completed)), 2) if completed else None,
         "completed_cycles": int(len(completed)),
         "signal_cycles": int(len(events)),
-        "entry": "first BUY(CASE1) while flat; signal-day close",
-        "exit": "first Sell under current CASE1/CASE2 table; signal-day close",
+        "entry": "first ST(20,4) breakout BUY while flat; signal-day close",
+        "exit": "first subsequent Sell; signal-day close",
         "max_return": "maximum daily High return from entry through exit",
         "headline": "median of completed BUY->Sell cycle maximum returns",
         "current_opinion_distribution": _daily_opinion_distribution(items),
@@ -1119,29 +1112,25 @@ def _supertrend_report_markdown(category: str, diag: dict) -> str:
     med = diag.get("median_max_return_pct")
     med_text = "—" if med is None else f"{float(med):.2f}%"
     lines = [
-        f"# DTC Dual SuperTrend Gate 백테스트 — {CATEGORY_LABEL.get(category, category)}",
+        f"# DTC SuperTrend(20,4) Breakout 백테스트 — {CATEGORY_LABEL.get(category, category)}",
         "",
         f"생성시각(UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
         "## 알고리즘",
         "",
-        "- ST_D: 일봉 SuperTrend(14,2)",
-        "- ST_W: 주봉 SuperTrend(14,2), 현재 진행 중인 주 포함",
-        "- CASE1: ST_D 상승 + 현재 ST_D >= 직전 하락 레그 마지막 ST_D",
-        "- CASE2: ST_W 상승 + 현재 ST_W >= 직전 하락 레그 마지막 ST_W",
-        "- CASE1 충족(CASE2 무관): BUY",
-        "- CASE2 충족 + CASE1 불충족 + ST_D 상승: HOLD",
-        "- CASE2 충족 + CASE1 불충족 + ST_D 하락: Consider Sell",
+        "- ST_D: 일봉 SuperTrend(20,4)",
+        "- BUY: 현재 ST_D 상승 + 현재 ST_D >= 직전 하락 레그의 마지막 ST_D",
         "- 그 외 전부: Sell",
-        "- BUY는 CASE1 최초 충족일을 +0으로 하여 현재까지 달력 일수 BUY (+N) 표시",
+        "- BUY 돌파 최초 충족일을 +0으로 하여 현재까지 달력 일수 BUY (+N) 표시",
+        "- 주봉 SuperTrend는 계산/판정/차트에서 사용하지 않음",
         "- ADX(14,14)는 표에만 표시하며 의견 판정에는 사용하지 않음",
         "",
         "## 2년 BUY→Sell Cycle Backtest",
         "",
         f"- **완료 사이클 최고수익률 중위값: {med_text}**",
         f"- 완료 사이클: {diag.get('completed_cycles', 0)}회 / 신호 사이클: {diag.get('signal_cycles', 0)}회",
-        "- 진입: 포지션이 없을 때 최초 BUY(CASE1) 신호일 종가",
-        "- 청산: 현재 4단계 의견표에서 최초 Sell 신호일 종가",
+        "- 진입: 포지션이 없을 때 최초 ST(20,4) 돌파 BUY 신호일 종가",
+        "- 청산: 이후 최초 Sell 신호일 종가",
         "- 각 완료 사이클의 진입~청산 구간 최고 High 수익률을 구한 뒤 그 집합의 중위값",
         "- 미청산 사이클은 중위값에서 제외",
         "",
@@ -1396,7 +1385,7 @@ def scan_category(
         scan_universe, cached_small_skipped = _cached_quick_size_prefilter(category, scan_universe, size_cache, scan_mode)
     rejection["cached_small_quick_prefilter"] += cached_small_skipped
 
-    # Price OHLC is exact-source only from v14.3 onward; v14.4 derives the live weekly bar from those same daily candles.  Do not apply the old
+    # Price OHLC is exact-source only; the strategy derives only daily ST(20,4) from these candles. Do not apply the old
     # Yahoo missing-symbol quarantine to Toss/TradingView source requests.
     rejection["yahoo_quarantine"] = 0
     source_name = market_data_source_for(category)
@@ -1573,7 +1562,7 @@ def scan_category(
     else:
         size_coverage = np.nan
 
-    # Opinion ranking: BUY -> HOLD -> Consider Sell -> Sell.
+    # Opinion ranking: BUY -> Sell.
     # BUY rows are ordered by the smallest (+N) age first, then market size.
     unsorted_items = list(results.values())
     backtest_refreshed = True
@@ -1631,7 +1620,7 @@ def scan_category(
     market_date = max((x["date"] for x in items if x.get("date")), default=None)
     payload_meta = {
         "app": "Dongtan Trading Center",
-        "strategy": "DUAL_ST_D_W_GATE_ST14_2_DUALSOURCE_V14_4",
+        "strategy": "ST20_4_BREAKOUT_DAILYSOURCE_V14_4_7",
         "category": category,
         "category_label": CATEGORY_LABEL[category],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1660,20 +1649,15 @@ def scan_category(
         "thresholds": thresholds,
         "filter_counts": dict(sorted(rejection.items())),
         "strategy_model": {
-            "name": "Dual SuperTrend Gate",
-            "supertrend_daily": "14,2",
-            "supertrend_weekly": "14,2 (developing current week included)",
+            "name": "SuperTrend(20,4) Breakout",
+            "supertrend_daily": "20,4",
             "adx": "ADX(14,14), reference only",
-            "opinion_order": ["BUY", "HOLD", "SELL_CONSIDER", "SELL"],
-            "case1": "ST_D UP and current ST_D >= last DOWN ST_D immediately before the latest DOWN->UP flip",
-            "case2": "ST_W UP and current ST_W >= last DOWN ST_W immediately before the latest DOWN->UP flip",
-            "buy": "CASE1; CASE2 irrelevant; label BUY (+N) from first CASE1-satisfied calendar date",
-            "hold": "CASE2 true, CASE1 false, ST_D UP",
-            "sell_consider": "CASE2 true, CASE1 false, ST_D DOWN",
+            "opinion_order": ["BUY", "SELL"],
+            "buy": "daily ST(20,4) UP and current ST >= final ST of the immediately preceding DOWN leg; label BUY (+N) from first breakout calendar date",
             "sell": "all remaining states",
-            "ranking": "BUY -> HOLD -> Consider Sell -> Sell; BUY ordered by smaller +N first, then market size descending",
+            "ranking": "BUY -> Sell; BUY ordered by smaller +N first, then market size descending",
             "ohlc_source": "Toss WTS c-chart for KR/KR_ETF; TradingView public chart websocket for US/US_ETF; no Yahoo OHLC fallback",
-            "chart": "126 source-native daily candles + ST_D solid + live ST_W dashed; external chart button always opens TossInvest",
+            "chart": "126 source-native daily candles + daily ST(20,4); external chart button always opens TossInvest",
             "backtest": backtest_diagnostics,
             "backtest_report": f"data/{CATEGORY_DIR[category]}/supertrend_backtest_report.md",
         },

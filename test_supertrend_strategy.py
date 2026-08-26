@@ -3,9 +3,16 @@ import numpy as np
 import pandas as pd
 
 from supertrend_strategy import (
-    SUPER_TREND_PERIOD, SUPER_TREND_MULTIPLIER, adx, supertrend,
-    add_up_flip_reference, weekly_supertrend_asof_daily, classify_dual_supertrend,
-    signal_series, compute_buy_cycles, analyze, _current_case1_age,
+    SUPER_TREND_PERIOD,
+    SUPER_TREND_MULTIPLIER,
+    adx,
+    supertrend,
+    add_up_flip_reference,
+    classify_supertrend,
+    signal_series,
+    compute_buy_cycles,
+    analyze,
+    _current_case1_age,
 )
 
 
@@ -15,116 +22,99 @@ def frame_from_close(values, wick=0.012):
     o = np.r_[c[0], c[:-1]]
     h = np.maximum(o, c) * (1.0 + wick)
     l = np.minimum(o, c) * (1.0 - wick)
-    return pd.DataFrame({"Open":o,"High":h,"Low":l,"Close":c,"Volume":1_000_000.0}, index=idx)
+    return pd.DataFrame(
+        {"Open": o, "High": h, "Low": l, "Close": c, "Volume": 1_000_000.0},
+        index=idx,
+    )
 
 
-def weekly_ohlc(df):
-    return df.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
-
-
-class DualSupertrendTests(unittest.TestCase):
-    def test_parameters(self):
-        self.assertEqual(SUPER_TREND_PERIOD, 14)
-        self.assertEqual(SUPER_TREND_MULTIPLIER, 2.0)
+class SingleSupertrend204Tests(unittest.TestCase):
+    def test_parameters_are_20_4(self):
+        self.assertEqual(SUPER_TREND_PERIOD, 20)
+        self.assertEqual(SUPER_TREND_MULTIPLIER, 4.0)
 
     def test_tradingview_daily_st_and_adx_warmup(self):
-        c = np.linspace(100, 160, 180) + 3*np.sin(np.arange(180)/6)
+        c = np.linspace(100, 160, 180) + 3 * np.sin(np.arange(180) / 6)
         df = frame_from_close(c)
-        st = supertrend(df, 14, 2.0)
+        st = supertrend(df, 20, 4.0)
         ax = adx(df, 14, 14)
-        self.assertEqual(int(np.flatnonzero(np.isfinite(st["ATR"].to_numpy()))[0]), 13)
+        self.assertEqual(int(np.flatnonzero(np.isfinite(st["ATR"].to_numpy()))[0]), 19)
         self.assertEqual(int(np.flatnonzero(np.isfinite(ax["ADX"].to_numpy()))[0]), 27)
 
-    def test_previous_down_reference(self):
+    def test_previous_down_reference_uses_last_down_st(self):
         idx = pd.bdate_range("2025-01-01", periods=5)
-        d = pd.DataFrame({"ST_DIR":[-1,-1,1,1,1],"ST":[110,108,95,108,109]}, index=idx)
+        d = pd.DataFrame(
+            {"ST_DIR": [-1, -1, 1, 1, 1], "ST": [110, 108, 95, 108, 109]},
+            index=idx,
+        )
         out = add_up_flip_reference(d)
-        self.assertEqual(float(out["ST_UP_FLIP_REF"].iloc[2]),108.0)
-        self.assertEqual(float(out["ST_UP_FLIP_AGE"].iloc[2]),0.0)
-        self.assertEqual(float(out["ST_UP_FLIP_AGE"].iloc[3]),1.0)
+        self.assertEqual(float(out["ST_UP_FLIP_REF"].iloc[2]), 108.0)
+        self.assertEqual(float(out["ST_UP_FLIP_AGE"].iloc[2]), 0.0)
+        self.assertEqual(float(out["ST_UP_FLIP_AGE"].iloc[3]), 1.0)
 
-    def test_weekly_asof_matches_completed_week_supertrend(self):
-        n=760; x=np.arange(n,dtype=float)
-        df=frame_from_close(100+0.05*x+8*np.sin(x/21.0), wick=.018)
-        asof=weekly_supertrend_asof_daily(df,14,2.0)
-        wk=weekly_ohlc(df)
-        direct=supertrend(wk,14,2.0)
-        # On each final trading day of a completed week, the as-of weekly ST must
-        # equal a direct weekly SuperTrend computed through that week.
-        for week_end, row in direct.iloc[20:].iterrows():
-            dates=df.index[df.index.to_period('W-FRI')==week_end.to_period('W-FRI')]
-            if not len(dates):
-                continue
-            last=dates[-1]
-            got=float(asof.loc[last,"W_ST"])
-            exp=float(row["ST"])
-            if np.isfinite(exp): self.assertAlmostEqual(got,exp,places=10)
+    def test_buy_requires_uptrend_and_breakout(self):
+        self.assertEqual(classify_supertrend(1, 110, 100, 0)[0], "BUY")
+        self.assertEqual(classify_supertrend(1, 100, 100, 0)[0], "BUY")
+        self.assertEqual(classify_supertrend(1, 99.99, 100, 5)[0], "SELL")
+        self.assertEqual(classify_supertrend(-1, 120, 100, 5)[0], "SELL")
 
-    def test_weekly_asof_has_no_future_leakage(self):
-        n=720; x=np.arange(n,dtype=float)
-        df=frame_from_close(100+0.04*x+7*np.sin(x/17.0))
-        cut=650
-        a=weekly_supertrend_asof_daily(df.iloc[:cut+1],14,2.0).iloc[-1]
-        changed=df.copy()
-        changed.iloc[cut+1:, changed.columns.get_loc('High')] *= 5
-        changed.iloc[cut+1:, changed.columns.get_loc('Close')] *= .2
-        b=weekly_supertrend_asof_daily(changed.iloc[:cut+1],14,2.0).iloc[-1]
-        self.assertAlmostEqual(float(a.W_ST), float(b.W_ST), places=12)
-        self.assertEqual(int(a.W_ST_DIR), int(b.W_ST_DIR))
+    def test_flip_bar_can_be_buy_plus_zero(self):
+        idx = pd.to_datetime(["2026-08-24", "2026-08-25", "2026-08-26"])
+        d = pd.DataFrame({"CASE1": [False, False, True]}, index=idx)
+        signal_date, age_days, age_sessions = _current_case1_age(d)
+        self.assertEqual(signal_date, "2026-08-26")
+        self.assertEqual(age_days, 0)
+        self.assertEqual(age_sessions, 0)
 
-    def test_opinion_table(self):
-        # CASE1 has absolute priority regardless of CASE2 / weekly direction.
-        self.assertEqual(classify_dual_supertrend(1,110,100,2,-1,95,100,2)[0],"BUY")
-        self.assertEqual(classify_dual_supertrend(1,110,100,2,1,120,110,2)[0],"BUY")
-        # CASE2 only + ST_D UP -> HOLD.
-        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,120,110,2)[0],"HOLD")
-        # CASE2 only + ST_D DOWN -> Consider Sell.
-        self.assertEqual(classify_dual_supertrend(-1,95,100,2,1,120,110,2)[0],"SELL_CONSIDER")
-        # Everything else -> Sell.
-        self.assertEqual(classify_dual_supertrend(-1,90,100,2,-1,95,100,2)[0],"SELL")
-        self.assertEqual(classify_dual_supertrend(1,95,100,2,1,105,110,2)[0],"SELL")
-
-    def test_buy_age_uses_first_current_case1_day_and_calendar_days(self):
+    def test_buy_age_uses_first_continuous_breakout_day(self):
         idx = pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"])
-        d = pd.DataFrame({"CASE1":[False, True, True, True]}, index=idx)
+        d = pd.DataFrame({"CASE1": [False, True, True, True]}, index=idx)
         signal_date, age_days, age_sessions = _current_case1_age(d)
         self.assertEqual(signal_date, "2026-08-21")
-        self.assertEqual(age_days, 4)  # weekend is included in (+N)
+        self.assertEqual(age_days, 4)
         self.assertEqual(age_sessions, 2)
 
-    def test_backtest_buy_to_sell(self):
-        idx=pd.bdate_range("2025-01-01",periods=8)
-        d=pd.DataFrame({
-            "Open":[100,101,102,103,104,105,106,107],
-            "High":[101,103,108,112,115,111,109,108],
-            "Low":[99,100,101,102,103,104,105,106],
-            "Close":[100,102,105,108,110,109,108,107],
-            "opinion_code":["SELL","BUY","BUY","HOLD","SELL_CONSIDER","SELL_CONSIDER","SELL","HOLD"],
-        },index=idx)
-        out=compute_buy_cycles(d,years=2)
-        self.assertEqual(out["completed_events"],1)
-        self.assertEqual(out["events"][0]["time"],idx[1].strftime("%Y-%m-%d"))
-        self.assertEqual(out["events"][0]["exit_time"],idx[6].strftime("%Y-%m-%d"))
-        self.assertAlmostEqual(out["events"][0]["max_return_pct"],(115/102-1)*100,places=10)
+    def test_backtest_buy_to_first_sell(self):
+        idx = pd.bdate_range("2025-01-01", periods=7)
+        d = pd.DataFrame(
+            {
+                "Open": [100, 101, 102, 103, 104, 105, 106],
+                "High": [101, 103, 108, 112, 115, 111, 109],
+                "Low": [99, 100, 101, 102, 103, 104, 105],
+                "Close": [100, 102, 105, 108, 110, 109, 108],
+                "opinion_code": ["SELL", "BUY", "BUY", "BUY", "BUY", "SELL", "SELL"],
+            },
+            index=idx,
+        )
+        out = compute_buy_cycles(d, years=2)
+        self.assertEqual(out["completed_events"], 1)
+        self.assertEqual(out["events"][0]["time"], idx[1].strftime("%Y-%m-%d"))
+        self.assertEqual(out["events"][0]["exit_time"], idx[5].strftime("%Y-%m-%d"))
+        self.assertAlmostEqual(out["events"][0]["max_return_pct"], (115 / 102 - 1) * 100, places=10)
 
-    def test_signal_and_analyze_outputs(self):
-        n=760; x=np.arange(n,dtype=float)
-        df=frame_from_close(100+0.05*x+10*np.sin(x/19.0))
-        sig=signal_series(df)
-        for col in ("ADX","W_ST","W_ST_DIR","CASE1","CASE2","opinion_code"):
-            self.assertIn(col,sig.columns)
-        self.assertIn(str(sig.iloc[-1].opinion_code),{"BUY","HOLD","SELL_CONSIDER","SELL"})
-        result=analyze(df)
+    def test_signal_and_analyze_have_no_weekly_supertrend(self):
+        n = 760
+        x = np.arange(n, dtype=float)
+        df = frame_from_close(100 + 0.05 * x + 10 * np.sin(x / 19.0))
+        sig = signal_series(df)
+        for col in ("ADX", "ST", "ST_DIR", "ST_UP_FLIP_REF", "CASE1", "opinion_code"):
+            self.assertIn(col, sig.columns)
+        self.assertNotIn("W_ST", sig.columns)
+        self.assertNotIn("CASE2", sig.columns)
+        self.assertIn(str(sig.iloc[-1].opinion_code), {"BUY", "SELL"})
+
+        result = analyze(df)
         self.assertTrue(result["available"])
-        self.assertEqual(len(result["chart"]),126)
-        self.assertIn("weekly_supertrend",result["chart"][-1])
-        self.assertIn("st_d_direction",result)
-        self.assertIn("st_w_direction",result)
-        self.assertIn("buy_age_days",result)
-        self.assertIn("buy_signal_date",result)
+        self.assertEqual(result["period"], 20)
+        self.assertEqual(result["multiplier"], 4.0)
+        self.assertEqual(len(result["chart"]), 126)
+        self.assertNotIn("weekly_supertrend", result["chart"][-1])
+        self.assertNotIn("st_w_direction", result)
+        self.assertNotIn("case2", result)
+        self.assertIn("st_reference_value", result)
         if result["opinion_code"] == "BUY":
             self.assertRegex(result["opinion_label"], r"^BUY \(\+\d+\)$")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
