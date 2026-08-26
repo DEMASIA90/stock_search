@@ -30,7 +30,7 @@ on:
     # Korea intraday QUICK scans (current unfinished daily bar included)
     - cron: "30 10 * * 1-5"
       timezone: "Asia/Seoul"
-    - cron: "00 13 * * 1-5"
+    - cron: "07 13 * * 1-5"
       timezone: "Asia/Seoul"
     - cron: "50 14 * * 1-5"
       timezone: "Asia/Seoul"
@@ -39,7 +39,7 @@ on:
       timezone: "Asia/Seoul"
 
     # US intraday QUICK scans. New York timezone automatically follows DST.
-    - cron: "00 11 * * 1-5"
+    - cron: "07 11 * * 1-5"
       timezone: "America/New_York"
     - cron: "30 13 * * 1-5"
       timezone: "America/New_York"
@@ -133,11 +133,11 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             case "${{ github.event.schedule }}" in
-              "30 10 * * 1-5"|"00 13 * * 1-5"|"50 14 * * 1-5")
+              "30 10 * * 1-5"|"07 13 * * 1-5"|"50 14 * * 1-5")
                 MARKET="KR_GROUP"; SCAN_MODE="QUICK" ;;
               "10 16 * * 1-5")
                 MARKET="KR_GROUP"; SCAN_MODE="FULL" ;;
-              "00 11 * * 1-5"|"30 13 * * 1-5"|"30 15 * * 1-5")
+              "07 11 * * 1-5"|"30 13 * * 1-5"|"30 15 * * 1-5")
                 MARKET="US_GROUP"; SCAN_MODE="QUICK" ;;
               "20 16 * * 1-5")
                 MARKET="US_GROUP"; SCAN_MODE="FULL" ;;
@@ -373,14 +373,15 @@ jobs:
         run: |
           cat > docs/build-info.json <<EOF
           {
-            "ui_build": "20260824-v14_4_excelgrid_dualst",
+            "ui_build": "20260826-v14_4_6_auto_refresh",
+            "built_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
             "github_sha": "${{ github.sha }}",
             "run_id": "${{ github.run_id }}",
             "market": "${{ steps.market.outputs.market }}",
             "scan_mode": "${{ steps.market.outputs.scan_mode }}"
           }
           EOF
-          echo "UI build: 20260824-v14_4_excelgrid_dualst"
+          echo "UI build: 20260826-v14_4_6_auto_refresh"
           cat docs/build-info.json
 
       - name: Generate runtime Firebase endpoint
