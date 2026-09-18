@@ -1,4 +1,11 @@
-__pycache__/
-*.pyc
 .venv/
-docs/data/
+__pycache__/
+*.py[cod]
+.env
+*.log
+*.zip
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+docs/build-info.json

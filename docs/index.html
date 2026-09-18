@@ -1,234 +1,124 @@
 <!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#217346" />
-  <meta name="color-scheme" content="light" />
-  <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="apple-mobile-web-app-title" content="DTC.xlsx" />
-  <meta name="dtc-ui-build" content="20260825-v14_4_2_pwa_install" />
-  <title>DTC.xlsx</title>
-  <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png" />
-  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=20260825-v14_4_5_ui_algo" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07111f">
+  <title>Market Watch & Yield Monitor</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/styles.css">
 </head>
 <body>
-  <svg class="excel-icon-defs" aria-hidden="true">
-    <defs>
-      <symbol id="ico-save" viewBox="0 0 24 24"><path d="M5 3h12l2 2v16H5zM8 3v6h8V3M8 21v-7h8v7"/></symbol>
-      <symbol id="ico-undo" viewBox="0 0 24 24"><path d="M9 7H4v-5M4 7l5-5M5 7h8a6 6 0 0 1 0 12h-3"/></symbol>
-      <symbol id="ico-redo" viewBox="0 0 24 24"><path d="M15 7h5v-5M20 7l-5-5M19 7h-8a6 6 0 0 0 0 12h3"/></symbol>
-      <symbol id="ico-sum" viewBox="0 0 24 24"><path d="M19 4H7l7 8-7 8h12"/></symbol>
-      <symbol id="ico-paste" viewBox="0 0 24 24"><path d="M8 5V3h8v2M7 5h10v16H7zM10 8h7v10h-7"/></symbol>
-      <symbol id="ico-cut" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 10 10M8 16 18 6"/></symbol>
-      <symbol id="ico-copy" viewBox="0 0 24 24"><rect x="7" y="7" width="12" height="13"/><path d="M5 17H3V4h12v2"/></symbol>
-      <symbol id="ico-brush" viewBox="0 0 24 24"><path d="m5 15 9-9 4 4-9 9H5zM14 6l2-2 4 4-2 2M5 19c0 2-1 3-3 3 1-1 1-3 0-4 1-1 2-1 3 1z"/></symbol>
-      <symbol id="ico-border" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/><path d="M12 4v16M4 12h16"/></symbol>
-      <symbol id="ico-fill" viewBox="0 0 24 24"><path d="m6 13 6-8 6 6-7 7H6zM15 18h5"/></symbol>
-      <symbol id="ico-align" viewBox="0 0 24 24"><path d="M5 6h14M8 10h11M5 14h14M8 18h11"/></symbol>
-      <symbol id="ico-merge" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14"/><path d="M8 12h8M10 9l-3 3 3 3M14 9l3 3-3 3"/></symbol>
-      <symbol id="ico-percent" viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="m18 4-12 16"/></symbol>
-      <symbol id="ico-cond" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16"/><path d="M3 10h18M10 4v16"/></symbol>
-      <symbol id="ico-table" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16"/><path d="M3 9h18M3 14h18M8 4v16M14 4v16"/></symbol>
-      <symbol id="ico-cell" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/><path d="M12 7v10M7 12h10"/></symbol>
-      <symbol id="ico-delete" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 10v7M14 10v7"/></symbol>
-      <symbol id="ico-sort" viewBox="0 0 24 24"><path d="M7 4v16M4 17l3 3 3-3M14 5h6M14 10h5M14 15h4M14 20h3"/></symbol>
-      <symbol id="ico-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
-      <symbol id="ico-pdf" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM15 3v5h4"/><path d="M8 16c2-5 4-7 7-5 2 1 1 4-1 5-2 1-4 0-6 0"/></symbol>
-      <symbol id="ico-share" viewBox="0 0 24 24"><path d="M12 16V4M8 8l4-4 4 4M5 13v7h14v-7"/></symbol>
-      <symbol id="ico-install" viewBox="0 0 24 24"><path d="M12 3v11M8 10l4 4 4-4M5 17v4h14v-4"/></symbol>
-      <symbol id="ico-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></symbol>
-    </defs>
-  </svg>
-
-  <div class="excel-app">
-    <header class="excel-titlebar">
-      <div class="quick-tools" aria-hidden="true">
-        <button class="qa-icon"><svg><use href="#ico-save"/></svg></button>
-        <button class="qa-icon dim"><svg><use href="#ico-undo"/></svg></button>
-        <button class="qa-icon dim"><svg><use href="#ico-redo"/></svg></button>
-        <button class="qa-icon sigma"><svg><use href="#ico-sum"/></svg></button>
-        <span class="qa-text">fx</span><span class="qa-text">12</span>
-        <button class="qa-icon tiny-grid"><svg><use href="#ico-table"/></svg></button>
-        <button class="qa-icon tiny-grid"><svg><use href="#ico-cond"/></svg></button>
-        <span class="qa-caret">⌄</span>
-      </div>
-      <div class="workbook-title">DTC.xlsx</div>
-      <div class="titlebar-right" aria-hidden="true">
-        <span class="avatar dark">D</span><span class="avatar light">V</span>
-        <button class="qa-icon"><svg><use href="#ico-share"/></svg></button>
-        <span class="win-btn">—</span><span class="win-btn">□</span><span class="win-btn close">×</span>
-      </div>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <main class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="#watchlist" aria-label="모니터 홈"><span class="brand-mark" aria-hidden="true">Y</span><span><b>Yield Monitor</b><small>Market signal & realized performance</small></span></a>
+      <div class="service-status"><i></i><span>Hourly sync</span></div>
     </header>
 
-    <nav class="excel-tabbar" aria-label="리본 탭">
-      <button class="excel-file-tab" type="button">파일</button>
-      <button class="ribbon-tab active" type="button">홈</button>
-      <button class="ribbon-tab" type="button">삽입</button>
-      <button class="ribbon-tab" type="button">페이지 레이아웃</button>
-      <button class="ribbon-tab" type="button">수식</button>
-      <button class="ribbon-tab" type="button">데이터</button>
-      <button class="ribbon-tab" type="button">검토</button>
-      <button class="ribbon-tab" type="button">보기</button>
-      <button class="ribbon-tab" type="button">도움말</button>
-      <button class="ribbon-tab" type="button">Acrobat</button>
-      <div class="tell-me"><span>💡</span> 어떤 작업을 원하시나요?</div>
-      <div class="tabbar-actions">
-        <button id="installPwaBtn" class="install-pwa-button" type="button" aria-label="DTC 앱 설치"><svg><use href="#ico-install"/></svg><span>앱 설치</span></button>
-        <button class="share-button" type="button"><svg><use href="#ico-share"/></svg>공유⌄</button>
-      </div>
+    <nav class="tab-bar" role="tablist" aria-label="메인 메뉴">
+      <button class="tab-button is-active" id="watchlistTab" type="button" role="tab" aria-selected="true" aria-controls="watchlistView"><span class="tab-icon" aria-hidden="true">⌁</span>관심종목</button>
+      <button class="tab-button" id="portfolioTab" type="button" role="tab" aria-selected="false" aria-controls="portfolioView"><span class="tab-icon lock-icon" aria-hidden="true">◇</span>Yield Monitor</button>
     </nav>
 
-    <section class="excel-ribbon" aria-label="홈 리본">
-      <div class="ribbon-group clipboard-group">
-        <div class="ribbon-big-command"><svg><use href="#ico-paste"/></svg><span>붙여넣기</span><small>⌄</small></div>
-        <div class="ribbon-command-stack">
-          <div><svg><use href="#ico-cut"/></svg><span>잘라내기</span></div>
-          <div><svg><use href="#ico-copy"/></svg><span>복사</span><small>⌄</small></div>
-          <div><svg><use href="#ico-brush"/></svg><span>서식 복사</span></div>
-        </div><em>클립보드</em>
-      </div>
+    <section class="tab-view" id="watchlistView" role="tabpanel" aria-labelledby="watchlistTab">
+      <header class="section-heading watch-heading">
+        <div><p class="eyebrow">MARKET SIGNAL BOARD</p><h1>저평가 구간에서<br>추세가 살아있는 종목.</h1><p>미국 3배 ETF · 미국 시총 500조원 이상 · 한국 시총 100조원 이상을 같은 기준으로 비교합니다.</p></div>
+        <div class="update-card"><span>최근 계산</span><strong id="watchUpdatedAt">—</strong><small id="watchSource">데이터 준비 중</small></div>
+      </header>
 
-      <div class="ribbon-group font-group">
-        <div class="font-top"><span class="select-like font-name">맑은 고딕</span><span class="select-like font-size">11</span><button>A↑</button><button>A↓</button></div>
-        <div class="font-bottom"><b>가</b><b>가</b><b>가</b><span class="separator"></span><b>B</b><i>I</i><u>U</u><span>▾</span><svg><use href="#ico-border"/></svg><svg class="yellow"><use href="#ico-fill"/></svg><span class="font-color">A</span></div>
-        <em>글꼴</em>
-      </div>
-
-      <div class="ribbon-group align-group">
-        <div class="align-grid">
-          <svg><use href="#ico-align"/></svg><svg class="mirror"><use href="#ico-align"/></svg><svg><use href="#ico-align"/></svg><span>↘⌄</span>
-          <span>⇤</span><span>⇥</span><span>≡</span><span>≣</span>
-        </div>
-        <div class="align-side"><div>↕ 자동 줄 바꿈</div><div><svg><use href="#ico-merge"/></svg> 병합하고 가운데 맞춤⌄</div></div>
-        <em>맞춤</em>
-      </div>
-
-      <div class="ribbon-group number-group">
-        <div class="select-like number-format">일반 <span>⌄</span></div>
-        <div class="number-icons"><span>💰⌄</span><svg><use href="#ico-percent"/></svg><span>,</span><span>.0←</span><span>.00→</span></div>
-        <em>표시 형식</em>
-      </div>
-
-      <div class="ribbon-group style-group">
-        <div class="style-tool"><svg><use href="#ico-cond"/></svg><span>조건부<br/>서식⌄</span></div>
-        <div class="style-tool"><svg><use href="#ico-table"/></svg><span>표<br/>서식⌄</span></div>
-        <div class="cell-styles"><div><b>표준</b></div><div class="bad">나쁨</div><div class="neutral">보통</div><div class="good">좋음</div><div class="warn">경고문</div><div class="calc">계산</div></div>
-        <em>스타일</em>
-      </div>
-
-      <div class="ribbon-group cells-group">
-        <div class="style-tool"><svg><use href="#ico-cell"/></svg><span>삽입⌄</span></div>
-        <div class="style-tool"><svg><use href="#ico-delete"/></svg><span>삭제⌄</span></div>
-        <div class="style-tool"><svg><use href="#ico-table"/></svg><span>서식⌄</span></div>
-        <em>셀</em>
-      </div>
-
-      <div class="ribbon-group edit-group">
-        <div class="edit-stack"><div><svg><use href="#ico-sum"/></svg>자동 합계⌄</div><div>⇣ 채우기⌄</div><div>⌫ 지우기⌄</div></div>
-        <div class="edit-large"><svg><use href="#ico-sort"/></svg><span>정렬 및<br/>필터⌄</span></div>
-        <div class="edit-large"><svg><use href="#ico-search"/></svg><span>찾기 및<br/>선택⌄</span></div>
-        <em>편집</em>
-      </div>
-
-      <div class="ribbon-group addin-group"><div class="edit-large"><span class="orange-dot">●</span><span>추가<br/>기능</span></div><em>추가 기능</em></div>
-      <div class="ribbon-group pdf-group"><div class="edit-large"><svg><use href="#ico-pdf"/></svg><span>PDF<br/>만들기</span></div><em>Adobe Acrobat</em></div>
-    </section>
-
-    <section class="formula-bar">
-      <div id="nameBox" class="name-box">A1</div>
-      <button class="formula-action" type="button" aria-hidden="true">×</button>
-      <button class="formula-action" type="button" aria-hidden="true">✓</button>
-      <div class="fx">fx</div>
-      <input id="formulaInput" type="text" value="" autocomplete="off" spellcheck="false" placeholder="종목명 또는 티커를 입력하고 Enter" aria-label="종목 검색 및 수식 입력줄" />
-    </section>
-
-    <main class="workbook-stage">
-      <section id="marketSheetView" class="sheet-view">
-        <div class="sheet-scroll" id="sheetScroll">
-          <table id="stockSheet" class="excel-grid" aria-label="DTC 종목 워크시트">
-            <colgroup>
-              <col class="row-num-col" />
-              <col class="col-a" /><col class="col-b" /><col class="col-c" /><col class="col-d" />
-              <col class="col-e" /><col class="col-f" /><col class="col-g" /><col class="col-h" />
-              <col class="col-j" /><col class="col-k" /><col class="col-l" />
-            </colgroup>
-            <thead>
-              <tr class="column-letter-row">
-                <th class="corner-cell"></th>
-                <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th>
-              </tr>
-              <tr class="filter-row">
-                <th class="row-number">1</th>
-                <td class="filter-cell"><select id="capSelect" aria-label="시가총액 필터"></select></td>
-                <td id="sheetStatusCell" class="sheet-status-cell">데이터 로드 중</td>
-                <td colspan="9" class="chart-title-cell">선택 종목 차트 영역 · C열부터 표시</td>
-              </tr>
-              <tr class="header-row">
-                <th class="row-number">2</th>
-                <th data-sort="opinion">매수의견 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="name">종목 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="sector">섹터 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="close">현재가 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="day_change_amount">등락액 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="day_change_pct">등락율 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="market_size_krw">시가총액 <span class="sort-indicator">⌄</span></th>
-                <th data-sort="st_d_direction">ST(20,4) <span class="sort-indicator">⌄</span></th>
-                <th data-sort="adx">ADX(14) <span class="sort-indicator">⌄</span></th>
-                <th data-sort="backtest">Backtest 결과 <span class="sort-indicator">⌄</span></th>
-                <th>차트</th>
-              </tr>
-            </thead>
-            <tbody id="sheetBody"></tbody>
-          </table>
-          <div id="sheetChartOverlay" class="sheet-chart-overlay" hidden></div>
-        </div>
+      <section class="watch-summary" aria-label="관심종목 요약">
+        <article><span>조건 충족</span><strong id="watchEligible">—</strong><small id="watchScanned">후보 —</small></article>
+        <article><span>최하단 구간</span><strong id="watchBottomCount">—</strong><small>볼린저 채널 하위 20%</small></article>
+        <article><span>최고 점수</span><strong id="watchTopScore">—</strong><small>최대 30점</small></article>
       </section>
 
-      <section id="quizSheetView" class="sheet-view quiz-sheet-view" hidden>
-        <div class="quiz-sheet-grid">
-          <div class="quiz-column-letters"><span></span><b>A</b><b>B</b><b>C</b><b>D</b><b>E</b><b>F</b><b>G</b><b>H</b><b>I</b><b>J</b><b>K</b><b>L</b></div>
-          <div class="quiz-row-number">1</div>
-          <div class="quiz-excel-cell">
-            <section class="quiz-shell">
-              <header class="quiz-toolbar">
-                <div><small>SUPERTREND QUIZ</small><h1>가려진 30일의 흐름을 맞혀보세요.</h1><p>한 번에 한 문제 · 보기 5개 · SuperTrend(14,2)만 표시</p></div>
-                <button id="newQuizBtn" class="quiz-new-btn" type="button">문제 시작</button>
-              </header>
-              <div id="quizStatus" class="quiz-status">보기 5개 중 실제 다음 30거래일 차트를 선택하세요.</div>
-              <section id="quizGame" class="quiz-game" hidden>
-                <div class="quiz-question-meta"><div><span id="quizNumber">QUIZ</span><b id="quizIdentity">종목 · 기간 비공개</b></div><span id="quizSegmentLabel">1문제 · 보기 5개 · 90거래일 중 30일 가림</span></div>
-                <div id="quizMainChart" class="quiz-main-chart" aria-label="퀴즈 캔들 및 SuperTrend 차트"></div>
-                <div class="quiz-instruction"><b>가려진 구간의 실제 흐름은?</b><span id="quizInstructionSub">보기를 선택하면 SuperTrend까지 함께 미리보기 됩니다.</span></div>
-                <div id="quizChoices" class="quiz-choices" aria-label="정답 보기"></div>
-                <div class="quiz-actions"><div id="quizSelectedHint" class="quiz-selected-hint">보기를 선택하세요.</div><button id="quizSubmitBtn" class="quiz-submit-btn" type="button" disabled>정답 제출</button></div>
-                <div id="quizFeedback" class="quiz-feedback" hidden></div>
-              </section>
-            </section>
+      <section class="panel score-guide">
+        <div><p class="eyebrow">SCORING</p><h2>점수 산정 기준</h2></div>
+        <div class="score-items"><span><b>+10</b> Supertrend 10·3 상승</span><span><b>+10</b> Supertrend 20·4 상승</span><span><b>+5</b> 60일선 기울기 양수</span><span><b>+5</b> 200일선 기울기 양수</span></div>
+      </section>
+
+      <section class="panel table-panel watch-table-panel">
+        <div class="panel-heading filter-heading">
+          <div><p class="eyebrow">RANKING</p><h2>밴드 우선 · 점수순</h2></div>
+          <div class="filter-group" aria-label="관심종목 필터">
+            <select id="watchMarketFilter" aria-label="시장 필터"><option value="ALL">전체 시장</option><option value="US">미국</option><option value="KR">한국</option><option value="ETF">3배 ETF</option></select>
+            <select id="watchBandFilter" aria-label="볼린저 밴드 필터"><option value="ALL">전체 밴드</option><option value="최하단">최하단만</option><option value="하단">하단</option><option value="중단">중단</option><option value="상단">상단</option><option value="최상단">최상단</option></select>
           </div>
         </div>
+        <div class="table-wrap wide-table"><table><thead><tr><th>#</th><th>종목</th><th>밴드</th><th class="numeric">점수</th><th>ST 10·3</th><th>ST 20·4</th><th>60일선</th><th>200일선</th><th class="numeric">현재가</th><th class="numeric">60일 평균 대비</th><th>섹터</th><th class="numeric">시가총액</th></tr></thead><tbody id="watchlistBody"></tbody></table></div>
+        <div class="empty is-hidden" id="watchlistEmpty">조건에 맞는 종목이 없거나 첫 업데이트가 아직 완료되지 않았습니다.</div>
       </section>
-    </main>
+      <section class="notice is-hidden" id="watchWarningPanel"><strong>관심종목 조회 참고사항</strong><ul id="watchWarnings"></ul></section>
+    </section>
 
-    <footer class="excel-statusbar">
-      <div class="sheet-nav" aria-label="워크시트 선택">
-        <button class="sheet-nav-icon" type="button" aria-hidden="true">＋</button>
-        <button class="sheet-tab active" data-sheet="KR" type="button">국장</button>
-        <button class="sheet-tab" data-sheet="KR_ETF" type="button">국장ETF</button>
-        <button class="sheet-tab" data-sheet="US" type="button">미장</button>
-        <button class="sheet-tab" data-sheet="US_ETF" type="button">미장ETF</button>
-        <button class="sheet-tab quiz-tab" data-sheet="QUIZ" type="button">Quiz</button>
+    <section class="tab-view is-hidden" id="portfolioView" role="tabpanel" aria-labelledby="portfolioTab">
+      <div class="portfolio-locked" id="portfolioLocked">
+        <div class="lock-orb" aria-hidden="true">◇</div><p class="eyebrow">PRIVATE YIELD MONITOR</p><h1>수익 모니터가 잠겨 있습니다.</h1><p>계좌 자산·실현손익·입출금 기록을 열려면 숫자 4자리 PIN을 입력하세요.</p><button class="primary compact" id="openPinButton" type="button">PIN 입력</button>
       </div>
-      <div class="status-right"><span id="bottomStatus">준비</span><span>100%</span><span class="zoom-line"></span><span>＋</span></div>
-    </footer>
-  </div>
 
-  <script src="./runtime-config.js?v=20260825-v14_4_1_excel_exact_ui"></script>
-  <script src="./app.js?v=20260827-v14_4_8_st_long"></script>
-  <script src="./pwa.js?v=20260825-v14_4_2_pwa_install"></script>
+      <div class="dashboard is-hidden" id="dashboardContent">
+        <header class="dashboard-heading"><div><p class="eyebrow">PRIVATE PERFORMANCE</p><h1>Yield Monitor</h1></div><div class="top-actions"><div class="status-pill"><span></span><b id="environment">—</b></div><button class="ghost" id="lockButton" type="button">잠그기</button></div></header>
+        <section class="account-strip"><div><span>조회 계좌</span><strong id="account">—</strong></div><div><span>누적 기록 시작</span><strong id="recordingStart">—</strong></div><div><span>최근 업데이트</span><strong id="updatedAt">—</strong></div></section>
+
+        <section class="monitor-section section-a" aria-labelledby="sectionATitle">
+          <div class="section-label"><span>A</span><div><p class="eyebrow">ASSET & REALIZED YIELD</p><h2 id="sectionATitle">총자산과 누적 실현손익</h2></div></div>
+          <div class="summary-grid yield-summary">
+            <article class="metric hero-metric"><span>총자산</span><strong id="totalAsset">—</strong><small>현금·국내·해외자산 포함</small></article>
+            <article class="metric"><span>누적 실현손익</span><strong id="realizedPnl">—</strong><small id="realizedCount">—</small></article>
+            <article class="metric"><span>현재 평가손익</span><strong id="unrealizedPnl">—</strong><small id="unrealizedRate">—</small></article>
+            <article class="metric"><span>누적 순입출금</span><strong id="netCashFlow">—</strong><small>수익률 계산과 분리</small></article>
+          </div>
+          <div class="charts-grid yield-chart-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산·실현수익 추이</h2></div><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized">누적 실현손익</span></div></div>
+              <div class="line-chart interactive-chart" id="yieldChart" aria-label="총자산과 누적 실현손익 그래프"></div><p class="chart-help">그래프의 점을 누르면 해당 시점의 실현 종목과 입출금을 확인할 수 있습니다.</p>
+            </article>
+            <article class="panel event-detail-panel" id="eventDetailPanel">
+              <div class="panel-heading"><div><p class="eyebrow">SELECTED POINT</p><h2 id="eventDetailTitle">최근 기록</h2></div></div>
+              <div class="selected-metrics"><div><span>총자산</span><b id="selectedAsset">—</b></div><div><span>누적 실현손익</span><b id="selectedRealized">—</b></div></div>
+              <div class="event-list" id="selectedEvents"><p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="monitor-section section-b" aria-labelledby="sectionBTitle">
+          <div class="section-label"><span>B</span><div><p class="eyebrow">OPEN POSITIONS</p><h2 id="sectionBTitle">현재 보유종목과 기술 상태</h2></div></div>
+          <section class="panel table-panel">
+            <div class="panel-heading"><div><h2>보유종목</h2><p>수익률·평가금액과 A/B/C 상태를 함께 표시합니다.</p></div><span id="positionsCount">0개</span></div>
+            <div class="table-wrap wide-table"><table><thead><tr><th>종목</th><th>섹터</th><th class="numeric">평가금액</th><th class="numeric">평가손익</th><th class="numeric">수익률</th><th>A · Bollinger</th><th>B · ST 14·3</th><th>C · 60일선</th><th>C · 200일선</th></tr></thead><tbody id="holdingsBody"></tbody></table></div>
+            <div class="empty is-hidden" id="holdingsEmpty">현재 보유종목이 없습니다.</div>
+          </section>
+        </section>
+
+        <section class="monitor-section section-c" aria-labelledby="sectionCTitle">
+          <div class="section-label"><span>C</span><div><p class="eyebrow">PERFORMANCE ANALYTICS</p><h2 id="sectionCTitle">섹터·월별·매도 통계</h2></div></div>
+          <div class="analytics-grid">
+            <article class="panel allocation-panel"><div class="panel-heading"><div><p class="eyebrow">SECTOR RETURN</p><h2>섹터별 평가손익</h2></div></div><div class="allocation-body sector-body"><div class="donut" id="sectorDonut"><span id="sectorCount">0</span><small>섹터</small></div><div class="allocation-legend sector-legend" id="sectorLegend"></div></div></article>
+            <article class="panel monthly-panel"><div class="panel-heading"><div><p class="eyebrow">MONTHLY REALIZED</p><h2>월별 실현수익률</h2></div></div><div class="monthly-chart" id="monthlyChart"></div></article>
+            <article class="panel trade-stat-panel"><div class="panel-heading"><div><p class="eyebrow">EXIT QUALITY</p><h2>익절·손절 통계</h2></div></div><div class="trade-stats"><div><span>승률</span><strong id="winRate">—</strong></div><div><span>평균 익절</span><strong class="positive" id="avgTakeProfit">—</strong></div><div><span>평균 손절</span><strong class="negative" id="avgStopLoss">—</strong></div><div><span>실현 매도</span><strong id="exitCount">—</strong></div></div></article>
+          </div>
+          <section class="panel table-panel realized-table-panel">
+            <div class="panel-heading"><div><p class="eyebrow">REALIZED EVENTS</p><h2>최근 실현 종목</h2></div><span id="realizedEventsCount">0건</span></div>
+            <div class="table-wrap"><table><thead><tr><th>일자</th><th>종목</th><th>섹터</th><th class="numeric">매도수량</th><th class="numeric">매도가</th><th class="numeric">실현손익</th><th class="numeric">수익률</th></tr></thead><tbody id="realizedBody"></tbody></table></div>
+            <div class="empty is-hidden" id="realizedEmpty">서버 기록 이후 실현된 매도내역이 없습니다.</div>
+          </section>
+        </section>
+
+        <section class="notice is-hidden" id="warningPanel"><strong>조회 참고사항</strong><ul id="warnings"></ul></section>
+        <footer>NH투자증권 Namuh PLUG 조회 데이터 · 주문 기능 없음 · <span id="source"></span></footer>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-backdrop is-hidden" id="pinModal" role="presentation">
+    <section class="pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
+      <button class="modal-close" id="closePinButton" type="button" aria-label="닫기">×</button><div class="pin-lock" aria-hidden="true">◇</div><p class="eyebrow">PRIVATE ACCESS</p><h2 id="pinTitle">Yield Monitor 열기</h2><p class="dialog-copy">설정한 숫자 4자리 PIN을 입력하세요.</p>
+      <form id="pinForm"><label for="pin">Portfolio PIN</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" autocomplete="off" placeholder="••••" required><p class="form-message" id="pinMessage" role="status"></p><div class="dialog-actions"><button class="ghost dialog-cancel" id="cancelPinButton" type="button">취소</button><button class="primary" id="unlockButton" type="submit">Yield Monitor 열기</button></div></form>
+      <p class="security-note">PIN은 서버로 전송되거나 브라우저에 저장되지 않습니다.</p>
+    </section>
+  </div>
+  <script type="module" src="assets/app.mjs"></script>
 </body>
 </html>

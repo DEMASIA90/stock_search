@@ -8,20 +8,15 @@
     ],
     "headers": [
       {
-        "source": "/sw.js",
+        "source": "/data/portfolio.enc.json",
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "no-cache, no-store, must-revalidate"
-          }
-        ]
-      },
-      {
-        "source": "/manifest.webmanifest",
-        "headers": [
+            "value": "no-store, max-age=0"
+          },
           {
-            "key": "Cache-Control",
-            "value": "public, max-age=3600"
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
           }
         ]
       },
@@ -31,23 +26,15 @@
           {
             "key": "Cache-Control",
             "value": "no-store, max-age=0"
-          },
-          {
-            "key": "Access-Control-Allow-Origin",
-            "value": "*"
           }
         ]
       },
       {
-        "source": "/data/**",
+        "source": "/assets/**",
         "headers": [
           {
             "key": "Cache-Control",
-            "value": "public, max-age=300"
-          },
-          {
-            "key": "Access-Control-Allow-Origin",
-            "value": "*"
+            "value": "public, max-age=3600"
           }
         ]
       }

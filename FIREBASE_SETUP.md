@@ -1,49 +1,24 @@
-# DTC Firebase Hosting migration
+# Firebase Hosting 유지 사항
 
-This repository no longer hard-codes the old Firebase project or Hosting URL.
-GitHub Actions injects the production Hosting endpoint into `docs/runtime-config.js`.
+기존 Firebase 프로젝트와 Hosting 사이트를 그대로 사용하도록 구성했습니다. 저장소에 이미 설정된 GitHub Actions 변수와 Secret이 유효하면 추가 설정은 필요하지 않습니다.
 
-## Required GitHub repository settings
+## 유지되는 저장소 설정
 
-Repository Settings → Secrets and variables → Actions
+GitHub 저장소의 **Settings → Secrets and variables → Actions**에 다음 값이 있어야 합니다.
 
-### Variables
-- `FIREBASE_PROJECT_ID`: Firebase / Google Cloud project ID
-- `FIREBASE_SITE_ID`: Firebase Hosting site ID; the public URL is `https://<SITE_ID>.web.app`
+- `FIREBASE_PROJECT_ID`: 기존 Firebase 프로젝트 ID
+- `FIREBASE_SITE_ID`: 기존 Firebase Hosting 사이트 ID
+- `FIREBASE_SERVICE_ACCOUNT_JSON`: Firebase 배포용 서비스 계정 JSON Secret
 
-### Secret
-- `FIREBASE_SERVICE_ACCOUNT_JSON`: full service-account JSON used by Firebase CLI
+워크플로는 배포 시점에만 서비스 계정 JSON을 임시 파일로 만들고 작업 종료 전에 삭제합니다. 서비스 계정 JSON을 저장소 파일로 추가하지 마세요.
 
-Do not commit a service-account JSON file to the repository.
+## 배포 트리거
 
-## Exact DTC URL
+다음 파일이 `main` 브랜치에 푸시되면 자동 배포됩니다.
 
-If you want `https://dtc.web.app`, the Hosting site ID must be exactly `dtc`.
-Hosting site IDs are globally unique, so this works only if `dtc` is still available.
-The Firebase project ID can be different from the Hosting site ID.
+- `docs/**`
+- `firebase.json`
+- `.firebaserc`
+- `.github/workflows/update-and-deploy.yml`
 
-Example:
-
-```bash
-npm install -g firebase-tools
-firebase login
-firebase hosting:sites:create dtc --project YOUR_FIREBASE_PROJECT_ID
-```
-
-If Firebase reports that `dtc` is already reserved, choose another site ID such as
-`dtc-stock` or connect a custom domain.
-
-## First deployment
-
-1. Create the new Firebase project in Firebase Console. Display name can be `DTC`.
-2. Create/claim the Hosting site ID.
-3. Firebase Console → Project settings → Service accounts → Generate new private key.
-4. Add the two GitHub variables and one GitHub secret above.
-5. Push this repository.
-6. GitHub Actions → `Dongtan Trading Center · Build & Deploy` → Run workflow.
-7. Select `ALL` and `FULL` for the first run.
-8. Confirm `https://<FIREBASE_SITE_ID>.web.app/build-info.json` shows the current GitHub SHA.
-9. Re-run the Android workflow after the variables are set so the APK uses the new Firebase origin.
-
-The workflow writes the selected `FIREBASE_SITE_ID` into `firebase.json` only inside the CI runner,
-so no Firebase project/site ID needs to be hard-coded in source control.
+자산 업데이트 배치가 데이터 파일을 푸시하면 위 조건에 따라 동일한 Firebase Hosting 사이트가 갱신됩니다. 시간당 자동 갱신을 설정한 경우 동일 워크플로가 매시 17분에 데이터를 조회하고, 암호화 이력을 커밋한 뒤 같은 Firebase Hosting 사이트에 바로 배포합니다.
