@@ -15,21 +15,13 @@ function number(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function hasNumber(value) {
-  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
-}
-
 function money(value, currency = "KRW") {
   return currency === "USD" ? usd.format(number(value)) : won.format(number(value));
 }
 
-function optionalMoney(value, currency = "KRW") {
-  return hasNumber(value) ? money(value, currency) : "—";
-}
-
 function percent(value, digits = 2) {
-  if (!hasNumber(value)) return "—";
   const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "—";
   return `${parsed > 0 ? "+" : ""}${parsed.toFixed(digits)}%`;
 }
 
@@ -193,30 +185,85 @@ function renderHoldings(holdings) {
   </tr>`).join("");
 }
 
+
 function eventDate(value) {
   return compactDate(value);
 }
 
-function renderSelectedPoint(point) {
-  if (!point) return;
-  const day = eventDate(point.at);
-  setText("#eventDetailTitle", dateText(point.at, true));
-  setText("#selectedAsset", point.asset_recorded === false || !hasNumber(point.total_asset_krw)
-    ? "과거 자산 기록 없음"
-    : money(point.total_asset_krw));
-  const selectedRealized = $("#selectedRealized");
-  selectedRealized.textContent = money(point.cumulative_realized_krw);
-  selectedRealized.className = pnlClass(point.cumulative_realized_krw);
-  const realized = (portfolio.realized_events || []).filter((item) => eventDate(item.date) === day);
-  const flows = (portfolio.cash_flows || []).filter((item) => eventDate(item.date) === day);
-  const parts = [
-    ...realized.map((item) => `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${optionalMoney(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}${item.pnl_available === false ? " · 손익 미확인" : ""}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${optionalMoney(item.realized_pnl_krw)}</b></article>`),
-    ...flows.map((item) => `<article class="event-item"><span class="event-icon flow">${item.side === "DEPOSIT" ? "+" : "−"}</span><div><strong>${item.side === "DEPOSIT" ? "입금" : "출금"}</strong><small>${escapeHtml(item.label || "계좌 현금흐름")}</small></div><b class="${item.side === "DEPOSIT" ? "positive" : "negative"}">${item.side === "DEPOSIT" ? "+" : "−"}${money(item.amount_krw)}</b></article>`),
-  ];
-  $("#selectedEvents").innerHTML = parts.length ? parts.join("") : '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
+let selectedYieldRange = "6M";
+let selectedChartDay = null;
+
+function parseCompactDay(value) {
+  const day = eventDate(value);
+  if (!/^\d{8}$/.test(day)) return null;
+  return new Date(Number(day.slice(0, 4)), Number(day.slice(4, 6)) - 1, Number(day.slice(6, 8)));
 }
 
-function samplePoints(points, maximum = 240) {
+function dayLabel(value, dense = false) {
+  const day = eventDate(value);
+  if (!/^\d{8}$/.test(day)) return dateText(value);
+  return dense
+    ? `${day.slice(2, 4)}.${day.slice(4, 6)}.${day.slice(6, 8)}`
+    : `${day.slice(0, 4)}.${day.slice(4, 6)}.${day.slice(6, 8)}`;
+}
+
+function axisMoney(value) {
+  const amount = Math.round(number(value));
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}₩${Math.abs(amount).toLocaleString("ko-KR")}`;
+}
+
+function moneyMaybe(value, currency = "KRW") {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? money(parsed, currency) : "—";
+}
+
+function buildDailySeries() {
+  const byDay = new Map();
+  const history = Array.isArray(portfolio?.yield_history) ? portfolio.yield_history : [];
+  history.forEach((row) => {
+    const day = eventDate(row.at);
+    if (!day) return;
+    byDay.set(day, {
+      day,
+      at: row.at,
+      total_asset_krw: number(row.total_asset_krw),
+      cumulative_realized_krw: number(row.cumulative_realized_krw),
+      daily_realized_krw: 0,
+      daily_net_flow_krw: 0,
+    });
+  });
+  (portfolio?.realized_events || []).forEach((item) => {
+    const day = eventDate(item.date);
+    if (!day) return;
+    const point = byDay.get(day);
+    if (point) point.daily_realized_krw += number(item.realized_pnl_krw);
+  });
+  (portfolio?.cash_flows || []).forEach((item) => {
+    const day = eventDate(item.date);
+    if (!day) return;
+    const point = byDay.get(day);
+    if (point) point.daily_net_flow_krw += item.side === "DEPOSIT" ? number(item.amount_krw) : -number(item.amount_krw);
+  });
+  return [...byDay.values()].sort((a, b) => String(a.day).localeCompare(String(b.day)));
+}
+
+function filterSeriesByRange(points, range) {
+  if (!points.length || range === "ALL") return points;
+  const last = parseCompactDay(points.at(-1).day);
+  if (!last) return points;
+  const from = new Date(last);
+  if (range === "1M") from.setMonth(from.getMonth() - 1);
+  else if (range === "3M") from.setMonth(from.getMonth() - 3);
+  else if (range === "6M") from.setMonth(from.getMonth() - 6);
+  else if (range === "1Y") from.setFullYear(from.getFullYear() - 1);
+  return points.filter((point) => {
+    const day = parseCompactDay(point.day);
+    return day && day >= from;
+  });
+}
+
+function sampleChartPoints(points, maximum = 210) {
   if (points.length <= maximum) return points;
   const sampled = [];
   const step = (points.length - 1) / (maximum - 1);
@@ -224,58 +271,185 @@ function samplePoints(points, maximum = 240) {
   return sampled;
 }
 
-function renderYieldChart(historyRows) {
-  const host = $("#yieldChart");
-  const points = samplePoints(Array.isArray(historyRows) ? historyRows : []);
-  if (!points.length) {
-    host.innerHTML = '<div class="chart-empty">시간당 업데이트가 시작되면 자산과 실현수익 추이가 누적됩니다.</div>';
-    return;
-  }
-  const assetPoints = points.filter((point) => point.asset_recorded !== false && hasNumber(point.total_asset_krw));
-  const realizedPoints = points.filter((point) => hasNumber(point.cumulative_realized_krw));
-  const assets = assetPoints.map((point) => number(point.total_asset_krw));
-  const realized = realizedPoints.map((point) => number(point.cumulative_realized_krw));
-  const width = 820; const height = 260; const pad = 24;
-  const domain = (values) => {
-    if (!values.length) return [0, 1];
-    let low = Math.min(...values); let high = Math.max(...values);
-    if (low === high) { const spread = Math.max(1, Math.abs(high) * 0.02); low -= spread; high += spread; }
-    return [low, high];
-  };
-  const [assetLow, assetHigh] = domain(assets);
-  const [realizedLow, realizedHigh] = domain(realized);
-  const pointTime = (point, fallback) => {
-    const parsed = new Date(point.at).getTime();
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-  const times = points.map((point, index) => pointTime(point, index));
-  const timeLow = Math.min(...times); const timeHigh = Math.max(...times);
-  const x = (point, fallback = 0) => pad + ((pointTime(point, fallback) - timeLow) / Math.max(1, timeHigh - timeLow)) * (width - pad * 2);
-  const y = (value, low, high) => height - pad - ((value - low) / Math.max(1, high - low)) * (height - pad * 2);
-  const assetLine = assetPoints.map((point, index) => `${x(point, index)},${y(number(point.total_asset_krw), assetLow, assetHigh)}`).join(" ");
-  const realizedLine = realizedPoints.map((point, index) => `${x(point, index)},${y(number(point.cumulative_realized_krw), realizedLow, realizedHigh)}`).join(" ");
-  const eventDays = new Set([...(portfolio.realized_events || []), ...(portfolio.cash_flows || [])].map((item) => eventDate(item.date)));
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산과 누적 실현손익 추이">
-    <defs><linearGradient id="assetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#51e4ba" stop-opacity=".2"/><stop offset="1" stop-color="#51e4ba" stop-opacity="0"/></linearGradient></defs>
-    ${assetPoints.length >= 2 ? `<polygon points="${x(assetPoints[0])},${height - pad} ${assetLine} ${x(assetPoints.at(-1))},${height - pad}" fill="url(#assetFill)"/>` : ""}
-    ${assetPoints.length >= 2 ? `<polyline points="${assetLine}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
-    ${realizedPoints.length >= 2 ? `<polyline points="${realizedLine}" fill="none" stroke="#9d8cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 5"/>` : ""}
-    ${points.map((point, index) => {
-      const hasAsset = point.asset_recorded !== false && hasNumber(point.total_asset_krw);
-      const cy = hasAsset
-        ? y(number(point.total_asset_krw), assetLow, assetHigh)
-        : y(number(point.cumulative_realized_krw), realizedLow, realizedHigh);
-      return `<circle class="chart-point ${eventDays.has(eventDate(point.at)) ? "has-event" : ""}" data-index="${index}" cx="${x(point, index)}" cy="${cy}" r="${eventDays.has(eventDate(point.at)) ? 5 : 3}"/>`;
-    }).join("")}
-  </svg><div class="chart-axis"><span>${dateText(points[0].at)}</span><strong>${assets.length ? money(assets.at(-1)) : "총자산 기록 없음"}</strong><span>${dateText(points.at(-1).at)}</span></div>`;
-  host.querySelectorAll(".chart-point").forEach((node) => node.addEventListener("click", () => {
-    host.querySelectorAll(".chart-point").forEach((point) => point.classList.remove("selected"));
-    node.classList.add("selected");
-    renderSelectedPoint(points[Number(node.dataset.index)]);
-  }));
-  renderSelectedPoint(points.at(-1));
+function createTicks(low, high, count = 4) {
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return [0];
+  if (low === high) return [low];
+  return Array.from({ length: count }, (_, index) => low + (high - low) * (index / (count - 1)));
 }
 
+function extent(values, { includeZero = false } = {}) {
+  const safe = values.filter((value) => Number.isFinite(value));
+  if (!safe.length) return includeZero ? [-1, 1] : [0, 1];
+  let low = Math.min(...safe);
+  let high = Math.max(...safe);
+  if (includeZero) { low = Math.min(low, 0); high = Math.max(high, 0); }
+  if (low === high) {
+    const spread = Math.max(1, Math.abs(high) * 0.15);
+    low -= spread;
+    high += spread;
+  }
+  return [low, high];
+}
+
+function sharedDateTicks(points) {
+  if (!points.length) return [];
+  const indexes = [0, Math.floor((points.length - 1) * 0.25), Math.floor((points.length - 1) * 0.5), Math.floor((points.length - 1) * 0.75), points.length - 1];
+  return [...new Set(indexes)].map((index) => ({ index, label: dayLabel(points[index].day, true) }));
+}
+
+function renderChartTooltip(host, payload) {
+  if (!host) return;
+  let tooltip = host.querySelector('.chart-tooltip');
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.className = 'chart-tooltip';
+    host.appendChild(tooltip);
+  }
+  tooltip.innerHTML = `<strong>${escapeHtml(payload.title)}</strong>${payload.lines.map((line) => `<span>${escapeHtml(line)}</span>`).join('')}`;
+  tooltip.style.left = `${Math.max(8, Math.min(payload.x, host.clientWidth - 190))}px`;
+  tooltip.style.top = `${Math.max(8, Math.min(payload.y, host.clientHeight - 90))}px`;
+  tooltip.classList.add('is-visible');
+}
+
+function clearChartTooltip(host) {
+  host?.querySelector('.chart-tooltip')?.classList.remove('is-visible');
+}
+
+function renderSelectedPoint(point) {
+  if (!point) return;
+  selectedChartDay = point.day;
+  setText('#eventDetailTitle', dayLabel(point.day));
+  setText('#selectedAsset', moneyMaybe(point.total_asset_krw));
+  const dayRealized = $('#selectedDayRealized');
+  dayRealized.textContent = moneyMaybe(point.daily_realized_krw);
+  dayRealized.className = pnlClass(point.daily_realized_krw);
+  const cumulative = $('#selectedCumulativeRealized');
+  cumulative.textContent = moneyMaybe(point.cumulative_realized_krw);
+  cumulative.className = pnlClass(point.cumulative_realized_krw);
+  const flow = $('#selectedDayNetFlow');
+  flow.textContent = moneyMaybe(point.daily_net_flow_krw);
+  flow.className = pnlClass(point.daily_net_flow_krw);
+  const realized = (portfolio.realized_events || []).filter((item) => eventDate(item.date) === point.day);
+  const flows = (portfolio.cash_flows || []).filter((item) => eventDate(item.date) === point.day);
+  const parts = [
+    ...realized.map((item) => `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${moneyMaybe(item.realized_pnl_krw)}</b></article>`),
+    ...flows.map((item) => `<article class="event-item"><span class="event-icon flow">${item.side === "DEPOSIT" ? "+" : "−"}</span><div><strong>${item.side === "DEPOSIT" ? "입금" : "출금"}</strong><small>${escapeHtml(item.label || "계좌 현금흐름")}</small></div><b class="${item.side === "DEPOSIT" ? "positive" : "negative"}">${item.side === "DEPOSIT" ? "+" : "−"}${money(item.amount_krw)}</b></article>`),
+  ];
+  $('#selectedEvents').innerHTML = parts.length ? parts.join('') : '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
+}
+
+function renderAssetChart(points) {
+  const host = $('#assetChart');
+  if (!points.length) {
+    host.innerHTML = '<div class="chart-empty">최근 6개월 자산 기록이 없어서 총자산 그래프를 표시할 수 없습니다.</div>';
+    return;
+  }
+  const width = 860; const height = 280;
+  const pad = { top: 18, right: 18, bottom: 44, left: 110 };
+  const values = points.map((point) => number(point.total_asset_krw));
+  const [low, high] = extent(values);
+  const yTicks = createTicks(low, high, 4);
+  const x = (index) => pad.left + (index / Math.max(1, points.length - 1)) * (width - pad.left - pad.right);
+  const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
+  const line = points.map((point, index) => `${x(index)},${y(number(point.total_asset_krw))}`).join(' ');
+  const xTicks = sharedDateTicks(points);
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="최근 기간 총자산 추이 선 그래프">
+    <defs><linearGradient id="assetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#51e4ba" stop-opacity=".28"/><stop offset="1" stop-color="#51e4ba" stop-opacity="0"/></linearGradient></defs>
+    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join('')}
+    ${xTicks.map((tick) => `<g><line x1="${x(tick.index)}" y1="${height - pad.bottom}" x2="${x(tick.index)}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(tick.index)}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join('')}
+    <polygon points="${pad.left},${height - pad.bottom} ${line} ${width - pad.right},${height - pad.bottom}" fill="url(#assetFill)"/>
+    <polyline points="${line}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    ${points.map((point, index) => `<circle class="chart-point asset ${point.day === selectedChartDay ? 'selected' : ''}" data-index="${index}" cx="${x(index)}" cy="${y(number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : 4}" />`).join('')}
+  </svg>`;
+  host.querySelectorAll('.chart-point.asset').forEach((node) => {
+    const point = points[Number(node.dataset.index)];
+    const show = () => {
+      host.querySelectorAll('.chart-point.asset').forEach((dot) => dot.classList.remove('selected'));
+      node.classList.add('selected');
+      renderSelectedPoint(point);
+      renderChartTooltip(host, {
+        x: Number(node.getAttribute('cx')) / width * host.clientWidth + 10,
+        y: Number(node.getAttribute('cy')) / height * host.clientHeight - 16,
+        title: `${dayLabel(point.day)}`,
+        lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `일자 실현수익 ${moneyMaybe(point.daily_realized_krw)}`, `누적 실현손익 ${moneyMaybe(point.cumulative_realized_krw)}`],
+      });
+    };
+    node.addEventListener('click', show);
+    node.addEventListener('mouseenter', show);
+  });
+  host.addEventListener('mouseleave', () => clearChartTooltip(host));
+}
+
+function renderRealizedChart(points) {
+  const host = $('#realizedChart');
+  if (!points.length) {
+    host.innerHTML = '<div class="chart-empty">최근 6개월 실현수익 기록이 없어서 막대 그래프를 표시할 수 없습니다.</div>';
+    return;
+  }
+  const width = 860; const height = 280;
+  const pad = { top: 18, right: 18, bottom: 44, left: 110 };
+  const values = points.map((point) => number(point.daily_realized_krw));
+  const [low, high] = extent(values, { includeZero: true });
+  const yTicks = createTicks(low, high, 5);
+  const x = (index) => pad.left + (index / Math.max(1, points.length - 1)) * (width - pad.left - pad.right);
+  const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
+  const zeroY = y(0);
+  const xTicks = sharedDateTicks(points);
+  const gap = points.length > 1 ? x(1) - x(0) : 24;
+  const barWidth = Math.max(5, Math.min(18, gap * 0.72));
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="최근 기간 일별 실현수익 막대 그래프">
+    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join('')}
+    <line x1="${pad.left}" y1="${zeroY}" x2="${width - pad.right}" y2="${zeroY}" class="chart-zero-line"/>
+    ${xTicks.map((tick) => `<g><line x1="${x(tick.index)}" y1="${height - pad.bottom}" x2="${x(tick.index)}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(tick.index)}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join('')}
+    ${points.map((point, index) => {
+      const value = number(point.daily_realized_krw);
+      const barTop = value >= 0 ? y(value) : zeroY;
+      const barHeight = Math.max(2, Math.abs(y(value) - zeroY));
+      return `<rect class="chart-bar ${value >= 0 ? 'positive' : 'negative'} ${point.day === selectedChartDay ? 'selected' : ''}" data-index="${index}" x="${x(index) - barWidth / 2}" y="${barTop}" width="${barWidth}" height="${barHeight}" rx="3" ry="3"></rect>`;
+    }).join('')}
+  </svg>`;
+  host.querySelectorAll('.chart-bar').forEach((node) => {
+    const point = points[Number(node.dataset.index)];
+    const show = () => {
+      host.querySelectorAll('.chart-bar').forEach((bar) => bar.classList.remove('selected'));
+      node.classList.add('selected');
+      renderSelectedPoint(point);
+      renderChartTooltip(host, {
+        x: (Number(node.getAttribute('x')) + Number(node.getAttribute('width')) / 2) / width * host.clientWidth + 10,
+        y: Number(node.getAttribute('y')) / height * host.clientHeight - 16,
+        title: `${dayLabel(point.day)}`,
+        lines: [`일자 실현수익 ${moneyMaybe(point.daily_realized_krw)}`, `총자산 ${moneyMaybe(point.total_asset_krw)}`, `당일 순입출금 ${moneyMaybe(point.daily_net_flow_krw)}`],
+      });
+    };
+    node.addEventListener('click', show);
+    node.addEventListener('mouseenter', show);
+  });
+  host.addEventListener('mouseleave', () => clearChartTooltip(host));
+}
+
+function renderYieldCharts(historyRows) {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  const fallbackEmpty = '<div class="chart-empty">시간당 업데이트가 시작되면 최근 6개월 자산·실현수익 추이가 누적됩니다.</div>';
+  if (!rows.length) {
+    $('#assetChart').innerHTML = fallbackEmpty;
+    $('#realizedChart').innerHTML = fallbackEmpty;
+    $('#selectedEvents').innerHTML = '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
+    return;
+  }
+  const allDaily = buildDailySeries();
+  const filtered = filterSeriesByRange(allDaily, selectedYieldRange);
+  const points = sampleChartPoints(filtered, selectedYieldRange === 'ALL' ? 320 : 210);
+  if (!points.length) {
+    $('#assetChart').innerHTML = fallbackEmpty;
+    $('#realizedChart').innerHTML = fallbackEmpty;
+    return;
+  }
+  if (!selectedChartDay || !points.some((point) => point.day === selectedChartDay)) selectedChartDay = points.at(-1).day;
+  renderAssetChart(points);
+  renderRealizedChart(points);
+  const selected = points.find((point) => point.day === selectedChartDay) || points.at(-1);
+  renderSelectedPoint(selected);
+}
 const sectorColors = ["#51e4ba", "#7fa8ff", "#9d8cff", "#f6bd60", "#ef7185", "#66c7d8", "#b5d86b", "#d88dd2"];
 
 function renderSectorAnalytics(holdings) {
@@ -323,8 +497,8 @@ function renderRealizedEvents(events) {
   $("#realizedEmpty").classList.toggle("is-hidden", rows.length > 0);
   $("#realizedBody").innerHTML = rows.slice(0, 100).map((item) => `<tr>
     <td>${dateText(item.date)}</td><td><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
-    <td><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td><td class="numeric">${qty.format(number(item.qty))}</td><td class="numeric">${optionalMoney(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</td>
-    <td class="numeric ${pnlClass(item.realized_pnl_krw)}"><strong>${optionalMoney(item.realized_pnl_krw)}</strong>${item.pnl_available === false ? '<small class="muted">손익 미확인</small>' : ""}</td><td class="numeric ${pnlClass(item.return_pct)}"><strong>${percent(item.return_pct)}</strong></td>
+    <td><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td><td class="numeric">${qty.format(number(item.qty))}</td><td class="numeric">${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</td>
+    <td class="numeric ${pnlClass(item.realized_pnl_krw)}"><strong>${money(item.realized_pnl_krw)}</strong></td><td class="numeric ${pnlClass(item.return_pct)}"><strong>${percent(item.return_pct)}</strong></td>
   </tr>`).join("");
 }
 
@@ -350,7 +524,7 @@ function render(data) {
   setText("#avgTakeProfit", percent(realized.average_take_profit_pct));
   setText("#avgStopLoss", percent(realized.average_stop_loss_pct));
   setText("#exitCount", `${realized.trade_count || 0}건`);
-  renderYieldChart(data.yield_history || []);
+  renderYieldCharts(data.yield_history || []);
   renderHoldings(data.holdings || []);
   renderSectorAnalytics(data.holdings || []);
   renderMonthly(data.monthly_performance || []);
@@ -359,14 +533,6 @@ function render(data) {
   $("#warningPanel").classList.toggle("is-hidden", warnings.length === 0);
   $("#warnings").innerHTML = warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   setText("#source", data.source || "조회 전용");
-  const diagnostics = data.diagnostics || {};
-  const recentByMarket = diagnostics.recent_realized_by_market || {};
-  const realizedApi = diagnostics.realized_api || {};
-  const transactionApi = diagnostics.transaction_api || {};
-  const pendingUs = number(realizedApi.us_pnl_unavailable_events);
-  const usTrades = number(transactionApi.us_daily_trades);
-  const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
-  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 그래프 ${number(diagnostics.yield_history_points)}p`);
 }
 
 async function loadEnvelope() {
@@ -380,6 +546,13 @@ $("#watchlistTab").addEventListener("click", () => { closePinModal(); activateTa
 $("#portfolioTab").addEventListener("click", () => { activateTab("portfolio"); if (!portfolio) openPinModal(); });
 $("#watchMarketFilter").addEventListener("change", renderWatchlistRows);
 $("#watchBandFilter").addEventListener("change", renderWatchlistRows);
+$("#yieldRangeSelector")?.addEventListener("click", (event) => {
+  const button = event.target.closest(".range-chip[data-range]");
+  if (!button || !portfolio) return;
+  selectedYieldRange = button.dataset.range || "6M";
+  $("#yieldRangeSelector").querySelectorAll(".range-chip").forEach((node) => node.classList.toggle("is-active", node === button));
+  renderYieldCharts(portfolio.yield_history || []);
+});
 $("#openPinButton").addEventListener("click", openPinModal);
 $("#closePinButton").addEventListener("click", () => closePinModal({ returnToWatchlist: true }));
 $("#cancelPinButton").addEventListener("click", () => closePinModal({ returnToWatchlist: true }));

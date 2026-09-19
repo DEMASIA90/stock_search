@@ -70,17 +70,19 @@
             <article class="metric"><span>현재 평가손익</span><strong id="unrealizedPnl">—</strong><small id="unrealizedRate">—</small></article>
             <article class="metric"><span>누적 순입출금</span><strong id="netCashFlow">—</strong><small>수익률 계산과 분리</small></article>
           </div>
-          <div class="charts-grid yield-chart-grid">
-            <article class="panel chart-panel">
-              <div class="panel-heading"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산·실현수익 추이</h2></div><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized">누적 실현손익</span></div></div>
-              <div class="line-chart interactive-chart" id="yieldChart" aria-label="총자산과 누적 실현손익 그래프"></div><p class="chart-help">그래프의 점을 누르면 해당 시점의 실현 종목과 입출금을 확인할 수 있습니다.</p>
-            </article>
-            <article class="panel event-detail-panel" id="eventDetailPanel">
-              <div class="panel-heading"><div><p class="eyebrow">SELECTED POINT</p><h2 id="eventDetailTitle">최근 기록</h2></div></div>
-              <div class="selected-metrics"><div><span>총자산</span><b id="selectedAsset">—</b></div><div><span>누적 실현손익</span><b id="selectedRealized">—</b></div></div>
-              <div class="event-list" id="selectedEvents"><p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p></div>
-            </article>
+          <div class="panel chart-overview-panel">
+            <div class="panel-heading chart-toolbar"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산과 실현수익 추이</h2></div><div class="toolbar-right"><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized-bar">일별 실현수익</span></div><div class="range-selector" id="yieldRangeSelector" role="tablist" aria-label="수익 모니터 기간 선택"><button class="range-chip" data-range="1M" type="button">1M</button><button class="range-chip" data-range="3M" type="button">3M</button><button class="range-chip is-active" data-range="6M" type="button">6M</button><button class="range-chip" data-range="1Y" type="button">1Y</button><button class="range-chip" data-range="ALL" type="button">전체</button></div></div></div>
+            <div class="dual-chart-grid">
+              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span>기본 6개월 · 더 긴 기간 선택 가능</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">점 클릭 시 해당 날짜의 자산과 거래 상세가 표시됩니다.</p></article>
+              <article class="chart-card"><div class="chart-card-head"><h3>실현수익</h3><span>일별 합산 막대 그래프</span></div><div class="line-chart interactive-chart realized-chart" id="realizedChart" aria-label="실현수익 막대 그래프"></div><p class="chart-help">막대 클릭 시 해당 날짜의 실현 거래와 입출금 내역을 볼 수 있습니다.</p></article>
+            </div>
           </div>
+          <article class="panel event-detail-panel full-width-panel" id="eventDetailPanel">
+            <div class="panel-heading"><div><p class="eyebrow">SELECTED DATE</p><h2 id="eventDetailTitle">최근 기록</h2></div></div>
+            <div class="selected-metrics triple"><div><span>총자산</span><b id="selectedAsset">—</b></div><div><span>일자 실현수익</span><b id="selectedDayRealized">—</b></div><div><span>누적 실현손익</span><b id="selectedCumulativeRealized">—</b></div></div>
+            <div class="selected-metrics single"><div><span>당일 순입출금</span><b id="selectedDayNetFlow">—</b></div></div>
+            <div class="event-list" id="selectedEvents"><p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p></div>
+          </article>
         </section>
 
         <section class="monitor-section section-b" aria-labelledby="sectionBTitle">
@@ -107,7 +109,7 @@
         </section>
 
         <section class="notice is-hidden" id="warningPanel"><strong>조회 참고사항</strong><ul id="warnings"></ul></section>
-        <footer>NH투자증권 Namuh PLUG 조회 데이터 · 주문 기능 없음 · <span id="source"></span> · <span id="diagnostics"></span></footer>
+        <footer>NH투자증권 Namuh PLUG 조회 데이터 · 주문 기능 없음 · <span id="source"></span></footer>
       </div>
     </section>
   </main>
