@@ -19,6 +19,7 @@ from src.portfolio import (
     normalize_total_transactions,
     portfolio_totals,
     realized_summary,
+    reconcile_us_realized_events,
     sanitize_legacy_realized_events,
     update_snapshot_history,
     update_yield_history,
@@ -344,7 +345,7 @@ class PortfolioTests(unittest.TestCase):
     def test_overseas_daily_transaction_and_pagination_are_preserved(self) -> None:
         rows = [{
             "trd_dt": "20260918", "trd_sno": "11", "act_trd_tp_nm": "매도",
-            "iem_krl_nm": "애플", "iem_cd": "AAPL", "trd_qty": "2",
+            "iem_krl_nm": "애플", "iem_cd": "INTERNAL-AAPL", "oss_iem_cd": "AAPL", "trd_qty": "2",
             "trd_uit_pr": "210.5", "fc_trd_amt": "421", "krw_trd_amt": "590000",
         }]
         normalized = normalize_overseas_daily_transactions(rows)
@@ -399,6 +400,69 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(diagnostics["us_daily_sell_trades"], 1)
         self.assertEqual({item["code"] for item in trades}, {"005930", "000660", "NVDA", "AAPL"})
 
+    def test_us_detail_replaces_fallback_across_korea_us_date_boundary(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api_pages(self, path: str, payload=None, *, max_pages=50):
+                if path.endswith("/periodPnl"):
+                    return [{"rsp_cd": "00166", "rsp_msg": "조회가 완료되었습니다.",
+                             "Output_1": [{"orr_dt": "20260918"}]}]
+                if path.endswith("/periodPnlDetail"):
+                    if payload["orr_dt"] == "20260918":
+                        return [{"rsp_cd": "00166", "rsp_msg": "조회가 완료되었습니다.",
+                                 "Output_0": [{
+                                     "iem_cd": "CURE", "iem_nm": "Direxion Healthcare Bull 3X",
+                                     "sll_qty": "16", "sll_uit_pr": "126.68",
+                                     "byn_uit_pr": "120", "fc_rzt_pls": "152000",
+                                     "fc_rzt_pft_rt": "5.56",
+                                 }]}]
+                    return [{"rsp_cd": "00166", "rsp_msg": "조회가 완료되었습니다.", "Output_0": []}]
+                raise AssertionError((path, payload))
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                raise AssertionError(path)
+
+        # Overseas dailyTransaction can land on the next Korea calendar date.
+        trades = [{
+            "id": "USDAILY:20260919:1:CURE:SELL", "date": "20260919",
+            "market": "US", "code": "CURE", "name": "Direxion Healthcare Bull 3X",
+            "side": "SELL", "qty": 16, "price": 126.68, "currency": "USD",
+        }]
+        events, _, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 19), trades=trades
+        )
+        us = [item for item in events if item["market"] == "US"]
+        self.assertEqual(len(us), 1)
+        self.assertEqual(us[0]["source"], "period_pnl_detail")
+        self.assertEqual(us[0]["realized_pnl_krw"], 152000)
+        self.assertEqual(diagnostics["us_pnl_resolved_events"], 1)
+        self.assertEqual(diagnostics["us_pnl_unavailable_events"], 0)
+        self.assertEqual(diagnostics["us_transaction_fallback_events"], 0)
+
+    def test_persisted_us_fallback_is_removed_when_detail_row_arrives(self) -> None:
+        rows = reconcile_us_realized_events([
+            {
+                "id": "US:20260919:CURE", "date": "20260919", "market": "US",
+                "code": "CURE", "name": "Direxion Healthcare Bull 3X", "qty": 16,
+                "sell_price": 126.68, "realized_pnl_krw": None, "pnl_available": False,
+                "source": "transaction_fallback",
+            },
+            {
+                "id": "US:20260918:CURE", "date": "20260918", "market": "US",
+                "code": "CURE", "name": "Direxion Healthcare Bull 3X", "qty": 16,
+                "sell_price": 126.68, "realized_pnl_krw": 152000, "pnl_available": True,
+                "source": "period_pnl_detail",
+            },
+        ])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "period_pnl_detail")
+        self.assertEqual(rows[0]["realized_pnl_krw"], 152000)
+
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")
 
@@ -449,6 +513,8 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("update_watchlist.py --non-interactive", workflow)
         self.assertIn("update_portfolio.py --non-interactive", workflow)
+        self.assertIn('CONFIG_FILE="${GITHUB_WORKSPACE}/.firebase-ci.json"', workflow)
+        self.assertIn('cd "$GITHUB_WORKSPACE"', workflow)
 
     def test_two_tabs_and_four_digit_pin_ui(self) -> None:
         root = Path(__file__).resolve().parent.parent

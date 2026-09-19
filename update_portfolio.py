@@ -29,6 +29,7 @@ from src.portfolio import (
     number,
     portfolio_totals,
     realized_summary,
+    reconcile_us_realized_events,
     sanitize_legacy_realized_events,
     update_snapshot_history,
     update_yield_history,
@@ -224,9 +225,11 @@ def build_payload(
         old_ledger if isinstance(old_ledger, list) else [], trades
     )
     old_realized = previous.get("realized_events", [])
-    realized_events = sanitize_legacy_realized_events(
-        merge_persistent_events(
-            old_realized if isinstance(old_realized, list) else [], recent_realized
+    realized_events = reconcile_us_realized_events(
+        sanitize_legacy_realized_events(
+            merge_persistent_events(
+                old_realized if isinstance(old_realized, list) else [], recent_realized
+            )
         )
     )
     old_flows = previous.get("cash_flows", [])

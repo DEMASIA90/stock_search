@@ -125,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
           CREDENTIALS_FILE="${RUNNER_TEMP}/firebase-service-account.json"
-          CONFIG_FILE="${RUNNER_TEMP}/firebase.json"
+          CONFIG_FILE="${GITHUB_WORKSPACE}/.firebase-ci.json"
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CREDENTIALS_FILE"
           python - <<'PY'
           import json, os
@@ -161,7 +161,7 @@ jobs:
           source = json.loads(Path("firebase.json").read_text(encoding="utf-8"))
           hosting = dict(source.get("hosting") or {})
           hosting["site"] = os.environ["FIREBASE_SITE_ID"].strip()
-          Path(os.environ["RUNNER_TEMP"], "firebase.json").write_text(
+          Path(os.environ["GITHUB_WORKSPACE"], ".firebase-ci.json").write_text(
               json.dumps({"hosting": hosting}, ensure_ascii=False, indent=2), encoding="utf-8"
           )
           PY
@@ -172,9 +172,16 @@ jobs:
         run: |
           set -euo pipefail
           CREDENTIALS_FILE="${RUNNER_TEMP}/firebase-service-account.json"
-          CONFIG_FILE="${RUNNER_TEMP}/firebase.json"
+          CONFIG_FILE="${GITHUB_WORKSPACE}/.firebase-ci.json"
           DEPLOY_LOG="${RUNNER_TEMP}/firebase-deploy.log"
           export GOOGLE_APPLICATION_CREDENTIALS="$CREDENTIALS_FILE"
+          cd "$GITHUB_WORKSPACE"
+          if [ ! -d "$GITHUB_WORKSPACE/docs" ]; then
+            echo "::error::Firebase Hosting public directory is missing: $GITHUB_WORKSPACE/docs"
+            exit 1
+          fi
+          echo "Firebase deploy working directory: $GITHUB_WORKSPACE"
+          echo "Firebase public directory: $GITHUB_WORKSPACE/docs"
           : > "$DEPLOY_LOG"
 
           for attempt in 1 2 3; do

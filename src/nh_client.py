@@ -12,7 +12,7 @@ from src.config import AUTH_BASE, INSTRUMENTS_BASE, ConnectionProfile
 from src.models import Account, Holding
 from src.portfolio import (
     merge_trades, normalize_daily_executions, normalize_overseas_daily_transactions,
-    normalize_total_transactions, number,
+    normalize_total_transactions, number, reconcile_us_realized_events,
 )
 
 
@@ -631,6 +631,12 @@ class NhReadOnlyClient:
                     events[event_id] = fallback_event
                     diagnostics["us_transaction_fallback_events"] += 1
 
+            reconciled = reconcile_us_realized_events(events.values())
+            events = {str(item["id"]): item for item in reconciled if item.get("id")}
+            diagnostics["us_transaction_fallback_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("source") == "transaction_fallback"
+            )
             diagnostics["us_pnl_unavailable_events"] = sum(
                 1 for item in events.values()
                 if item.get("market") == "US" and item.get("pnl_available") is False
@@ -650,6 +656,12 @@ class NhReadOnlyClient:
                 if event_id not in events:
                     events[event_id] = fallback_event
                     diagnostics["us_transaction_fallback_events"] += 1
+            reconciled = reconcile_us_realized_events(events.values())
+            events = {str(item["id"]): item for item in reconciled if item.get("id")}
+            diagnostics["us_transaction_fallback_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("source") == "transaction_fallback"
+            )
             diagnostics["us_pnl_unavailable_events"] = sum(
                 1 for item in events.values()
                 if item.get("market") == "US" and item.get("pnl_available") is False

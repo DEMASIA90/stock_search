@@ -103,7 +103,7 @@ def normalize_overseas_daily_transactions(
             side = ""
         qty = abs(number(row.get("trd_qty")))
         trade_date = "".join(ch for ch in str(row.get("ral_trd_dt") or row.get("trd_dt") or "") if ch.isdigit())[:8]
-        code = str(row.get("iem_cd") or row.get("oss_iem_cd") or "").strip().upper()
+        code = str(row.get("oss_iem_cd") or row.get("iem_cd") or "").strip().upper()
         if not side or qty <= 0 or len(trade_date) != 8 or not code:
             continue
         price = abs(number(row.get("trd_uit_pr")))
@@ -274,6 +274,147 @@ def sanitize_legacy_realized_events(events: Iterable[dict[str, Any]]) -> list[di
         repaired.append(row)
     return repaired
 
+
+
+def _us_code_aliases(value: Any) -> set[str]:
+    """Return conservative aliases for an overseas security code.
+
+    NH overseas endpoints can expose the same security through different code
+    fields (for example the overseas symbol versus an internal item code).
+    Aliases are used only to reconcile an already-confirmed P/L row with an
+    already-confirmed SELL ledger row; they are never used to invent trades.
+    """
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return set()
+    aliases = {"".join(ch for ch in raw if ch.isalnum())}
+    for separator in (".", ":", "/", "-"):
+        if separator in raw:
+            parts = [part.strip() for part in raw.split(separator) if part.strip()]
+            for part in parts:
+                cleaned = "".join(ch for ch in part if ch.isalnum())
+                if cleaned:
+                    aliases.add(cleaned)
+    return {item for item in aliases if item}
+
+
+def _us_name_token(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _date_distance(left: Any, right: Any) -> int | None:
+    left_text = "".join(ch for ch in str(left or "") if ch.isdigit())[:8]
+    right_text = "".join(ch for ch in str(right or "") if ch.isdigit())[:8]
+    if len(left_text) != 8 or len(right_text) != 8:
+        return None
+    try:
+        left_day = datetime.strptime(left_text, "%Y%m%d").date()
+        right_day = datetime.strptime(right_text, "%Y%m%d").date()
+    except ValueError:
+        return None
+    return abs((left_day - right_day).days)
+
+
+def _us_sale_match_score(fallback: dict[str, Any], resolved: dict[str, Any]) -> float | None:
+    """Score whether two rows represent the same U.S. sale.
+
+    dailyTransaction and periodPnlDetail can use slightly different code/date
+    representations (notably around the U.S./Korea trading-date boundary).  We
+    reconcile only within four calendar days and require a security identity
+    signal (code/name), or an otherwise unique quantity+price signature.
+    """
+    distance = _date_distance(fallback.get("date"), resolved.get("date"))
+    if distance is None or distance > 4:
+        return None
+
+    code_match = bool(_us_code_aliases(fallback.get("code")) & _us_code_aliases(resolved.get("code")))
+    left_name = _us_name_token(fallback.get("name"))
+    right_name = _us_name_token(resolved.get("name"))
+    name_match = bool(left_name and right_name and left_name == right_name)
+
+    fq = abs(number(fallback.get("qty")))
+    rq = abs(number(resolved.get("qty")))
+    qty_match = fq > 0 and rq > 0 and abs(fq - rq) <= max(1e-8, 1e-6 * max(fq, rq))
+
+    fp = abs(number(fallback.get("sell_price")))
+    rp = abs(number(resolved.get("sell_price")))
+    price_match = fp > 0 and rp > 0 and abs(fp - rp) / max(fp, rp) <= 0.0025
+
+    if not (code_match or name_match or (qty_match and price_match and distance <= 2)):
+        return None
+
+    score = 0.0
+    if code_match:
+        score += 100.0
+    if name_match:
+        score += 50.0
+    if qty_match:
+        score += 20.0
+    if price_match:
+        score += 10.0
+    score -= distance * 5.0
+    return score
+
+
+def reconcile_us_realized_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove U.S. transaction fallbacks once detailed P/L is available.
+
+    A periodPnlDetail row is authoritative for realized P/L.  A
+    transaction_fallback row exists only so that a visible SELL is not lost when
+    P/L lookup is unavailable.  Once both can be matched, keep one detailed row
+    and discard the fallback.  This also repairs duplicates already persisted by
+    older builds.
+    """
+    rows = [dict(item) for item in events if isinstance(item, dict)]
+    resolved_indexes = [
+        index for index, row in enumerate(rows)
+        if str(row.get("market") or "").upper() == "US"
+        and row.get("source") == "period_pnl_detail"
+        and row.get("pnl_available") is not False
+        and row.get("realized_pnl_krw") not in (None, "")
+    ]
+    fallback_indexes = [
+        index for index, row in enumerate(rows)
+        if str(row.get("market") or "").upper() == "US"
+        and row.get("source") == "transaction_fallback"
+    ]
+    used_resolved: set[int] = set()
+    drop: set[int] = set()
+
+    for fallback_index in fallback_indexes:
+        fallback = rows[fallback_index]
+        candidates: list[tuple[float, int]] = []
+        for resolved_index in resolved_indexes:
+            if resolved_index in used_resolved:
+                continue
+            score = _us_sale_match_score(fallback, rows[resolved_index])
+            if score is not None:
+                candidates.append((score, resolved_index))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best_score, resolved_index = candidates[0]
+        # Avoid a low-information ambiguous match. Exact code/name candidates
+        # naturally score well above this threshold.
+        if best_score < 20.0:
+            continue
+        resolved = rows[resolved_index]
+        for key in ("name", "qty", "buy_price", "sell_price", "fee_krw", "tax_krw"):
+            if resolved.get(key) in (None, "", 0, 0.0) and fallback.get(key) not in (None, "", 0, 0.0):
+                resolved[key] = fallback.get(key)
+        drop.add(fallback_index)
+        used_resolved.add(resolved_index)
+
+    output = [row for index, row in enumerate(rows) if index not in drop]
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in output:
+        event_id = str(row.get("id") or "")
+        if event_id:
+            deduped[event_id] = row
+    return sorted(
+        deduped.values(),
+        key=lambda item: (str(item.get("date", "")), str(item.get("market", "")), str(item.get("code", ""))),
+    )
 
 def realized_summary(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     rows = [dict(item) for item in events if isinstance(item, dict)]
