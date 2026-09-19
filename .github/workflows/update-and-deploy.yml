@@ -109,11 +109,17 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install Firebase CLI
+      - name: Install pinned Firebase CLI
         if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
-        run: npm install -g firebase-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not install an unpinned latest release in an hourly production job.
+          # Hosting has had regressions where a successful live release returned exit 1.
+          npm install -g firebase-tools@15.30.1
+          firebase --version
 
-      - name: Deploy docs to configured Firebase Hosting site
+      - name: Validate Firebase deployment settings
         if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
         shell: bash
         run: |
@@ -127,29 +133,103 @@ jobs:
 
           credentials = Path(os.environ["RUNNER_TEMP"], "firebase-service-account.json")
           try:
-              json.loads(credentials.read_text(encoding="utf-8"))
+              service_account = json.loads(credentials.read_text(encoding="utf-8"))
           except Exception as exc:
               raise SystemExit(f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}")
 
+          required = ("type", "project_id", "client_email", "private_key")
+          missing = [name for name in required if not service_account.get(name)]
+          if missing:
+              raise SystemExit(
+                  "FIREBASE_SERVICE_ACCOUNT_JSON is missing required fields: " + ", ".join(missing)
+              )
+          if service_account.get("type") != "service_account":
+              raise SystemExit("FIREBASE_SERVICE_ACCOUNT_JSON is not a service-account key.")
+
+          target_project = os.environ["FIREBASE_PROJECT_ID"].strip()
+          key_project = str(service_account.get("project_id") or "").strip()
+          print(f"Firebase target project: {target_project}")
+          print(f"Firebase Hosting site: {os.environ['FIREBASE_SITE_ID'].strip()}")
+          print(f"Firebase service account: {service_account['client_email']}")
+          if key_project and key_project != target_project:
+              print(
+                  f"::warning::Service-account key project ({key_project}) differs from "
+                  f"FIREBASE_PROJECT_ID ({target_project}). This is valid only if that account "
+                  "was explicitly granted access to the target project."
+              )
+
           source = json.loads(Path("firebase.json").read_text(encoding="utf-8"))
           hosting = dict(source.get("hosting") or {})
-          hosting["site"] = os.environ["FIREBASE_SITE_ID"]
+          hosting["site"] = os.environ["FIREBASE_SITE_ID"].strip()
           Path(os.environ["RUNNER_TEMP"], "firebase.json").write_text(
               json.dumps({"hosting": hosting}, ensure_ascii=False, indent=2), encoding="utf-8"
           )
           PY
+
+      - name: Deploy docs to configured Firebase Hosting site
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CREDENTIALS_FILE="${RUNNER_TEMP}/firebase-service-account.json"
+          CONFIG_FILE="${RUNNER_TEMP}/firebase.json"
+          DEPLOY_LOG="${RUNNER_TEMP}/firebase-deploy.log"
           export GOOGLE_APPLICATION_CREDENTIALS="$CREDENTIALS_FILE"
+          : > "$DEPLOY_LOG"
+
           for attempt in 1 2 3; do
-            if firebase deploy --only hosting --project "$FIREBASE_PROJECT_ID" --config "$CONFIG_FILE" --non-interactive; then
+            ATTEMPT_LOG="${RUNNER_TEMP}/firebase-deploy-attempt-${attempt}.log"
+            echo "===== Firebase Hosting deploy attempt ${attempt} =====" | tee -a "$DEPLOY_LOG"
+
+            set +e
+            firebase deploy \
+              --only hosting \
+              --project "$FIREBASE_PROJECT_ID" \
+              --config "$CONFIG_FILE" \
+              --non-interactive 2>&1 | tee "$ATTEMPT_LOG"
+            rc=${PIPESTATUS[0]}
+            set -e
+            cat "$ATTEMPT_LOG" >> "$DEPLOY_LOG"
+
+            if [ "$rc" -eq 0 ]; then
+              echo "Firebase Hosting deploy succeeded."
               exit 0
             fi
+
+            # firebase-tools has a known CI failure mode in which the release is
+            # already live, but a duplicate release request returns HTTP 400.
+            # Treat ONLY that exact false-negative signature as success.
+            if grep -Fqi "is the current active version" "$ATTEMPT_LOG"; then
+              echo "::warning::Firebase reported the new version is already the current active version. The Hosting release completed successfully; treating the known CLI false failure as success."
+              exit 0
+            fi
+
+            # Authentication/authorization failures do not improve with retries.
+            if grep -Eqi "Failed to authenticate|PERMISSION_DENIED|permission denied|does not have permission|HTTP Error: 401|HTTP Error: 403|Request had invalid authentication credentials" "$ATTEMPT_LOG"; then
+              echo "::error::Firebase authentication/permission failure. Check FIREBASE_SERVICE_ACCOUNT_JSON and the service account's Firebase Hosting permissions."
+              exit "$rc"
+            fi
+
             if [ "$attempt" -lt 3 ]; then
-              echo "::warning::Firebase deploy attempt $attempt failed; retrying..."
+              echo "::warning::Firebase deploy attempt $attempt failed; retrying in $((attempt * 10)) seconds..."
               sleep $((attempt * 10))
             fi
           done
-          echo "::error::Firebase Hosting deploy failed after 3 attempts. The encrypted portfolio data was already committed to GitHub."
+
+          echo "::error::Firebase Hosting deploy failed after 3 attempts. The encrypted portfolio data was already committed to GitHub. See the Firebase deploy log artifact for the exact error."
           exit 1
+
+      - name: Upload Firebase failure log
+        if: ${{ failure() && env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebase-deploy-log-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/firebase-deploy.log
+            ${{ runner.temp }}/firebase-deploy-attempt-*.log
+            firebase-debug.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Hourly-update summary
         if: ${{ always() }}
