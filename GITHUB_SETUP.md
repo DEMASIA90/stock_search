@@ -37,7 +37,7 @@ Secrets:
 
 ## 3. 매시간 자동 계좌 업데이트 설정
 
-가장 간단한 방법은 [GitHub CLI](https://cli.github.com/)를 설치해 `gh auth login`을 완료한 후 `configure_hourly_update.bat`을 실행하는 것입니다. 최초 배포 때 Windows 자격 증명 저장소에 저장한 값을 다음 GitHub Actions Secret으로 등록합니다.
+`configure_hourly_update.bat`을 실행하면 됩니다. GitHub CLI(`gh`)가 PC에 없으면 관리자 권한 없이 프로젝트의 `.tools/github-cli` 폴더에 **portable GitHub CLI를 자동 설치**합니다. GitHub 인증이 아직 없으면 브라우저 로그인도 이어서 실행합니다. 자동 설치가 사내망/보안 프로그램 때문에 실패할 때만 [GitHub CLI](https://cli.github.com/)를 수동 설치하면 됩니다. 최초 배포 때 Windows 자격 증명 저장소에 저장한 값을 다음 GitHub Actions Secret으로 등록합니다.
 
 - `NHPLUG_APP_KEY`
 - `NHPLUG_APP_SECRET`
@@ -56,7 +56,7 @@ GitHub 웹에서 직접 입력해도 됩니다. 계좌번호는 하이픈 없이
 4. 회귀테스트 후 생성 데이터를 커밋/Push
 5. Firebase Hosting 배포 (일시 오류 시 최대 3회 재시도)
 
-해외주식 거래는 `dailyTransaction`을 매수(05)·매도(06)로 각각 조회하고 연속조회 페이지를 모두 수집합니다. `periodPnl`은 매도일 확인용, 종목별 손익은 `periodPnlDetail`을 사용합니다. 손익 상세가 없더라도 매도 종목/수량/가격은 거래내역으로 보존되고 실현손익은 `—`로 표시됩니다.
+해외주식 거래는 `dailyTransaction`을 매수(05)·매도(06)로 각각 조회하고 연속조회 페이지를 모두 수집합니다. `periodPnl`은 매도일 확인용, 종목별 손익은 `periodPnlDetail`을 사용합니다. 미국 손익 조회는 `iqr_dit=2`(원화 기준 결과)와 실제 거래통화 `trd_cur_cd=USD`, 국가코드 `200`을 함께 사용합니다. 손익 상세가 없더라도 매도 종목/수량/가격은 거래내역으로 보존되고 실현손익은 `—`로 표시됩니다.
 
 GitHub Actions의 예약 실행은 정확히 17분에 시작되지 않고 서버 상황에 따라 지연될 수 있습니다. 저장소의 Actions 권한이 읽기 전용이면 **Settings → Actions → General → Workflow permissions**에서 `Read and write permissions`를 허용해야 시간별 이력 커밋이 가능합니다.
 

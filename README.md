@@ -32,7 +32,7 @@
 매번 최근 30일을 다시 조회해 중복을 제거하고, 과거 실현손익·입출금·시간별 자산 스냅샷은 암호화 데이터 안에 계속 누적합니다. 그래프의 점을 누르면 해당 날짜의 실현 종목과 입출금을 확인할 수 있습니다.
 
 - 최초 실행에서도 최근 30일 실현손익을 날짜별로 역산해 그래프에 채웁니다. NHPLUG가 과거 일별 총자산 이력을 제공하지 않으므로, 과거 구간의 총자산 선은 임의로 만들지 않고 실제 스냅샷이 기록된 시점부터 표시합니다.
-- 미국 실현손익은 `periodPnl` 결과를 직접 실현 이벤트로 저장하고 `periodPnlDetail`은 상세값 보완용으로만 사용합니다. 미국 기간손익 응답이 0건이면 경고와 진단정보가 남습니다.
+- 미국 실현손익은 `periodPnl`의 일자별 결과에서 매도일을 확인하고, 해당 일자의 `periodPnlDetail`에서 종목별 실현손익을 생성합니다. 미국 거래내역은 `dailyTransaction`으로 별도 보존하므로 손익 API가 비어도 매도 종목 자체는 사라지지 않습니다. 미국 손익 조회 시 원화 기준 결과(`iqr_dit=2`)와 실제 거래통화(`trd_cur_cd=USD`)를 구분해 전달합니다.
 - `publish_update.bat`은 API 조회 전에 현재 Git 브랜치를 `origin`에서 fast-forward 동기화합니다. 생성 데이터에 미커밋 변경이 있거나 원격과 분기된 경우에는 이력 손실을 막기 위해 업데이트를 시작하지 않습니다.
 - 암호화 payload의 `diagnostics`에는 최근/누적 국내·미국 실현건수, 거래·입출금 건수, 전체 그래프 포인트 및 실제 자산 스냅샷 포인트 수가 기록됩니다.
 
@@ -42,7 +42,7 @@
 2. `first_deploy.bat`을 실행합니다.
 3. NHPLUG AppKey/AppSecret, 환경, 계좌, 숫자 4자리 PIN을 입력합니다.
 4. GitHub 푸시 확인에 `Y`를 입력합니다.
-5. 완전 자동 갱신을 사용하려면 [GitHub CLI](https://cli.github.com/)를 설치하고 로그인한 다음 `configure_hourly_update.bat`을 한 번 실행합니다.
+5. 완전 자동 갱신을 사용하려면 `configure_hourly_update.bat`을 한 번 실행합니다. GitHub CLI가 없으면 프로젝트 폴더에 portable 버전을 자동 설치하고, 필요한 경우 브라우저 GitHub 로그인을 시작합니다.
 
 `configure_hourly_update.bat`은 Windows 자격 증명 저장소의 값을 GitHub Actions Secret으로 안전하게 등록합니다. 이후 GitHub Actions가 매시 17분에 관심종목과 계좌를 조회하고, 암호화 이력을 커밋한 뒤 Firebase와 GitHub Pages에 배포합니다.
 

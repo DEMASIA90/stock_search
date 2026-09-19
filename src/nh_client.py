@@ -467,7 +467,12 @@ class NhReadOnlyClient:
             "us_period_rows": 0,
             "us_period_sale_days": 0,
             "us_detail_calls": 0,
+            "us_detail_pages": 0,
             "us_detail_rows": 0,
+            "us_detail_rsp_cd": "",
+            "us_detail_rsp_msg": "",
+            "us_detail_first_fields": [],
+            "us_pnl_resolved_events": 0,
             "us_sell_trades": 0,
             "us_sell_days": 0,
             "us_transaction_fallback_events": 0,
@@ -527,8 +532,11 @@ class NhReadOnlyClient:
                 "iqr_dit": "2",
                 "sta_orr_dt": start_date.strftime("%Y%m%d"),
                 "end_orr_dt": end_date.strftime("%Y%m%d"),
-                "iem_cd": "",
-                "trd_cur_cd": "KRW",
+                # iqr_dit=2 asks NHPLUG to calculate the P/L on a KRW basis, but
+                # trd_cur_cd is still the *actual trading currency*. U.S. equities
+                # trade in USD. Sending KRW here makes the US(200) filter return
+                # an empty result even when U.S. sales exist.
+                "trd_cur_cd": "USD",
                 "fc_sec_trd_nat_cd": "200",
             }
             period_pages = self._api_pages(
@@ -583,17 +591,25 @@ class NhReadOnlyClient:
                         {
                             "act_no": account_no,
                             "iqr_dit": "2",
-                            "iem_cd": "",
                             "orr_dt": day,
                             "fc_sec_trd_nat_cd": "200",
-                            "trd_cur_cd": "KRW",
+                            "trd_cur_cd": "USD",
                         },
                         max_pages=20,
                     )
                     detail_rows: list[dict[str, Any]] = []
+                    diagnostics["us_detail_pages"] += len(detail_pages)
                     for page in detail_pages:
                         detail_rows.extend(_list(page.get("Output_0")))
+                        if page.get("rsp_cd") not in (None, ""):
+                            diagnostics["us_detail_rsp_cd"] = str(page.get("rsp_cd"))
+                        if page.get("rsp_msg") not in (None, ""):
+                            diagnostics["us_detail_rsp_msg"] = str(page.get("rsp_msg"))
                     diagnostics["us_detail_rows"] += len(detail_rows)
+                    if detail_rows and not diagnostics["us_detail_first_fields"]:
+                        # Field names only: useful for schema diagnostics without
+                        # leaking account numbers, prices, quantities, or P/L values.
+                        diagnostics["us_detail_first_fields"] = sorted(str(key) for key in detail_rows[0].keys())
                     for row in detail_rows:
                         event = _us_realized_event(row, day)
                         if not event:
@@ -619,6 +635,10 @@ class NhReadOnlyClient:
                 1 for item in events.values()
                 if item.get("market") == "US" and item.get("pnl_available") is False
             )
+            diagnostics["us_pnl_resolved_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("pnl_available") is True
+            )
             if diagnostics["us_pnl_unavailable_events"]:
                 warnings.append(
                     f"미국 매도 {diagnostics['us_pnl_unavailable_events']}종목은 거래는 확인했지만 "
@@ -633,6 +653,10 @@ class NhReadOnlyClient:
             diagnostics["us_pnl_unavailable_events"] = sum(
                 1 for item in events.values()
                 if item.get("market") == "US" and item.get("pnl_available") is False
+            )
+            diagnostics["us_pnl_resolved_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("pnl_available") is True
             )
             if diagnostics["us_pnl_unavailable_events"]:
                 warnings.append(

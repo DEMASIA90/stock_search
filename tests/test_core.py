@@ -144,6 +144,11 @@ class PortfolioTests(unittest.TestCase):
                 if path.endswith("/tradingPnl"):
                     return {"Output_1": []}
                 if path.endswith("/periodPnl"):
+                    self.assertEqual(payload["iqr_dit"], "2")
+                    self.assertEqual(payload["trd_cur_cd"], "USD")
+                    self.assertEqual(payload["fc_sec_trd_nat_cd"], "200")
+                    if "iem_cd" in payload:
+                        raise AssertionError("Blank iem_cd must not be sent")
                     # Official schema: Output_1 has no iem_cd / iem_nm.
                     return {"Output_1": [{
                         "orr_dt": "20260918", "sll_qty": "2",
@@ -151,6 +156,11 @@ class PortfolioTests(unittest.TestCase):
                     }]}
                 if path.endswith("/periodPnlDetail"):
                     self.assertEqual(payload["orr_dt"], "20260918")
+                    self.assertEqual(payload["iqr_dit"], "2")
+                    self.assertEqual(payload["trd_cur_cd"], "USD")
+                    self.assertEqual(payload["fc_sec_trd_nat_cd"], "200")
+                    if "iem_cd" in payload:
+                        raise AssertionError("Blank iem_cd must not be sent")
                     return {"Output_0": [{
                         "iem_cd": "AAPL", "iem_nm": "Apple", "sll_qty": "2",
                         "byn_uit_pr": "200", "sll_uit_pr": "210",
@@ -219,9 +229,15 @@ class PortfolioTests(unittest.TestCase):
                 if path.endswith("/tradingPnl"):
                     return {"Output_1": []}
                 if path.endswith("/periodPnl"):
+                    self.assertEqual(payload["iqr_dit"], "2")
+                    self.assertEqual(payload["trd_cur_cd"], "USD")
+                    self.assertEqual(payload["fc_sec_trd_nat_cd"], "200")
                     return {"Output_1": [], "rsp_msg": "정상처리"}
                 if path.endswith("/periodPnlDetail"):
                     self.assertEqual(payload["orr_dt"], "20260918")
+                    self.assertEqual(payload["iqr_dit"], "2")
+                    self.assertEqual(payload["trd_cur_cd"], "USD")
+                    self.assertEqual(payload["fc_sec_trd_nat_cd"], "200")
                     return {"Output_0": [{
                         "iem_cd": "AAPL", "iem_nm": "Apple", "sll_qty": "2",
                         "sll_uit_pr": "210", "byn_uit_pr": "200",
@@ -288,6 +304,42 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(summary["pnl_trade_count"], 0)
         self.assertEqual(summary["cumulative_realized_krw"], 0)
         self.assertEqual(monthly_realized_performance(us, []), [])
+
+    def test_us_pnl_api_diagnostics_keep_response_metadata_without_values(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnl"):
+                    return {
+                        "rsp_cd": "00000", "rsp_msg": "정상처리",
+                        "Output_1": [{"orr_dt": "20260918"}],
+                    }
+                if path.endswith("/periodPnlDetail"):
+                    return {
+                        "rsp_cd": "00000", "rsp_msg": "정상처리",
+                        "Output_0": [{
+                            "iem_cd": "AAPL", "iem_nm": "Apple", "sll_qty": "2",
+                            "byn_uit_pr": "200", "sll_uit_pr": "210",
+                            "fc_rzt_pls": "28000", "fc_rzt_pft_rt": "5.0",
+                        }],
+                    }
+                raise AssertionError(path)
+
+        events, _, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 18)
+        )
+        self.assertEqual(len([item for item in events if item["market"] == "US"]), 1)
+        self.assertEqual(diagnostics["us_period_rsp_cd"], "00000")
+        self.assertEqual(diagnostics["us_period_rsp_msg"], "정상처리")
+        self.assertEqual(diagnostics["us_detail_rsp_cd"], "00000")
+        self.assertEqual(diagnostics["us_detail_rsp_msg"], "정상처리")
+        self.assertIn("fc_rzt_pls", diagnostics["us_detail_first_fields"])
+        self.assertEqual(diagnostics["us_pnl_resolved_events"], 1)
 
     def test_overseas_daily_transaction_and_pagination_are_preserved(self) -> None:
         rows = [{

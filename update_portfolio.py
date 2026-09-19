@@ -312,11 +312,24 @@ def build_payload(
         "      진단: 최근30일 실현 국내 "
         f"{recent_market_counts['KR']}건 / 미국 {recent_market_counts['US']}건 | "
         f"미국 거래 {trade_diagnostics.get('us_daily_trades', 0)}건 / "
-        f"SELL {trade_diagnostics.get('us_daily_sell_trades', 0)}건 / "
-        f"손익 미확인 {realized_diagnostics.get('us_pnl_unavailable_events', 0)}건 | "
+        f"SELL {trade_diagnostics.get('us_daily_sell_trades', 0)}건 | "
+        f"미국 손익 period {realized_diagnostics.get('us_period_rows', 0)}건 / "
+        f"detail {realized_diagnostics.get('us_detail_rows', 0)}건 / "
+        f"확인 {realized_diagnostics.get('us_pnl_resolved_events', 0)}건 / "
+        f"미확인 {realized_diagnostics.get('us_pnl_unavailable_events', 0)}건 | "
         f"누적 국내 {cumulative_market_counts['KR']}건 / 미국 {cumulative_market_counts['US']}건 | "
         f"그래프 {len(yield_history)}포인트"
     )
+    if realized_diagnostics.get("us_pnl_unavailable_events", 0):
+        period_cd = str(realized_diagnostics.get("us_period_rsp_cd") or "-")
+        period_msg = str(realized_diagnostics.get("us_period_rsp_msg") or "-")
+        detail_cd = str(realized_diagnostics.get("us_detail_rsp_cd") or "-")
+        detail_msg = str(realized_diagnostics.get("us_detail_rsp_msg") or "-")
+        print(f"      미국 periodPnl 응답: {period_cd} / {period_msg}")
+        print(f"      미국 periodPnlDetail 응답: {detail_cd} / {detail_msg}")
+        fields = realized_diagnostics.get("us_detail_first_fields") or []
+        if fields:
+            print("      미국 detail 필드: " + ", ".join(str(item) for item in fields))
     return {
         "schema_version": 4,
         "updated_at": now.isoformat(timespec="seconds"),
