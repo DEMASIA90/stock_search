@@ -186,6 +186,7 @@ function renderHoldings(holdings) {
 }
 
 
+
 function eventDate(value) {
   return compactDate(value);
 }
@@ -199,6 +200,11 @@ function parseCompactDay(value) {
   return new Date(Number(day.slice(0, 4)), Number(day.slice(4, 6)) - 1, Number(day.slice(6, 8)));
 }
 
+function toDayKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function dayLabel(value, dense = false) {
   const day = eventDate(value);
   if (!/^\d{8}$/.test(day)) return dateText(value);
@@ -208,67 +214,109 @@ function dayLabel(value, dense = false) {
 }
 
 function axisMoney(value) {
-  const amount = Math.round(number(value));
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "—";
+  const amount = Math.round(parsed);
   const sign = amount < 0 ? "−" : "";
   return `${sign}₩${Math.abs(amount).toLocaleString("ko-KR")}`;
 }
 
 function moneyMaybe(value, currency = "KRW") {
+  if (value === null || value === undefined || value === "") return "—";
   const parsed = Number(value);
   return Number.isFinite(parsed) ? money(parsed, currency) : "—";
 }
 
-function buildDailySeries() {
-  const byDay = new Map();
-  const history = Array.isArray(portfolio?.yield_history) ? portfolio.yield_history : [];
-  history.forEach((row) => {
+function buildChartData() {
+  const assetByDay = new Map();
+  const cumulativeByDay = new Map();
+  const realizedByDay = new Map();
+  const flowByDay = new Map();
+
+  (portfolio?.yield_history || []).forEach((row) => {
     const day = eventDate(row.at);
     if (!day) return;
-    byDay.set(day, {
-      day,
-      at: row.at,
-      total_asset_krw: number(row.total_asset_krw),
-      cumulative_realized_krw: number(row.cumulative_realized_krw),
-      daily_realized_krw: 0,
-      daily_net_flow_krw: 0,
-    });
+    if (row.cumulative_realized_krw !== null && row.cumulative_realized_krw !== undefined && row.cumulative_realized_krw !== "") {
+      cumulativeByDay.set(day, number(row.cumulative_realized_krw));
+    }
+    const rawAsset = row.total_asset_krw;
+    const hasAsset = row.asset_recorded !== false && row.kind !== "realized_daily" && rawAsset !== null && rawAsset !== undefined && rawAsset !== "" && Number.isFinite(Number(rawAsset));
+    if (!hasAsset) return;
+    const current = assetByDay.get(day);
+    if (!current || String(row.at) >= String(current.at)) {
+      assetByDay.set(day, { day, at: row.at, total_asset_krw: Number(rawAsset) });
+    }
   });
+
   (portfolio?.realized_events || []).forEach((item) => {
     const day = eventDate(item.date);
-    if (!day) return;
-    const point = byDay.get(day);
-    if (point) point.daily_realized_krw += number(item.realized_pnl_krw);
+    if (!day || item.pnl_available === false || item.realized_pnl_krw === null || item.realized_pnl_krw === undefined || item.realized_pnl_krw === "") return;
+    const pnl = Number(item.realized_pnl_krw);
+    if (Number.isFinite(pnl)) realizedByDay.set(day, (realizedByDay.get(day) || 0) + pnl);
   });
+
   (portfolio?.cash_flows || []).forEach((item) => {
     const day = eventDate(item.date);
     if (!day) return;
-    const point = byDay.get(day);
-    if (point) point.daily_net_flow_krw += item.side === "DEPOSIT" ? number(item.amount_krw) : -number(item.amount_krw);
+    const signed = item.side === "DEPOSIT" ? number(item.amount_krw) : -number(item.amount_krw);
+    flowByDay.set(day, (flowByDay.get(day) || 0) + signed);
   });
-  return [...byDay.values()].sort((a, b) => String(a.day).localeCompare(String(b.day)));
+
+  const realizedEvents = (portfolio?.realized_events || [])
+    .filter((item) => item.pnl_available !== false && item.realized_pnl_krw !== null && item.realized_pnl_krw !== undefined && item.realized_pnl_krw !== "")
+    .map((item) => ({ day: eventDate(item.date), pnl: Number(item.realized_pnl_krw) }))
+    .filter((item) => /^\d{8}$/.test(item.day) && Number.isFinite(item.pnl))
+    .sort((a, b) => a.day.localeCompare(b.day));
+
+  function cumulativeForDay(day) {
+    if (cumulativeByDay.has(day)) return cumulativeByDay.get(day);
+    let sum = 0;
+    for (const item of realizedEvents) {
+      if (item.day > day) break;
+      sum += item.pnl;
+    }
+    return sum;
+  }
+
+  const allDays = new Set([
+    ...assetByDay.keys(),
+    ...realizedByDay.keys(),
+    ...flowByDay.keys(),
+    ...cumulativeByDay.keys(),
+  ]);
+  const updatedDay = eventDate(portfolio?.updated_at);
+  if (/^\d{8}$/.test(updatedDay)) allDays.add(updatedDay);
+
+  return {
+    assetPoints: [...assetByDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
+    realizedPoints: [...realizedByDay.entries()].map(([day, value]) => ({ day, daily_realized_krw: value })).sort((a, b) => a.day.localeCompare(b.day)),
+    flowByDay,
+    realizedByDay,
+    cumulativeForDay,
+    allDays: [...allDays].sort(),
+  };
 }
 
-function filterSeriesByRange(points, range) {
-  if (!points.length || range === "ALL") return points;
-  const last = parseCompactDay(points.at(-1).day);
-  if (!last) return points;
-  const from = new Date(last);
-  if (range === "1M") from.setMonth(from.getMonth() - 1);
-  else if (range === "3M") from.setMonth(from.getMonth() - 3);
-  else if (range === "6M") from.setMonth(from.getMonth() - 6);
-  else if (range === "1Y") from.setFullYear(from.getFullYear() - 1);
-  return points.filter((point) => {
-    const day = parseCompactDay(point.day);
-    return day && day >= from;
-  });
+function getRangeBounds(data) {
+  const validDays = data.allDays.filter((day) => /^\d{8}$/.test(day));
+  const fallbackEnd = new Date();
+  const end = validDays.length ? parseCompactDay(validDays.at(-1)) : fallbackEnd;
+  let start;
+  if (selectedYieldRange === "ALL") {
+    start = validDays.length ? parseCompactDay(validDays[0]) : new Date(end);
+  } else {
+    start = new Date(end);
+    if (selectedYieldRange === "1M") start.setMonth(start.getMonth() - 1);
+    else if (selectedYieldRange === "3M") start.setMonth(start.getMonth() - 3);
+    else if (selectedYieldRange === "6M") start.setMonth(start.getMonth() - 6);
+    else if (selectedYieldRange === "1Y") start.setFullYear(start.getFullYear() - 1);
+  }
+  if (start.getTime() === end.getTime()) start.setDate(start.getDate() - 1);
+  return { start, end, startDay: toDayKey(start), endDay: toDayKey(end) };
 }
 
-function sampleChartPoints(points, maximum = 210) {
-  if (points.length <= maximum) return points;
-  const sampled = [];
-  const step = (points.length - 1) / (maximum - 1);
-  for (let index = 0; index < maximum; index += 1) sampled.push(points[Math.round(index * step)]);
-  return sampled;
+function inRange(day, bounds) {
+  return day >= bounds.startDay && day <= bounds.endDay;
 }
 
 function createTicks(low, high, count = 4) {
@@ -284,171 +332,194 @@ function extent(values, { includeZero = false } = {}) {
   let high = Math.max(...safe);
   if (includeZero) { low = Math.min(low, 0); high = Math.max(high, 0); }
   if (low === high) {
-    const spread = Math.max(1, Math.abs(high) * 0.15);
+    const spread = Math.max(1, Math.abs(high) * 0.02);
+    low -= spread;
+    high += spread;
+  } else {
+    const spread = Math.max(1, (high - low) * 0.08);
     low -= spread;
     high += spread;
   }
   return [low, high];
 }
 
-function sharedDateTicks(points) {
-  if (!points.length) return [];
-  const indexes = [0, Math.floor((points.length - 1) * 0.25), Math.floor((points.length - 1) * 0.5), Math.floor((points.length - 1) * 0.75), points.length - 1];
-  return [...new Set(indexes)].map((index) => ({ index, label: dayLabel(points[index].day, true) }));
+function dateTicks(bounds, count = 5) {
+  const startMs = bounds.start.getTime();
+  const endMs = bounds.end.getTime();
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(startMs + (endMs - startMs) * (index / (count - 1)));
+    return { date, label: dayLabel(toDayKey(date), true) };
+  });
+}
+
+function xForDay(day, bounds, left, right, width) {
+  const date = parseCompactDay(day);
+  if (!date) return left;
+  const span = Math.max(1, bounds.end.getTime() - bounds.start.getTime());
+  const ratio = Math.max(0, Math.min(1, (date.getTime() - bounds.start.getTime()) / span));
+  return left + ratio * (width - left - right);
 }
 
 function renderChartTooltip(host, payload) {
   if (!host) return;
-  let tooltip = host.querySelector('.chart-tooltip');
+  let tooltip = host.querySelector(".chart-tooltip");
   if (!tooltip) {
-    tooltip = document.createElement('div');
-    tooltip.className = 'chart-tooltip';
+    tooltip = document.createElement("div");
+    tooltip.className = "chart-tooltip";
     host.appendChild(tooltip);
   }
-  tooltip.innerHTML = `<strong>${escapeHtml(payload.title)}</strong>${payload.lines.map((line) => `<span>${escapeHtml(line)}</span>`).join('')}`;
-  tooltip.style.left = `${Math.max(8, Math.min(payload.x, host.clientWidth - 190))}px`;
-  tooltip.style.top = `${Math.max(8, Math.min(payload.y, host.clientHeight - 90))}px`;
-  tooltip.classList.add('is-visible');
+  tooltip.innerHTML = `<strong>${escapeHtml(payload.title)}</strong>${payload.lines.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}`;
+  tooltip.style.left = `${Math.max(8, Math.min(payload.x, host.clientWidth - 200))}px`;
+  tooltip.style.top = `${Math.max(8, Math.min(payload.y, host.clientHeight - 95))}px`;
+  tooltip.classList.add("is-visible");
 }
 
 function clearChartTooltip(host) {
-  host?.querySelector('.chart-tooltip')?.classList.remove('is-visible');
+  host?.querySelector(".chart-tooltip")?.classList.remove("is-visible");
 }
 
-function renderSelectedPoint(point) {
-  if (!point) return;
-  selectedChartDay = point.day;
-  setText('#eventDetailTitle', dayLabel(point.day));
-  setText('#selectedAsset', moneyMaybe(point.total_asset_krw));
-  const dayRealized = $('#selectedDayRealized');
-  dayRealized.textContent = moneyMaybe(point.daily_realized_krw);
-  dayRealized.className = pnlClass(point.daily_realized_krw);
-  const cumulative = $('#selectedCumulativeRealized');
-  cumulative.textContent = moneyMaybe(point.cumulative_realized_krw);
-  cumulative.className = pnlClass(point.cumulative_realized_krw);
-  const flow = $('#selectedDayNetFlow');
-  flow.textContent = moneyMaybe(point.daily_net_flow_krw);
-  flow.className = pnlClass(point.daily_net_flow_krw);
-  const realized = (portfolio.realized_events || []).filter((item) => eventDate(item.date) === point.day);
-  const flows = (portfolio.cash_flows || []).filter((item) => eventDate(item.date) === point.day);
+function renderSelectedDay(day, data) {
+  if (!day) return;
+  selectedChartDay = day;
+  const asset = data.assetPoints.find((point) => point.day === day);
+  const dayRealized = data.realizedByDay.get(day) || 0;
+  const dayFlow = data.flowByDay.get(day) || 0;
+  const cumulative = data.cumulativeForDay(day);
+
+  setText("#eventDetailTitle", dayLabel(day));
+  setText("#selectedAsset", asset ? moneyMaybe(asset.total_asset_krw) : "—");
+  const dayRealizedNode = $("#selectedDayRealized");
+  dayRealizedNode.textContent = moneyMaybe(dayRealized);
+  dayRealizedNode.className = pnlClass(dayRealized);
+  const cumulativeNode = $("#selectedCumulativeRealized");
+  cumulativeNode.textContent = moneyMaybe(cumulative);
+  cumulativeNode.className = pnlClass(cumulative);
+  const flowNode = $("#selectedDayNetFlow");
+  flowNode.textContent = moneyMaybe(dayFlow);
+  flowNode.className = pnlClass(dayFlow);
+
+  const realized = (portfolio.realized_events || []).filter((item) => eventDate(item.date) === day);
+  const flows = (portfolio.cash_flows || []).filter((item) => eventDate(item.date) === day);
   const parts = [
-    ...realized.map((item) => `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${moneyMaybe(item.realized_pnl_krw)}</b></article>`),
+    ...realized.map((item) => `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${moneyMaybe(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}${item.pnl_available === false ? " · 손익 미확인" : ""}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${moneyMaybe(item.realized_pnl_krw)}</b></article>`),
     ...flows.map((item) => `<article class="event-item"><span class="event-icon flow">${item.side === "DEPOSIT" ? "+" : "−"}</span><div><strong>${item.side === "DEPOSIT" ? "입금" : "출금"}</strong><small>${escapeHtml(item.label || "계좌 현금흐름")}</small></div><b class="${item.side === "DEPOSIT" ? "positive" : "negative"}">${item.side === "DEPOSIT" ? "+" : "−"}${money(item.amount_krw)}</b></article>`),
   ];
-  $('#selectedEvents').innerHTML = parts.length ? parts.join('') : '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
+  $("#selectedEvents").innerHTML = parts.length ? parts.join("") : '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
 }
 
-function renderAssetChart(points) {
-  const host = $('#assetChart');
+function renderAssetChart(data, bounds) {
+  const host = $("#assetChart");
+  const points = data.assetPoints.filter((point) => inRange(point.day, bounds));
   if (!points.length) {
-    host.innerHTML = '<div class="chart-empty">최근 6개월 자산 기록이 없어서 총자산 그래프를 표시할 수 없습니다.</div>';
+    host.innerHTML = '<div class="chart-empty">선택 기간에 실제로 저장된 총자산 스냅샷이 없습니다.<br>과거 자산은 임의 역산하지 않습니다.</div>';
     return;
   }
   const width = 860; const height = 280;
-  const pad = { top: 18, right: 18, bottom: 44, left: 110 };
-  const values = points.map((point) => number(point.total_asset_krw));
+  const pad = { top: 18, right: 18, bottom: 44, left: 118 };
+  const values = points.map((point) => Number(point.total_asset_krw));
   const [low, high] = extent(values);
   const yTicks = createTicks(low, high, 4);
-  const x = (index) => pad.left + (index / Math.max(1, points.length - 1)) * (width - pad.left - pad.right);
   const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
-  const line = points.map((point, index) => `${x(index)},${y(number(point.total_asset_krw))}`).join(' ');
-  const xTicks = sharedDateTicks(points);
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="최근 기간 총자산 추이 선 그래프">
+  const x = (day) => xForDay(day, bounds, pad.left, pad.right, width);
+  const line = points.map((point) => `${x(point.day)},${y(Number(point.total_asset_krw))}`).join(" ");
+  const ticks = dateTicks(bounds);
+  const fill = points.length >= 2 ? `<polygon points="${x(points[0].day)},${height - pad.bottom} ${line} ${x(points.at(-1).day)},${height - pad.bottom}" fill="url(#assetFill)"/>` : "";
+  const polyline = points.length >= 2 ? `<polyline points="${line}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : "";
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산 선 그래프">
     <defs><linearGradient id="assetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#51e4ba" stop-opacity=".28"/><stop offset="1" stop-color="#51e4ba" stop-opacity="0"/></linearGradient></defs>
-    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join('')}
-    ${xTicks.map((tick) => `<g><line x1="${x(tick.index)}" y1="${height - pad.bottom}" x2="${x(tick.index)}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(tick.index)}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join('')}
-    <polygon points="${pad.left},${height - pad.bottom} ${line} ${width - pad.right},${height - pad.bottom}" fill="url(#assetFill)"/>
-    <polyline points="${line}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    ${points.map((point, index) => `<circle class="chart-point asset ${point.day === selectedChartDay ? 'selected' : ''}" data-index="${index}" cx="${x(index)}" cy="${y(number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : 4}" />`).join('')}
+    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join("")}
+    ${ticks.map((tick) => `<g><line x1="${x(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${x(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
+    ${fill}${polyline}
+    ${points.map((point) => `<circle class="chart-point asset ${point.day === selectedChartDay ? "selected" : ""}" data-day="${point.day}" cx="${x(point.day)}" cy="${y(Number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : 4}"/>`).join("")}
   </svg>`;
-  host.querySelectorAll('.chart-point.asset').forEach((node) => {
-    const point = points[Number(node.dataset.index)];
-    const show = () => {
-      host.querySelectorAll('.chart-point.asset').forEach((dot) => dot.classList.remove('selected'));
-      node.classList.add('selected');
-      renderSelectedPoint(point);
-      renderChartTooltip(host, {
-        x: Number(node.getAttribute('cx')) / width * host.clientWidth + 10,
-        y: Number(node.getAttribute('cy')) / height * host.clientHeight - 16,
-        title: `${dayLabel(point.day)}`,
-        lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `일자 실현수익 ${moneyMaybe(point.daily_realized_krw)}`, `누적 실현손익 ${moneyMaybe(point.cumulative_realized_krw)}`],
-      });
-    };
-    node.addEventListener('click', show);
-    node.addEventListener('mouseenter', show);
+
+  host.querySelectorAll(".chart-point.asset").forEach((node) => {
+    const point = points.find((item) => item.day === node.dataset.day);
+    const tooltip = () => renderChartTooltip(host, {
+      x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
+      y: Number(node.getAttribute("cy")) / height * host.clientHeight - 16,
+      title: dayLabel(point.day),
+      lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `일자 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`, `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`],
+    });
+    node.addEventListener("mouseenter", tooltip);
+    node.addEventListener("click", () => {
+      selectedChartDay = point.day;
+      renderSelectedDay(point.day, data);
+      host.querySelectorAll(".chart-point.asset").forEach((dot) => dot.classList.toggle("selected", dot === node));
+      tooltip();
+    });
   });
-  host.addEventListener('mouseleave', () => clearChartTooltip(host));
+  host.addEventListener("mouseleave", () => clearChartTooltip(host));
 }
 
-function renderRealizedChart(points) {
-  const host = $('#realizedChart');
+function renderRealizedChart(data, bounds) {
+  const host = $("#realizedChart");
+  const points = data.realizedPoints.filter((point) => inRange(point.day, bounds));
+  const width = 860; const height = 280;
+  const pad = { top: 18, right: 18, bottom: 44, left: 118 };
+  const ticks = dateTicks(bounds);
   if (!points.length) {
-    host.innerHTML = '<div class="chart-empty">최근 6개월 실현수익 기록이 없어서 막대 그래프를 표시할 수 없습니다.</div>';
+    host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="실현수익 막대 그래프">${ticks.map((tick) => `<text x="${xForDay(toDayKey(tick.date), bounds, pad.left, pad.right, width)}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text>`).join("")}</svg><div class="chart-empty overlay-empty">선택 기간에 확인된 실현수익이 없습니다.</div>`;
     return;
   }
-  const width = 860; const height = 280;
-  const pad = { top: 18, right: 18, bottom: 44, left: 110 };
-  const values = points.map((point) => number(point.daily_realized_krw));
+  const values = points.map((point) => Number(point.daily_realized_krw));
   const [low, high] = extent(values, { includeZero: true });
   const yTicks = createTicks(low, high, 5);
-  const x = (index) => pad.left + (index / Math.max(1, points.length - 1)) * (width - pad.left - pad.right);
   const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
+  const x = (day) => xForDay(day, bounds, pad.left, pad.right, width);
   const zeroY = y(0);
-  const xTicks = sharedDateTicks(points);
-  const gap = points.length > 1 ? x(1) - x(0) : 24;
-  const barWidth = Math.max(5, Math.min(18, gap * 0.72));
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="최근 기간 일별 실현수익 막대 그래프">
-    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join('')}
+  const daySpan = Math.max(1, (bounds.end.getTime() - bounds.start.getTime()) / 86400000);
+  const barWidth = Math.max(5, Math.min(18, (width - pad.left - pad.right) / daySpan * 0.76));
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="일별 실현수익 막대 그래프">
+    ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join("")}
     <line x1="${pad.left}" y1="${zeroY}" x2="${width - pad.right}" y2="${zeroY}" class="chart-zero-line"/>
-    ${xTicks.map((tick) => `<g><line x1="${x(tick.index)}" y1="${height - pad.bottom}" x2="${x(tick.index)}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(tick.index)}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join('')}
-    ${points.map((point, index) => {
-      const value = number(point.daily_realized_krw);
-      const barTop = value >= 0 ? y(value) : zeroY;
+    ${ticks.map((tick) => `<g><line x1="${x(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${x(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
+    ${points.map((point) => {
+      const value = Number(point.daily_realized_krw);
+      const top = value >= 0 ? y(value) : zeroY;
       const barHeight = Math.max(2, Math.abs(y(value) - zeroY));
-      return `<rect class="chart-bar ${value >= 0 ? 'positive' : 'negative'} ${point.day === selectedChartDay ? 'selected' : ''}" data-index="${index}" x="${x(index) - barWidth / 2}" y="${barTop}" width="${barWidth}" height="${barHeight}" rx="3" ry="3"></rect>`;
-    }).join('')}
+      return `<rect class="chart-bar ${value >= 0 ? "gain" : "loss"} ${point.day === selectedChartDay ? "selected" : ""}" data-day="${point.day}" x="${x(point.day) - barWidth / 2}" y="${top}" width="${barWidth}" height="${barHeight}" rx="3" ry="3"></rect>`;
+    }).join("")}
   </svg>`;
-  host.querySelectorAll('.chart-bar').forEach((node) => {
-    const point = points[Number(node.dataset.index)];
-    const show = () => {
-      host.querySelectorAll('.chart-bar').forEach((bar) => bar.classList.remove('selected'));
-      node.classList.add('selected');
-      renderSelectedPoint(point);
-      renderChartTooltip(host, {
-        x: (Number(node.getAttribute('x')) + Number(node.getAttribute('width')) / 2) / width * host.clientWidth + 10,
-        y: Number(node.getAttribute('y')) / height * host.clientHeight - 16,
-        title: `${dayLabel(point.day)}`,
-        lines: [`일자 실현수익 ${moneyMaybe(point.daily_realized_krw)}`, `총자산 ${moneyMaybe(point.total_asset_krw)}`, `당일 순입출금 ${moneyMaybe(point.daily_net_flow_krw)}`],
-      });
-    };
-    node.addEventListener('click', show);
-    node.addEventListener('mouseenter', show);
+
+  host.querySelectorAll(".chart-bar").forEach((node) => {
+    const point = points.find((item) => item.day === node.dataset.day);
+    const tooltip = () => renderChartTooltip(host, {
+      x: (Number(node.getAttribute("x")) + Number(node.getAttribute("width")) / 2) / width * host.clientWidth + 10,
+      y: Number(node.getAttribute("y")) / height * host.clientHeight - 16,
+      title: dayLabel(point.day),
+      lines: [`일자 실현수익 ${moneyMaybe(point.daily_realized_krw)}`, `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`, `당일 순입출금 ${moneyMaybe(data.flowByDay.get(point.day) || 0)}`],
+    });
+    node.addEventListener("mouseenter", tooltip);
+    node.addEventListener("click", () => {
+      selectedChartDay = point.day;
+      renderSelectedDay(point.day, data);
+      host.querySelectorAll(".chart-bar").forEach((bar) => bar.classList.toggle("selected", bar === node));
+      tooltip();
+    });
   });
-  host.addEventListener('mouseleave', () => clearChartTooltip(host));
+  host.addEventListener("mouseleave", () => clearChartTooltip(host));
 }
 
-function renderYieldCharts(historyRows) {
-  const rows = Array.isArray(historyRows) ? historyRows : [];
-  const fallbackEmpty = '<div class="chart-empty">시간당 업데이트가 시작되면 최근 6개월 자산·실현수익 추이가 누적됩니다.</div>';
-  if (!rows.length) {
-    $('#assetChart').innerHTML = fallbackEmpty;
-    $('#realizedChart').innerHTML = fallbackEmpty;
-    $('#selectedEvents').innerHTML = '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
-    return;
+function renderYieldCharts() {
+  const data = buildChartData();
+  const bounds = getRangeBounds(data);
+  const labels = { "1M": "최근 1개월", "3M": "최근 3개월", "6M": "최근 6개월", "1Y": "최근 1년", "ALL": "전체 기록" };
+  setText("#yieldRangeLabel", `${labels[selectedYieldRange]} · ${dayLabel(bounds.startDay)} ~ ${dayLabel(bounds.endDay)}`);
+  $("#yieldRangeSelector")?.querySelectorAll(".range-chip").forEach((node) => {
+    const active = node.dataset.range === selectedYieldRange;
+    node.classList.toggle("is-active", active);
+    node.setAttribute("aria-pressed", String(active));
+  });
+
+  renderAssetChart(data, bounds);
+  renderRealizedChart(data, bounds);
+
+  const candidateDays = data.allDays.filter((day) => inRange(day, bounds));
+  if (!selectedChartDay || !inRange(selectedChartDay, bounds) || !data.allDays.includes(selectedChartDay)) {
+    selectedChartDay = candidateDays.at(-1) || data.allDays.at(-1) || null;
   }
-  const allDaily = buildDailySeries();
-  const filtered = filterSeriesByRange(allDaily, selectedYieldRange);
-  const points = sampleChartPoints(filtered, selectedYieldRange === 'ALL' ? 320 : 210);
-  if (!points.length) {
-    $('#assetChart').innerHTML = fallbackEmpty;
-    $('#realizedChart').innerHTML = fallbackEmpty;
-    return;
-  }
-  if (!selectedChartDay || !points.some((point) => point.day === selectedChartDay)) selectedChartDay = points.at(-1).day;
-  renderAssetChart(points);
-  renderRealizedChart(points);
-  const selected = points.find((point) => point.day === selectedChartDay) || points.at(-1);
-  renderSelectedPoint(selected);
+  if (selectedChartDay) renderSelectedDay(selectedChartDay, data);
 }
 const sectorColors = ["#51e4ba", "#7fa8ff", "#9d8cff", "#f6bd60", "#ef7185", "#66c7d8", "#b5d86b", "#d88dd2"];
 
@@ -524,7 +595,7 @@ function render(data) {
   setText("#avgTakeProfit", percent(realized.average_take_profit_pct));
   setText("#avgStopLoss", percent(realized.average_stop_loss_pct));
   setText("#exitCount", `${realized.trade_count || 0}건`);
-  renderYieldCharts(data.yield_history || []);
+  renderYieldCharts();
   renderHoldings(data.holdings || []);
   renderSectorAnalytics(data.holdings || []);
   renderMonthly(data.monthly_performance || []);
@@ -533,6 +604,14 @@ function render(data) {
   $("#warningPanel").classList.toggle("is-hidden", warnings.length === 0);
   $("#warnings").innerHTML = warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   setText("#source", data.source || "조회 전용");
+  const diagnostics = data.diagnostics || {};
+  const recentByMarket = diagnostics.recent_realized_by_market || {};
+  const realizedApi = diagnostics.realized_api || {};
+  const transactionApi = diagnostics.transaction_api || {};
+  const pendingUs = number(realizedApi.us_pnl_unavailable_events);
+  const usTrades = number(transactionApi.us_daily_trades);
+  const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
+  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 그래프 ${number(diagnostics.yield_history_points)}p`);
 }
 
 async function loadEnvelope() {
@@ -546,12 +625,13 @@ $("#watchlistTab").addEventListener("click", () => { closePinModal(); activateTa
 $("#portfolioTab").addEventListener("click", () => { activateTab("portfolio"); if (!portfolio) openPinModal(); });
 $("#watchMarketFilter").addEventListener("change", renderWatchlistRows);
 $("#watchBandFilter").addEventListener("change", renderWatchlistRows);
-$("#yieldRangeSelector")?.addEventListener("click", (event) => {
-  const button = event.target.closest(".range-chip[data-range]");
-  if (!button || !portfolio) return;
-  selectedYieldRange = button.dataset.range || "6M";
-  $("#yieldRangeSelector").querySelectorAll(".range-chip").forEach((node) => node.classList.toggle("is-active", node === button));
-  renderYieldCharts(portfolio.yield_history || []);
+$("#yieldRangeSelector")?.querySelectorAll(".range-chip[data-range]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (!portfolio) return;
+    selectedYieldRange = button.dataset.range || "6M";
+    selectedChartDay = null;
+    renderYieldCharts();
+  });
 });
 $("#openPinButton").addEventListener("click", openPinModal);
 $("#closePinButton").addEventListener("click", () => closePinModal({ returnToWatchlist: true }));
