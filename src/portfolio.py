@@ -6,6 +6,7 @@ import os
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
@@ -13,6 +14,43 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from src.config import ENVELOPE_AAD, PBKDF2_ITERATIONS
 from src.models import Holding
+
+
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
+
+
+def _seoul_datetime(value: datetime | None = None) -> datetime:
+    current = value or datetime.now(SEOUL_TZ)
+    if current.tzinfo is None:
+        return current.replace(tzinfo=SEOUL_TZ)
+    return current.astimezone(SEOUL_TZ)
+
+
+def _next_calendar_day_key(value: Any) -> str:
+    raw = "".join(ch for ch in str(value or "") if ch.isdigit())[:8]
+    if len(raw) != 8:
+        return raw
+    try:
+        return (datetime.strptime(raw, "%Y%m%d").date() + timedelta(days=1)).strftime("%Y%m%d")
+    except ValueError:
+        return raw
+
+
+def realized_account_date(event: dict[str, Any]) -> str:
+    explicit = "".join(ch for ch in str(event.get("account_date") or "") if ch.isdigit())[:8]
+    if len(explicit) == 8:
+        return explicit
+    trade_day = "".join(ch for ch in str(event.get("date") or "") if ch.isdigit())[:8]
+    if len(trade_day) != 8:
+        return trade_day
+    if str(event.get("market") or "").upper() == "US":
+        # dailyTransaction fallback is already the observed Korea-account date.
+        # periodPnlDetail is keyed by the U.S. exchange trade date and needs the
+        # following Korea calendar day when no matched fallback supplied one.
+        if event.get("source") == "transaction_fallback":
+            return trade_day
+        return _next_calendar_day_key(trade_day)
+    return trade_day
 
 
 def number(value: Any, default: float = 0.0) -> float:
@@ -220,12 +258,13 @@ def portfolio_totals(holdings: Iterable[dict[str, Any]], trades: Iterable[dict[s
 
 def update_snapshot_history(
     history: Iterable[dict[str, Any]], totals: dict[str, Any], at: datetime | None = None,
-    limit: int = 730,
+    limit: int = 43_800,
 ) -> list[dict[str, Any]]:
-    now = at or datetime.now().astimezone()
+    now = _seoul_datetime(at)
     stamp = now.isoformat(timespec="minutes")
     point = {
         "at": stamp,
+        "snapshot_date": now.strftime("%Y%m%d"),
         "evaluation_krw": number(totals.get("evaluation_krw")),
         "pnl_krw": number(totals.get("pnl_krw")),
         "kr_krw": number(totals.get("kr_krw")),
@@ -402,12 +441,22 @@ def reconcile_us_realized_events(events: Iterable[dict[str, Any]]) -> list[dict[
         for key in ("name", "qty", "buy_price", "sell_price", "fee_krw", "tax_krw"):
             if resolved.get(key) in (None, "", 0, 0.0) and fallback.get(key) not in (None, "", 0, 0.0):
                 resolved[key] = fallback.get(key)
+        # periodPnlDetail carries the U.S. market trade date, while the matching
+        # dailyTransaction row can represent the Korea account calendar date.
+        # Keep the original trade date for the transaction table, but use the
+        # account date for chart alignment with total-asset snapshots.
+        resolved.setdefault("trade_date", resolved.get("date"))
+        fallback_account_date = "".join(ch for ch in str(fallback.get("account_date") or fallback.get("date") or "") if ch.isdigit())[:8]
+        if len(fallback_account_date) == 8:
+            resolved["account_date"] = fallback_account_date
         drop.add(fallback_index)
         used_resolved.add(resolved_index)
 
     output = [row for index, row in enumerate(rows) if index not in drop]
     deduped: dict[str, dict[str, Any]] = {}
     for row in output:
+        row.setdefault("trade_date", row.get("date"))
+        row["account_date"] = realized_account_date(row)
         event_id = str(row.get("id") or "")
         if event_id:
             deduped[event_id] = row
@@ -445,7 +494,7 @@ def monthly_realized_performance(
     for event in events:
         if event.get("pnl_available") is False or event.get("realized_pnl_krw") in (None, ""):
             continue
-        month = str(event.get("date", ""))[:6]
+        month = realized_account_date(event)[:6]
         if len(month) == 6:
             pnl_by_month[month] = pnl_by_month.get(month, 0.0) + number(event.get("realized_pnl_krw"))
     first_asset_by_month: dict[str, float] = {}
@@ -471,13 +520,14 @@ def update_yield_history(
     history: Iterable[dict[str, Any]], *, totals: dict[str, Any], realized: dict[str, Any],
     cash_flows: Iterable[dict[str, Any]], at: datetime | None = None, limit: int = 43_800,
 ) -> list[dict[str, Any]]:
-    now = at or datetime.now().astimezone()
+    now = _seoul_datetime(at)
     stamp = now.isoformat(timespec="minutes")
     flows = [dict(item) for item in cash_flows if isinstance(item, dict)]
     deposits = sum(number(item.get("amount_krw")) for item in flows if item.get("side") == "DEPOSIT")
     withdrawals = sum(number(item.get("amount_krw")) for item in flows if item.get("side") == "WITHDRAW")
     point = {
         "at": stamp,
+        "snapshot_date": now.strftime("%Y%m%d"),
         "total_asset_krw": number(totals.get("total_asset_krw") or totals.get("evaluation_krw")),
         "evaluation_krw": number(totals.get("evaluation_krw")),
         "unrealized_pnl_krw": number(totals.get("unrealized_pnl_krw") or totals.get("pnl_krw")),
@@ -519,7 +569,7 @@ def backfill_daily_realized_history(
     for item in realized_rows:
         if item.get("pnl_available") is False or item.get("realized_pnl_krw") in (None, ""):
             continue
-        day = digits(item.get("date"))
+        day = realized_account_date(item)
         if len(day) == 8:
             realized_by_day[day] = realized_by_day.get(day, 0.0) + number(item.get("realized_pnl_krw"))
 
@@ -555,7 +605,8 @@ def backfill_daily_realized_history(
         realized_running += realized_by_day.get(day_key, 0.0)
         flow_running += flow_by_day.get(day_key, 0.0)
         kept.append({
-            "at": f"{day.isoformat()}T23:59:00",
+            "at": f"{day.isoformat()}T23:59:00+09:00",
+            "snapshot_date": day_key,
             "total_asset_krw": None,
             "evaluation_krw": None,
             "unrealized_pnl_krw": None,

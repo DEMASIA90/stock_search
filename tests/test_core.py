@@ -18,6 +18,7 @@ from src.portfolio import (
     normalize_overseas_daily_transactions,
     normalize_total_transactions,
     portfolio_totals,
+    realized_account_date,
     realized_summary,
     reconcile_us_realized_events,
     sanitize_legacy_realized_events,
@@ -439,6 +440,9 @@ class PortfolioTests(unittest.TestCase):
         us = [item for item in events if item["market"] == "US"]
         self.assertEqual(len(us), 1)
         self.assertEqual(us[0]["source"], "period_pnl_detail")
+        self.assertEqual(us[0]["date"], "20260918")
+        self.assertEqual(us[0]["trade_date"], "20260918")
+        self.assertEqual(us[0]["account_date"], "20260919")
         self.assertEqual(us[0]["realized_pnl_krw"], 152000)
         self.assertEqual(diagnostics["us_pnl_resolved_events"], 1)
         self.assertEqual(diagnostics["us_pnl_unavailable_events"], 0)
@@ -462,6 +466,63 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "period_pnl_detail")
         self.assertEqual(rows[0]["realized_pnl_krw"], 152000)
+
+    def test_realized_account_date_uses_korea_account_day(self) -> None:
+        self.assertEqual(
+            realized_account_date({
+                "market": "US", "date": "20260918", "source": "period_pnl_detail",
+            }),
+            "20260919",
+        )
+        self.assertEqual(
+            realized_account_date({
+                "market": "US", "date": "20260919", "source": "transaction_fallback",
+            }),
+            "20260919",
+        )
+        self.assertEqual(
+            realized_account_date({
+                "market": "KR", "date": "20260919", "source": "trading_pnl",
+            }),
+            "20260919",
+        )
+
+    def test_backfill_uses_account_date_for_us_realized_pnl(self) -> None:
+        events = [{
+            "id": "US:1", "market": "US", "date": "20260918",
+            "account_date": "20260919", "source": "period_pnl_detail",
+            "realized_pnl_krw": 1000, "pnl_available": True,
+        }]
+        history = backfill_daily_realized_history(
+            [], realized_events=events, cash_flows=[],
+            start_date=date(2026, 9, 18), end_date=date(2026, 9, 21),
+        )
+        by_day = {item["snapshot_date"]: item for item in history}
+        self.assertEqual(by_day["20260918"]["cumulative_realized_krw"], 0)
+        self.assertEqual(by_day["20260919"]["cumulative_realized_krw"], 1000)
+
+    def test_monthly_realized_uses_account_date_at_us_month_boundary(self) -> None:
+        events = [{
+            "id": "US:SEP30", "market": "US", "date": "20260930",
+            "source": "period_pnl_detail", "realized_pnl_krw": 500,
+            "pnl_available": True,
+        }]
+        history = [{
+            "at": "2026-10-01T09:00:00+09:00", "snapshot_date": "20261001",
+            "total_asset_krw": 10000, "asset_recorded": True,
+        }]
+        monthly = monthly_realized_performance(events, history)
+        self.assertEqual(monthly[0]["month"], "2026-10")
+        self.assertAlmostEqual(monthly[0]["return_pct"], 5.0)
+
+    def test_yield_history_records_seoul_snapshot_date(self) -> None:
+        history = update_yield_history(
+            [], totals={"total_asset_krw": 10000, "evaluation_krw": 9000},
+            realized={"cumulative_realized_krw": 0}, cash_flows=[],
+            at=datetime.fromisoformat("2026-09-18T15:17:00+00:00"),
+        )
+        self.assertEqual(history[0]["snapshot_date"], "20260919")
+        self.assertTrue(str(history[0]["at"]).endswith("+09:00"))
 
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")

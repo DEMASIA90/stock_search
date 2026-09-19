@@ -191,6 +191,49 @@ function eventDate(value) {
   return compactDate(value);
 }
 
+function addCalendarDays(day, offset) {
+  if (!/^\d{8}$/.test(String(day || ""))) return String(day || "");
+  const date = new Date(Number(day.slice(0, 4)), Number(day.slice(4, 6)) - 1, Number(day.slice(6, 8)));
+  date.setDate(date.getDate() + offset);
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function seoulDayFromTimestamp(value) {
+  const text = String(value || "");
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text) && /(Z|[+-]\d{2}:?\d{2})$/.test(text)) {
+    const date = new Date(text);
+    if (!Number.isNaN(date.getTime())) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+      }).formatToParts(date);
+      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      return `${values.year}${values.month}${values.day}`;
+    }
+  }
+  return eventDate(value);
+}
+
+function assetSnapshotDay(row) {
+  const explicit = compactDate(row?.snapshot_date);
+  if (/^\d{8}$/.test(explicit)) return explicit;
+  return seoulDayFromTimestamp(row?.at);
+}
+
+function realizedChartDay(item) {
+  const explicit = compactDate(item?.account_date);
+  if (/^\d{8}$/.test(explicit)) return explicit;
+  const tradeDay = eventDate(item?.date);
+  if (!/^\d{8}$/.test(tradeDay)) return tradeDay;
+  // Legacy periodPnlDetail rows carry the U.S. exchange date.  The account
+  // snapshot is a Korea-calendar snapshot, so regular U.S. trades belong to
+  // the following Korea calendar day.  transaction_fallback already comes
+  // from dailyTransaction and keeps its observed account date.
+  if (String(item?.market || "").toUpperCase() === "US" && item?.source === "period_pnl_detail") {
+    return addCalendarDays(tradeDay, 1);
+  }
+  return tradeDay;
+}
+
 let selectedYieldRange = "6M";
 let selectedChartDay = null;
 
@@ -234,7 +277,7 @@ function buildChartData() {
   const flowByDay = new Map();
 
   (portfolio?.yield_history || []).forEach((row) => {
-    const day = eventDate(row.at);
+    const day = assetSnapshotDay(row);
     if (!day) return;
     if (row.cumulative_realized_krw !== null && row.cumulative_realized_krw !== undefined && row.cumulative_realized_krw !== "") {
       cumulativeByDay.set(day, number(row.cumulative_realized_krw));
@@ -243,13 +286,15 @@ function buildChartData() {
     const hasAsset = row.asset_recorded !== false && row.kind !== "realized_daily" && rawAsset !== null && rawAsset !== undefined && rawAsset !== "" && Number.isFinite(Number(rawAsset));
     if (!hasAsset) return;
     const current = assetByDay.get(day);
-    if (!current || String(row.at) >= String(current.at)) {
+    const candidateTime = Number.isNaN(new Date(row.at).getTime()) ? String(row.at) : new Date(row.at).getTime();
+    const currentTime = !current || Number.isNaN(new Date(current.at).getTime()) ? (current ? String(current.at) : null) : new Date(current.at).getTime();
+    if (!current || candidateTime >= currentTime) {
       assetByDay.set(day, { day, at: row.at, total_asset_krw: Number(rawAsset) });
     }
   });
 
   (portfolio?.realized_events || []).forEach((item) => {
-    const day = eventDate(item.date);
+    const day = realizedChartDay(item);
     if (!day || item.pnl_available === false || item.realized_pnl_krw === null || item.realized_pnl_krw === undefined || item.realized_pnl_krw === "") return;
     const pnl = Number(item.realized_pnl_krw);
     if (Number.isFinite(pnl)) realizedByDay.set(day, (realizedByDay.get(day) || 0) + pnl);
@@ -264,7 +309,7 @@ function buildChartData() {
 
   const realizedEvents = (portfolio?.realized_events || [])
     .filter((item) => item.pnl_available !== false && item.realized_pnl_krw !== null && item.realized_pnl_krw !== undefined && item.realized_pnl_krw !== "")
-    .map((item) => ({ day: eventDate(item.date), pnl: Number(item.realized_pnl_krw) }))
+    .map((item) => ({ day: realizedChartDay(item), pnl: Number(item.realized_pnl_krw) }))
     .filter((item) => /^\d{8}$/.test(item.day) && Number.isFinite(item.pnl))
     .sort((a, b) => a.day.localeCompare(b.day));
 
@@ -284,7 +329,7 @@ function buildChartData() {
     ...flowByDay.keys(),
     ...cumulativeByDay.keys(),
   ]);
-  const updatedDay = eventDate(portfolio?.updated_at);
+  const updatedDay = seoulDayFromTimestamp(portfolio?.updated_at);
   if (/^\d{8}$/.test(updatedDay)) allDays.add(updatedDay);
 
   return {
@@ -398,10 +443,15 @@ function renderSelectedDay(day, data) {
   flowNode.textContent = moneyMaybe(dayFlow);
   flowNode.className = pnlClass(dayFlow);
 
-  const realized = (portfolio.realized_events || []).filter((item) => eventDate(item.date) === day);
+  const realized = (portfolio.realized_events || []).filter((item) => realizedChartDay(item) === day);
   const flows = (portfolio.cash_flows || []).filter((item) => eventDate(item.date) === day);
   const parts = [
-    ...realized.map((item) => `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${moneyMaybe(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}${item.pnl_available === false ? " · 손익 미확인" : ""}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${moneyMaybe(item.realized_pnl_krw)}</b></article>`),
+    ...realized.map((item) => {
+      const tradeDay = eventDate(item.date);
+      const accountDay = realizedChartDay(item);
+      const dateNote = tradeDay && accountDay && tradeDay !== accountDay ? ` · 거래일 ${dayLabel(tradeDay)}` : "";
+      return `<article class="event-item"><span class="event-icon realized">R</span><div><strong>${escapeHtml(item.name || item.code)}</strong><small>${qty.format(number(item.qty))}주 · ${moneyMaybe(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}${dateNote}${item.pnl_available === false ? " · 손익 미확인" : ""}</small></div><b class="${pnlClass(item.realized_pnl_krw)}">${moneyMaybe(item.realized_pnl_krw)}</b></article>`;
+    }),
     ...flows.map((item) => `<article class="event-item"><span class="event-icon flow">${item.side === "DEPOSIT" ? "+" : "−"}</span><div><strong>${item.side === "DEPOSIT" ? "입금" : "출금"}</strong><small>${escapeHtml(item.label || "계좌 현금흐름")}</small></div><b class="${item.side === "DEPOSIT" ? "positive" : "negative"}">${item.side === "DEPOSIT" ? "+" : "−"}${money(item.amount_krw)}</b></article>`),
   ];
   $("#selectedEvents").innerHTML = parts.length ? parts.join("") : '<p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p>';
@@ -430,7 +480,7 @@ function renderAssetChart(data, bounds) {
     ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join("")}
     ${ticks.map((tick) => `<g><line x1="${x(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${x(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
     ${fill}${polyline}
-    ${points.map((point) => `<circle class="chart-point asset ${point.day === selectedChartDay ? "selected" : ""}" data-day="${point.day}" cx="${x(point.day)}" cy="${y(Number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : 4}"/>`).join("")}
+    ${points.map((point) => `<circle class="chart-point asset ${data.realizedByDay.has(point.day) ? "has-realized" : ""} ${point.day === selectedChartDay ? "selected" : ""}" data-day="${point.day}" cx="${x(point.day)}" cy="${y(Number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : (data.realizedByDay.has(point.day) ? 5 : 4)}"/>`).join("")}
   </svg>`;
 
   host.querySelectorAll(".chart-point.asset").forEach((node) => {

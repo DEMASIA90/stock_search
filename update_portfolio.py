@@ -8,6 +8,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import keyring
 
@@ -40,6 +41,7 @@ from src.watchlist import MarketAnalyzer
 ENV_KEY = "web_environment"
 ACCOUNT_KEY = "web_account"
 PASSWORD_KEY = "web_password"
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -191,7 +193,7 @@ def build_payload(
     app_key: str,
     app_secret: str,
 ) -> dict[str, Any]:
-    now = datetime.now().astimezone()
+    now = datetime.now(SEOUL_TZ)
     start = now - timedelta(days=30)
 
     print("[1/5] 현재 국내·미국 보유종목과 총자산을 조회합니다...")
@@ -334,9 +336,10 @@ def build_payload(
         if fields:
             print("      미국 detail 필드: " + ", ".join(str(item) for item in fields))
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "updated_at": now.isoformat(timespec="seconds"),
         "period": {"start": start.strftime("%Y-%m-%d"), "end": now.strftime("%Y-%m-%d")},
+        "history_policy": {"query_window_days": 30, "yield_history_limit": 43800, "event_limit": 20000, "timezone": "Asia/Seoul"},
         "recording_started_at": previous.get("recording_started_at") or now.isoformat(timespec="seconds"),
         "account": {
             "masked": mask_account(account_no),

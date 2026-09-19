@@ -228,6 +228,7 @@ footer { padding: 16px 0 0; color: #557086; font-size: 11px; text-align: center;
 .chart-x-label, .chart-y-label { fill: #6f879d; font-size: 10px; }
 .chart-point { fill: rgba(82, 224, 186, .75); stroke: #0c1b2b; stroke-width: 2; cursor: pointer; transition: r .15s ease, fill .15s ease; }
 .chart-point:hover, .chart-point.selected { r: 7; fill: #fff; }
+.chart-point.has-realized { stroke: var(--violet); stroke-width: 3; }
 .chart-bar { cursor: pointer; opacity: .88; transition: opacity .15s ease, transform .15s ease; transform-origin: center bottom; }
 .chart-bar.gain { fill: rgba(82, 224, 186, .95); }
 .chart-bar.loss { fill: rgba(255, 122, 135, .9); }
