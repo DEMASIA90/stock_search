@@ -11,7 +11,8 @@ from typing import Any, Iterable
 from src.config import AUTH_BASE, INSTRUMENTS_BASE, ConnectionProfile
 from src.models import Account, Holding
 from src.portfolio import (
-    merge_trades, normalize_daily_executions, normalize_total_transactions, number,
+    merge_trades, normalize_daily_executions, normalize_overseas_daily_transactions,
+    normalize_total_transactions, number,
 )
 
 
@@ -67,25 +68,42 @@ def _first_number(row: dict[str, Any], *keys: str) -> float:
     return number(value)
 
 
+def _optional_number(row: dict[str, Any], *keys: str) -> float | None:
+    """Return a number only when the API actually supplied one."""
+    for key in keys:
+        if key not in row:
+            continue
+        value = row.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        return number(value)
+    return None
+
+
 def _us_realized_event(row: dict[str, Any], fallback_day: str = "") -> dict[str, Any] | None:
-    """Normalize one overseas realized-P/L row from periodPnl or periodPnlDetail."""
+    """Normalize one security row from periodPnlDetail.
+
+    periodPnl.Output_1 is a date-level summary and has no iem_cd according to the
+    official schema, so it must never be parsed as a security event.
+    """
     day = _date_digits(_first_value(row, "orr_dt", "sll_dt", "trd_dt", "trad_dt")) or fallback_day
     code = str(_first_value(row, "iem_cd", "pdno", "ovrs_pdno", "item_code") or "").strip().upper()
     if len(day) != 8 or not code:
         return None
 
     qty = abs(_first_number(row, "sll_qty", "sell_qty", "tot_sll_qty", "qty"))
-    pnl = _first_number(
-        row,
-        "fc_rzt_pls", "rzt_pls", "frcr_rlzt_pfls_amt", "ovrs_rlzt_pfls_amt",
-        "rlzt_pfls", "pls_amt",
+    if qty <= 0:
+        return None
+    pnl = _optional_number(
+        row, "fc_rzt_pls", "rzt_pls", "frcr_rlzt_pfls_amt",
+        "ovrs_rlzt_pfls_amt", "rlzt_pfls", "pls_amt",
     )
-    sell_price = abs(_first_number(row, "sll_uit_pr", "sell_uit_pr", "sll_pr", "sell_price"))
-    buy_price = abs(_first_number(row, "byn_uit_pr", "buy_uit_pr", "byn_pr", "buy_price"))
+    sell_price = _optional_number(row, "sll_uit_pr", "sell_uit_pr", "sll_pr", "sell_price")
+    buy_price = _optional_number(row, "byn_uit_pr", "buy_uit_pr", "byn_pr", "buy_price")
+    return_pct = _optional_number(row, "fc_rzt_pft_rt", "rzt_pft_rt", "pft_rt", "return_pct")
+    fee = _optional_number(row, "fc_sdr_xps", "sdr_xps", "fee_sum", "fee")
+    tax = _optional_number(row, "tax_sum", "tax")
 
-    # periodPnl is itself a realized-P/L endpoint, so a valid dated security row is an
-    # event even when the realized amount is exactly zero. Detail endpoints can also
-    # return zero-profit sales, hence code/date are the authoritative presence signal.
     return {
         "id": f"US:{day}:{code}",
         "date": day,
@@ -93,15 +111,15 @@ def _us_realized_event(row: dict[str, Any], fallback_day: str = "") -> dict[str,
         "code": code,
         "name": str(_first_value(row, "iem_nm", "prdt_name", "ovrs_item_name", "item_name") or code).strip(),
         "qty": qty,
-        "buy_price": buy_price,
-        "sell_price": sell_price,
+        "buy_price": abs(buy_price) if buy_price is not None else None,
+        "sell_price": abs(sell_price) if sell_price is not None else None,
         "realized_pnl_krw": pnl,
-        "return_pct": _first_number(row, "fc_rzt_pft_rt", "rzt_pft_rt", "pft_rt", "return_pct"),
-        "fee_krw": abs(_first_number(row, "fc_sdr_xps", "sdr_xps", "fee_sum", "fee")),
-        "tax_krw": abs(_first_number(row, "tax_sum", "tax")),
-        "currency": "KRW",
-        "pnl_available": True,
-        "source": "period_pnl",
+        "return_pct": return_pct,
+        "fee_krw": abs(fee) if fee is not None else None,
+        "tax_krw": abs(tax) if tax is not None else None,
+        "currency": "USD",
+        "pnl_available": pnl is not None,
+        "source": "period_pnl_detail",
     }
 
 
@@ -223,6 +241,7 @@ class NhReadOnlyClient:
     def __init__(self) -> None:
         self.profile: ConnectionProfile | None = None
         self._call = None
+        self._paginate = None
         self._api_lock = threading.Lock()
         self._next_api_at = 0.0
         self._rate_limit_until = 0.0
@@ -246,7 +265,21 @@ class NhReadOnlyClient:
         for name in list(sys.modules):
             if name == "nhplug" or name.startswith("nhplug."):
                 del sys.modules[name]
-        self._call = getattr(importlib.import_module("nhplug"), "call")
+        nhplug = importlib.import_module("nhplug")
+        self._call = getattr(nhplug, "call")
+        self._paginate = getattr(nhplug, "paginate", None)
+
+    def _api_pages(
+        self, path: str, payload: dict[str, Any] | None = None, *, max_pages: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Read every continuation page when supported by nhplug>=0.4.0."""
+        if self._paginate is None:
+            return [self._api(path, payload)]
+        pages: list[dict[str, Any]] = []
+        for page in self._paginate(path, payload or {}, max_pages=max_pages):
+            if isinstance(page, dict):
+                pages.append(page)
+        return pages
 
     def _api(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._call or not self.profile:
@@ -430,8 +463,9 @@ class NhReadOnlyClient:
         warnings: list[str] = []
         diagnostics: dict[str, Any] = {
             "kr_events": 0,
+            "us_period_pages": 0,
             "us_period_rows": 0,
-            "us_period_events": 0,
+            "us_period_sale_days": 0,
             "us_detail_calls": 0,
             "us_detail_rows": 0,
             "us_sell_trades": 0,
@@ -488,7 +522,7 @@ class NhReadOnlyClient:
         diagnostics["kr_events"] = sum(1 for item in events.values() if item.get("market") == "KR")
 
         try:
-            period = self._api("/gbstock/inquiry/v1/periodPnl", {
+            period_payload = {
                 "act_no": account_no,
                 "iqr_dit": "2",
                 "sta_orr_dt": start_date.strftime("%Y%m%d"),
@@ -496,90 +530,99 @@ class NhReadOnlyClient:
                 "iem_cd": "",
                 "trd_cur_cd": "KRW",
                 "fc_sec_trd_nat_cd": "200",
-            })
-            period_rows = _list(period.get("Output_1"))
-            diagnostics["us_period_rows"] = len(period_rows)
-            diagnostics["us_period_rsp_cd"] = str(period.get("rsp_cd") or "")
-            diagnostics["us_period_rsp_msg"] = str(period.get("rsp_msg") or "")
-
-            # Primary source: periodPnl.Output_1. The transaction ledger supplies an
-            # independent set of US SELL dates so periodPnlDetail can still be tried
-            # when periodPnl unexpectedly returns an empty first block.
-            sale_dates: set[str] = {item["date"] for item in transaction_fallback.values()}
-            for row in period_rows:
-                event = _us_realized_event(row)
-                if not event:
-                    continue
-                sale_dates.add(str(event["date"]))
-                events[event["id"]] = event
-            diagnostics["us_period_events"] = sum(
-                1 for item in events.values() if item.get("market") == "US"
+            }
+            period_pages = self._api_pages(
+                "/gbstock/inquiry/v1/periodPnl", period_payload, max_pages=20
             )
+            diagnostics["us_period_pages"] = len(period_pages)
+            period_rows: list[dict[str, Any]] = []
+            for page in period_pages:
+                period_rows.extend(_list(page.get("Output_1")))
+                if page.get("rsp_cd") not in (None, ""):
+                    diagnostics["us_period_rsp_cd"] = str(page.get("rsp_cd"))
+                if page.get("rsp_msg") not in (None, ""):
+                    diagnostics["us_period_rsp_msg"] = str(page.get("rsp_msg"))
+            diagnostics["us_period_rows"] = len(period_rows)
+
+            # Official schema: periodPnl.Output_1 is date-level and intentionally has
+            # no iem_cd.  Use its orr_dt values to drive periodPnlDetail, and union
+            # them with independently observed U.S. SELL dates from dailyTransaction.
+            sale_dates: set[str] = {item["date"] for item in transaction_fallback.values()}
+            period_dates = {
+                _date_digits(row.get("orr_dt")) for row in period_rows
+                if len(_date_digits(row.get("orr_dt"))) == 8
+            }
+            sale_dates.update(period_dates)
+            diagnostics["us_period_sale_days"] = len(period_dates)
 
             if not period_rows and transaction_fallback:
                 message = diagnostics["us_period_rsp_msg"]
                 suffix = f" (API 메시지: {message})" if message else ""
                 warnings.append(
-                    "미국 기간손익 periodPnl은 0건이지만 최근 거래내역에서 "
+                    "미국 기간손익 periodPnl은 0건이지만 해외주식 일별거래내역에서 "
                     f"미국 매도 {len(transaction_fallback)}종목을 확인해 상세조회로 보완합니다.{suffix}"
                 )
             elif not period_rows and not transaction_fallback:
                 message = diagnostics["us_period_rsp_msg"]
                 suffix = f" (API 메시지: {message})" if message else ""
                 warnings.append(
-                    "미국 기간손익 periodPnl이 0건이고 최근 종합거래내역에서도 미국 SELL을 "
-                    f"찾지 못했습니다. 실제 미국 매도가 있었다면 거래내역 조회조건을 확인하세요.{suffix}"
+                    "미국 기간손익 periodPnl과 해외주식 일별거래내역 모두 최근 미국 매도를 "
+                    f"반환하지 않았습니다. 실제 매도가 있었다면 API 응답을 확인하세요.{suffix}"
                 )
-            elif diagnostics["us_period_events"] == 0:
+            elif period_rows and not period_dates:
                 warnings.append(
-                    f"미국 기간손익 Output_1 {len(period_rows)}건을 받았지만 종목·매도일을 "
-                    "실현 이벤트로 해석하지 못했습니다. 응답 필드 형식을 확인하세요."
+                    f"미국 기간손익 Output_1 {len(period_rows)}건을 받았지만 orr_dt를 해석하지 "
+                    "못했습니다. periodPnl 응답 필드 형식을 확인하세요."
                 )
 
             for day in sorted(sale_dates):
                 try:
                     diagnostics["us_detail_calls"] += 1
-                    detail = self._api("/gbstock/inquiry/v1/periodPnlDetail", {
-                        "act_no": account_no,
-                        "iqr_dit": "2",
-                        "iem_cd": "",
-                        "orr_dt": day,
-                        "fc_sec_trd_nat_cd": "200",
-                        "trd_cur_cd": "KRW",
-                    })
-                    detail_rows = _list(detail.get("Output_0"))
+                    detail_pages = self._api_pages(
+                        "/gbstock/inquiry/v1/periodPnlDetail",
+                        {
+                            "act_no": account_no,
+                            "iqr_dit": "2",
+                            "iem_cd": "",
+                            "orr_dt": day,
+                            "fc_sec_trd_nat_cd": "200",
+                            "trd_cur_cd": "KRW",
+                        },
+                        max_pages=20,
+                    )
+                    detail_rows: list[dict[str, Any]] = []
+                    for page in detail_pages:
+                        detail_rows.extend(_list(page.get("Output_0")))
                     diagnostics["us_detail_rows"] += len(detail_rows)
                     for row in detail_rows:
                         event = _us_realized_event(row, day)
                         if not event:
                             continue
-                        event["source"] = "period_pnl_detail"
-                        event["pnl_available"] = True
                         if event["id"] in events:
                             events[event["id"]] = _merge_realized_event(events[event["id"]], event)
                         else:
                             events[event["id"]] = event
                 except Exception as exc:
-                    # Detail lookup is non-fatal because either periodPnl or the transaction
-                    # ledger can still preserve the fact that a US sale occurred.
                     warnings.append(f"{day} 미국 실현손익 상세조회 실패(확인된 매도내역은 유지): {exc}")
 
-            # Final safety net: every US SELL visible in transaction history must remain
-            # visible in the portfolio even when both P/L endpoints return no row.
+            # Final safety net: every SELL visible in the authoritative overseas daily
+            # ledger remains visible even if either P/L endpoint is empty.  Do not
+            # fabricate a zero P/L when the detail field is missing.
             for event_id, fallback_event in transaction_fallback.items():
                 if event_id in events:
                     events[event_id] = _merge_realized_event(events[event_id], fallback_event)
                 else:
                     events[event_id] = fallback_event
                     diagnostics["us_transaction_fallback_events"] += 1
+
             diagnostics["us_pnl_unavailable_events"] = sum(
                 1 for item in events.values()
                 if item.get("market") == "US" and item.get("pnl_available") is False
             )
             if diagnostics["us_pnl_unavailable_events"]:
                 warnings.append(
-                    f"미국 매도 {diagnostics['us_pnl_unavailable_events']}종목은 체결내역은 확인했지만 "
-                    "기간손익/상세손익이 없어 종목·수량·매도가는 표시하고 실현손익은 '—'로 표시합니다."
+                    f"미국 매도 {diagnostics['us_pnl_unavailable_events']}종목은 거래는 확인했지만 "
+                    "종목별 실현손익 값이 없어 손익을 '—'로 표시합니다."
                 )
         except Exception as exc:
             warnings.append(f"미국주식 실현손익 조회 실패: {exc}")
@@ -670,51 +713,138 @@ class NhReadOnlyClient:
 
     def transaction_history(
         self, account_no: str, start_date: datetime, end_date: datetime,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+        """Read recent executed trades without silently dropping continuation pages.
+
+        Domestic trades primarily come from common totalTransaction (live only). U.S.
+        trades primarily come from the dedicated dailyTransaction API, which exposes
+        overseas buy/sell history directly and is available in both live and mock.
+        """
         start_text = start_date.strftime("%Y%m%d")
         end_text = end_date.strftime("%Y%m%d")
         warnings: list[str] = []
+        diagnostics: dict[str, Any] = {
+            "common_pages": 0,
+            "common_rows": 0,
+            "common_kr_trades": 0,
+            "common_us_trades": 0,
+            "us_daily_pages": 0,
+            "us_daily_rows": 0,
+            "us_daily_trades": 0,
+            "us_daily_sell_trades": 0,
+            "us_daily_buy_rows": 0,
+            "us_daily_sell_rows": 0,
+            "us_daily_buy_trades": 0,
+            "us_daily_rsp_msg": "",
+            "us_source": "",
+        }
+
+        common_trades: list[dict[str, Any]] = []
         if self.environment == "live":
             try:
-                data = self._api("/common/inquiry/v1/totalTransaction", {
-                    "iqr_tp_cd": "2",
-                    "iqr_rge_cd": "1",
-                    "act_no": account_no,
-                    "iqr_sta_dt": start_text,
-                    "iqr_end_dt": end_text,
-                    "iem_llf_cd": "00",
-                    "act_trd_dtl_cd": "03",
-                })
-                return normalize_total_transactions(_list(data.get("Output_0"))), warnings
+                pages = self._api_pages(
+                    "/common/inquiry/v1/totalTransaction",
+                    {
+                        "iqr_tp_cd": "2",
+                        "iqr_rge_cd": "1",
+                        "act_no": account_no,
+                        "iqr_sta_dt": start_text,
+                        "iqr_end_dt": end_text,
+                        "iem_llf_cd": "00",
+                        "act_trd_dtl_cd": "03",
+                    },
+                    max_pages=50,
+                )
+                diagnostics["common_pages"] = len(pages)
+                common_rows: list[dict[str, Any]] = []
+                for page in pages:
+                    common_rows.extend(_list(page.get("Output_0")))
+                diagnostics["common_rows"] = len(common_rows)
+                common_trades = normalize_total_transactions(common_rows)
+                diagnostics["common_kr_trades"] = sum(1 for item in common_trades if item.get("market") == "KR")
+                diagnostics["common_us_trades"] = sum(1 for item in common_trades if item.get("market") == "US")
             except Exception as exc:
-                warnings.append(f"종합거래내역 조회 실패로 일별 체결조회를 사용합니다: {exc}")
+                warnings.append(f"종합거래내역 전체페이지 조회 실패: {exc}")
 
-        domestic: list[dict[str, Any]] = []
-        overseas: list[dict[str, Any]] = []
-        cursor = start_date
-        while cursor.date() <= end_date.date():
-            if cursor.weekday() < 5:
-                day = cursor.strftime("%Y%m%d")
-                try:
-                    data = self._api("/krstock/inquiry/v1/dailyOrderExecution", {
-                        "orr_dt": day,
+        # Dedicated overseas transaction history is authoritative for recent U.S.
+        # buys/sells. Query BUY and SELL explicitly instead of relying on the "00"
+        # all-transactions filter so a missing/ambiguous transaction-type label can
+        # never hide a sale. Every continuation page is consumed.
+        overseas_groups: list[list[dict[str, Any]]] = []
+        daily_rsp_messages: list[str] = []
+        for side_code, forced_side in (("05", "BUY"), ("06", "SELL")):
+            try:
+                pages = self._api_pages(
+                    "/gbstock/inquiry/v1/dailyTransaction",
+                    {
                         "act_no": account_no,
-                        "orr_mkt_cd": "00",
-                        "ost_cns_dit": "1",
-                    })
-                    domestic.extend(normalize_daily_executions(_list(data.get("Output_1")), "KR", day))
-                except Exception as exc:
-                    warnings.append(f"{day} 국내 체결조회 실패: {exc}")
-                try:
-                    data = self._api("/gbstock/inquiry/v1/unexecuted", {
-                        "orr_dt": day,
-                        "act_no": account_no,
-                        "oss_sby_dit_cd": "0",
-                        "sot_dit": "1",
-                        "ost_cns_dit": "1",
-                    })
-                    overseas.extend(normalize_daily_executions(_list(data.get("Output_0")), "US", day))
-                except Exception as exc:
-                    warnings.append(f"{day} 미국 체결조회 실패: {exc}")
-            cursor += timedelta(days=1)
-        return merge_trades(domestic, overseas), warnings
+                        "iqr_sta_dt": start_text,
+                        "iqr_end_dt": end_text,
+                        "act_trd_cfc_cd": side_code,
+                        "iem_mlf_cd": "00001",
+                        "iem_cd": "",
+                    },
+                    max_pages=50,
+                )
+                diagnostics["us_daily_pages"] += len(pages)
+                daily_rows: list[dict[str, Any]] = []
+                for page in pages:
+                    daily_rows.extend(_list(page.get("Output_0")))
+                    message = str(page.get("rsp_msg") or "").strip()
+                    if message and message not in daily_rsp_messages:
+                        daily_rsp_messages.append(message)
+                diagnostics["us_daily_rows"] += len(daily_rows)
+                diagnostics[f"us_daily_{forced_side.lower()}_rows"] = len(daily_rows)
+                normalized = normalize_overseas_daily_transactions(daily_rows, forced_side=forced_side)
+                overseas_groups.append(normalized)
+                diagnostics[f"us_daily_{forced_side.lower()}_trades"] = len(normalized)
+            except Exception as exc:
+                warnings.append(f"해외주식 일별거래내역 {forced_side} 조회 실패: {exc}")
+
+        overseas = merge_trades(*overseas_groups) if overseas_groups else []
+        diagnostics["us_daily_trades"] = len(overseas)
+        diagnostics["us_daily_sell_trades"] = sum(1 for item in overseas if item.get("side") == "SELL")
+        diagnostics["us_daily_rsp_msg"] = " | ".join(daily_rsp_messages[:4])
+        diagnostics["us_source"] = "dailyTransaction_05_06" if overseas_groups else ""
+
+        domestic = [item for item in common_trades if item.get("market") == "KR"]
+        common_us = [item for item in common_trades if item.get("market") == "US"]
+
+        # If the dedicated overseas endpoint failed completely, preserve any U.S. rows
+        # that the common ledger did return instead of dropping them.
+        if not overseas and common_us:
+            overseas = common_us
+            diagnostics["us_source"] = "totalTransaction_fallback"
+            diagnostics["us_daily_sell_trades"] = sum(1 for item in overseas if item.get("side") == "SELL")
+            warnings.append(
+                "해외주식 일별거래내역이 비어 있어 종합거래내역의 미국 거래를 보조자료로 사용합니다."
+            )
+
+        elif not overseas and not common_us:
+            suffix = f" (API 메시지: {diagnostics['us_daily_rsp_msg']})" if diagnostics.get("us_daily_rsp_msg") else ""
+            warnings.append(
+                "해외주식 일별거래내역과 종합거래내역에서 최근 30일 미국 체결을 0건으로 받았습니다. "
+                f"실제 거래가 있었다면 dailyTransaction 조회조건/응답을 확인하세요.{suffix}"
+            )
+
+        # Common history is unavailable in mock.  For domestic trades only, fall back
+        # to the daily execution endpoint when needed.
+        if not domestic and self.environment != "live":
+            cursor = start_date
+            while cursor.date() <= end_date.date():
+                if cursor.weekday() < 5:
+                    day = cursor.strftime("%Y%m%d")
+                    try:
+                        data = self._api("/krstock/inquiry/v1/dailyOrderExecution", {
+                            "orr_dt": day,
+                            "act_no": account_no,
+                            "orr_mkt_cd": "00",
+                            "ost_cns_dit": "1",
+                        })
+                        domestic.extend(normalize_daily_executions(_list(data.get("Output_1")), "KR", day))
+                    except Exception as exc:
+                        warnings.append(f"{day} 국내 체결조회 실패: {exc}")
+                cursor += timedelta(days=1)
+
+        trades = merge_trades(domestic, overseas)
+        return trades, warnings, diagnostics

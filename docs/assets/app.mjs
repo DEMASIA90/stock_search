@@ -28,8 +28,8 @@ function optionalMoney(value, currency = "KRW") {
 }
 
 function percent(value, digits = 2) {
+  if (!hasNumber(value)) return "—";
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return "—";
   return `${parsed > 0 ? "+" : ""}${parsed.toFixed(digits)}%`;
 }
 
@@ -362,9 +362,11 @@ function render(data) {
   const diagnostics = data.diagnostics || {};
   const recentByMarket = diagnostics.recent_realized_by_market || {};
   const realizedApi = diagnostics.realized_api || {};
+  const transactionApi = diagnostics.transaction_api || {};
   const pendingUs = number(realizedApi.us_pnl_unavailable_events);
-  const usSellTrades = number(realizedApi.us_sell_trades);
-  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US SELL 체결 ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 그래프 ${number(diagnostics.yield_history_points)}p`);
+  const usTrades = number(transactionApi.us_daily_trades);
+  const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
+  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 그래프 ${number(diagnostics.yield_history_points)}p`);
 }
 
 async function loadEnvelope() {

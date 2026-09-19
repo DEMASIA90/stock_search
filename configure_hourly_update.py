@@ -42,7 +42,15 @@ def main() -> int:
             _run(["gh", "secret", "set", name], secret=value)
         _run(["gh", "variable", "set", "ASSET_WEB_ENV", "--body", environment])
         print("Hourly update secrets and the account environment were saved to GitHub.")
-        print("The next scheduled run starts at minute 17 of each hour.")
+        try:
+            _run(["gh", "workflow", "enable", "update-and-deploy.yml"])
+            _run(["gh", "workflow", "run", "update-and-deploy.yml"])
+            print("A verification run was started immediately in GitHub Actions.")
+            print("Run check_hourly_update.bat to inspect its status and failed-step log.")
+        except subprocess.CalledProcessError:
+            print("[WARN] Secrets were saved, but the workflow could not be started automatically.")
+            print("Push the latest workflow file, then use Actions > Run workflow once.")
+        print("After verification, scheduled runs start at minute 17 of each hour.")
         return 0
     except subprocess.CalledProcessError as exc:
         print(f"[ERROR] GitHub setup failed with exit code {exc.returncode}.", file=sys.stderr)

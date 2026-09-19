@@ -15,14 +15,15 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       NHPLUG_APP_KEY: ${{ secrets.NHPLUG_APP_KEY }}
       NHPLUG_APP_SECRET: ${{ secrets.NHPLUG_APP_SECRET }}
       ASSET_WEB_ACCOUNT: ${{ secrets.ASSET_WEB_ACCOUNT }}
       PORTFOLIO_PIN: ${{ secrets.PORTFOLIO_PIN }}
-      ASSET_WEB_ENV: ${{ vars.ASSET_WEB_ENV }}
+      ASSET_WEB_ENV: ${{ vars.ASSET_WEB_ENV || 'live' }}
       USD_KRW_RATE: ${{ vars.USD_KRW_RATE }}
+      NHPLUG_RATE_LIMIT: "3"
       FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
       FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID }}
       FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
@@ -32,6 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,14 +41,41 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      - name: Validate hourly-update settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in NHPLUG_APP_KEY NHPLUG_APP_SECRET ASSET_WEB_ACCOUNT PORTFOLIO_PIN; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is missing. Run configure_hourly_update.bat or add it in Settings > Secrets and variables > Actions."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          if ! [[ "$PORTFOLIO_PIN" =~ ^[0-9]{4}$ ]]; then
+            echo "::error::PORTFOLIO_PIN must be exactly four digits."
+            exit 1
+          fi
+          if [ "$ASSET_WEB_ENV" != "live" ] && [ "$ASSET_WEB_ENV" != "mock" ]; then
+            echo "::error::ASSET_WEB_ENV must be live or mock."
+            exit 1
+          fi
+          echo "Environment: $ASSET_WEB_ENV"
+          echo "Account secret present: yes"
+
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Update market watch
-        run: python update_watchlist.py --non-interactive
-
+      # Portfolio history is the critical hourly job. Run it before the watchlist so
+      # a transient scanner error cannot prevent account/Yield Monitor accumulation.
       - name: Update encrypted portfolio history
         run: python update_portfolio.py --non-interactive
+
+      - name: Update market watch
+        id: watchlist
+        continue-on-error: true
+        run: python update_watchlist.py --non-interactive
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
@@ -57,13 +86,22 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- docs/data/watchlist.json docs/data/portfolio.enc.json
+          git add -- docs/data/portfolio.enc.json
+          if [ -f docs/data/watchlist.json ]; then git add -- docs/data/watchlist.json; fi
           if git diff --cached --quiet; then
             echo "No generated data changes to commit."
             exit 0
           fi
           git commit -m "Hourly market and yield update"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          if ! git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            echo "::error::Git push failed. Check Settings > Actions > General > Workflow permissions (Read and write) and branch protection rules."
+            exit 1
+          fi
+
+      - name: Report watchlist warning
+        if: ${{ steps.watchlist.outcome == 'failure' }}
+        shell: bash
+        run: echo "::warning::Market Watch refresh failed, but the Yield Monitor portfolio history was updated and committed."
 
       - name: Set up Node.js for Firebase CLI
         if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
@@ -83,10 +121,15 @@ jobs:
           CREDENTIALS_FILE="${RUNNER_TEMP}/firebase-service-account.json"
           CONFIG_FILE="${RUNNER_TEMP}/firebase.json"
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CREDENTIALS_FILE"
-          export GOOGLE_APPLICATION_CREDENTIALS="$CREDENTIALS_FILE"
           python - <<'PY'
           import json, os
           from pathlib import Path
+
+          credentials = Path(os.environ["RUNNER_TEMP"], "firebase-service-account.json")
+          try:
+              json.loads(credentials.read_text(encoding="utf-8"))
+          except Exception as exc:
+              raise SystemExit(f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}")
 
           source = json.loads(Path("firebase.json").read_text(encoding="utf-8"))
           hosting = dict(source.get("hosting") or {})
@@ -95,4 +138,26 @@ jobs:
               json.dumps({"hosting": hosting}, ensure_ascii=False, indent=2), encoding="utf-8"
           )
           PY
-          firebase deploy --only hosting --project "$FIREBASE_PROJECT_ID" --config "$CONFIG_FILE" --non-interactive
+          export GOOGLE_APPLICATION_CREDENTIALS="$CREDENTIALS_FILE"
+          for attempt in 1 2 3; do
+            if firebase deploy --only hosting --project "$FIREBASE_PROJECT_ID" --config "$CONFIG_FILE" --non-interactive; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::Firebase deploy attempt $attempt failed; retrying..."
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::Firebase Hosting deploy failed after 3 attempts. The encrypted portfolio data was already committed to GitHub."
+          exit 1
+
+      - name: Hourly-update summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### Hourly update"
+            echo "- Portfolio step: ${{ job.status }}"
+            echo "- Market Watch step: ${{ steps.watchlist.outcome }}"
+            echo "- Scheduled minute: 17"
+          } >> "$GITHUB_STEP_SUMMARY"

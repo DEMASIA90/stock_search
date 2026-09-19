@@ -15,9 +15,11 @@ from src.portfolio import (
     mask_account,
     merge_persistent_events,
     monthly_realized_performance,
+    normalize_overseas_daily_transactions,
     normalize_total_transactions,
     portfolio_totals,
     realized_summary,
+    sanitize_legacy_realized_events,
     update_snapshot_history,
     update_yield_history,
 )
@@ -132,7 +134,7 @@ class PortfolioTests(unittest.TestCase):
         monthly = monthly_realized_performance(events, history)
         self.assertAlmostEqual(monthly[0]["return_pct"], 75 / 5000 * 100)
 
-    def test_us_period_pnl_is_primary_when_detail_is_empty(self) -> None:
+    def test_us_period_summary_date_drives_detail_lookup(self) -> None:
         class FakeClient(NhReadOnlyClient):
             @property
             def environment(self) -> str:
@@ -142,14 +144,23 @@ class PortfolioTests(unittest.TestCase):
                 if path.endswith("/tradingPnl"):
                     return {"Output_1": []}
                 if path.endswith("/periodPnl"):
+                    # Official schema: Output_1 has no iem_cd / iem_nm.
                     return {"Output_1": [{
-                        "orr_dt": "20260918", "iem_cd": "AAPL", "iem_nm": "Apple",
-                        "sll_qty": "2", "byn_uit_pr": "200", "sll_uit_pr": "210",
+                        "orr_dt": "20260918", "sll_qty": "2",
                         "fc_rzt_pls": "28000", "fc_rzt_pft_rt": "5.0",
                     }]}
                 if path.endswith("/periodPnlDetail"):
-                    return {"Output_0": []}
+                    self.assertEqual(payload["orr_dt"], "20260918")
+                    return {"Output_0": [{
+                        "iem_cd": "AAPL", "iem_nm": "Apple", "sll_qty": "2",
+                        "byn_uit_pr": "200", "sll_uit_pr": "210",
+                        "fc_rzt_pls": "28000", "fc_rzt_pft_rt": "5.0",
+                    }]}
                 raise AssertionError(path)
+
+            def assertEqual(self, left, right):
+                if left != right:
+                    raise AssertionError((left, right))
 
         events, warnings, diagnostics = FakeClient().realized_pnl_history(
             "123", datetime(2026, 9, 18), datetime(2026, 9, 18)
@@ -158,9 +169,183 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(len(us), 1)
         self.assertEqual(us[0]["code"], "AAPL")
         self.assertEqual(us[0]["realized_pnl_krw"], 28000)
+        self.assertEqual(us[0]["currency"], "USD")
         self.assertEqual(diagnostics["us_period_rows"], 1)
+        self.assertEqual(diagnostics["us_period_sale_days"], 1)
+        self.assertEqual(diagnostics["us_detail_calls"], 1)
         self.assertEqual(diagnostics["us_events"], 1)
         self.assertFalse(any("미국주식 실현손익 조회 실패" in warning for warning in warnings))
+
+    def test_us_detail_missing_pnl_never_becomes_fake_zero(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnl"):
+                    return {"Output_1": [{"orr_dt": "20260918"}]}
+                if path.endswith("/periodPnlDetail"):
+                    return {"Output_0": [{
+                        "iem_cd": "CURE", "iem_nm": "Direxion Healthcare Bull 3X",
+                        "sll_qty": "16", "sll_uit_pr": "126.68",
+                        # fc_rzt_pls intentionally missing
+                    }]}
+                raise AssertionError(path)
+
+        trades = [{
+            "id": "USDAILY:1", "date": "20260918", "market": "US", "code": "CURE",
+            "name": "Direxion Healthcare Bull 3X", "side": "SELL", "qty": 16,
+            "price": 126.68, "currency": "USD",
+        }]
+        events, _, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 18), trades=trades
+        )
+        us = [item for item in events if item["market"] == "US"]
+        self.assertEqual(len(us), 1)
+        self.assertIsNone(us[0]["realized_pnl_krw"])
+        self.assertFalse(us[0]["pnl_available"])
+        self.assertEqual(diagnostics["us_pnl_unavailable_events"], 1)
+
+    def test_us_sell_trade_drives_detail_when_period_is_empty(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnl"):
+                    return {"Output_1": [], "rsp_msg": "정상처리"}
+                if path.endswith("/periodPnlDetail"):
+                    self.assertEqual(payload["orr_dt"], "20260918")
+                    return {"Output_0": [{
+                        "iem_cd": "AAPL", "iem_nm": "Apple", "sll_qty": "2",
+                        "sll_uit_pr": "210", "byn_uit_pr": "200",
+                        "fc_rzt_pls": "28000", "fc_rzt_pft_rt": "5.0",
+                    }]}
+                raise AssertionError(path)
+
+            def assertEqual(self, left, right):
+                if left != right:
+                    raise AssertionError((left, right))
+
+        trades = [{
+            "id": "COMMON:1", "date": "20260918", "market": "US", "code": "AAPL",
+            "name": "Apple", "side": "SELL", "qty": 2, "price": 210, "currency": "USD",
+        }]
+        events, warnings, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 18), trades=trades
+        )
+        us = [item for item in events if item["market"] == "US"]
+        self.assertEqual(len(us), 1)
+        self.assertEqual(us[0]["code"], "AAPL")
+        self.assertEqual(us[0]["realized_pnl_krw"], 28000)
+        self.assertTrue(us[0]["pnl_available"])
+        self.assertEqual(diagnostics["us_period_rows"], 0)
+        self.assertEqual(diagnostics["us_detail_calls"], 1)
+        self.assertEqual(diagnostics["us_pnl_unavailable_events"], 0)
+        self.assertTrue(any("상세조회로 보완" in warning for warning in warnings))
+
+    def test_us_sell_trade_is_preserved_when_both_pnl_apis_are_empty(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnlDetail"):
+                    return {"Output_0": []}
+                raise AssertionError(path)
+
+        trades = [{
+            "id": "COMMON:1", "date": "20260918", "market": "US", "code": "NVDA",
+            "name": "NVIDIA", "side": "SELL", "qty": 3, "price": 175.5, "currency": "USD",
+        }]
+        events, warnings, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 18), trades=trades
+        )
+        us = [item for item in events if item["market"] == "US"]
+        self.assertEqual(len(us), 1)
+        self.assertEqual(us[0]["code"], "NVDA")
+        self.assertEqual(us[0]["qty"], 3)
+        self.assertEqual(us[0]["sell_price"], 175.5)
+        self.assertIsNone(us[0]["realized_pnl_krw"])
+        self.assertFalse(us[0]["pnl_available"])
+        self.assertEqual(diagnostics["us_transaction_fallback_events"], 1)
+        self.assertEqual(diagnostics["us_pnl_unavailable_events"], 1)
+        self.assertTrue(any("손익" in warning and "—" in warning for warning in warnings))
+
+        summary = realized_summary(us)
+        self.assertEqual(summary["trade_count"], 1)
+        self.assertEqual(summary["pnl_trade_count"], 0)
+        self.assertEqual(summary["cumulative_realized_krw"], 0)
+        self.assertEqual(monthly_realized_performance(us, []), [])
+
+    def test_overseas_daily_transaction_and_pagination_are_preserved(self) -> None:
+        rows = [{
+            "trd_dt": "20260918", "trd_sno": "11", "act_trd_tp_nm": "매도",
+            "iem_krl_nm": "애플", "iem_cd": "AAPL", "trd_qty": "2",
+            "trd_uit_pr": "210.5", "fc_trd_amt": "421", "krw_trd_amt": "590000",
+        }]
+        normalized = normalize_overseas_daily_transactions(rows)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["side"], "SELL")
+        self.assertEqual(normalized[0]["market"], "US")
+        self.assertEqual(normalized[0]["price"], 210.5)
+        self.assertEqual(normalized[0]["amount_krw"], 590000)
+
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api_pages(self, path: str, payload=None, *, max_pages=50):
+                if path.endswith("/totalTransaction"):
+                    return [
+                        {"Output_0": [{
+                            "ral_trd_dt": "20260918", "trd_sno": "1", "iem_llf_cd": "01",
+                            "iem_cd": "005930", "iem_nm": "삼성전자", "act_trd_tp_nm": "매수",
+                            "trd_qty": "1", "trd_uit_pr": "70000", "trd_amt": "70000", "cur_cd": "KRW",
+                        }]},
+                        {"Output_0": [{
+                            "ral_trd_dt": "20260917", "trd_sno": "2", "iem_llf_cd": "01",
+                            "iem_cd": "000660", "iem_nm": "SK하이닉스", "act_trd_tp_nm": "매도",
+                            "trd_qty": "1", "trd_uit_pr": "200000", "trd_amt": "200000", "cur_cd": "KRW",
+                        }]},
+                    ]
+                if path.endswith("/dailyTransaction"):
+                    if payload["act_trd_cfc_cd"] == "05":
+                        return [{"Output_0": [{
+                            "trd_dt": "20260918", "trd_sno": "10",
+                            "iem_krl_nm": "엔비디아", "iem_cd": "NVDA",
+                            "trd_qty": "1", "trd_uit_pr": "175",
+                        }]}]
+                    if payload["act_trd_cfc_cd"] == "06":
+                        return [{"Output_0": [{
+                            "trd_dt": "20260918", "trd_sno": "11",
+                            "iem_krl_nm": "애플", "iem_cd": "AAPL",
+                            "trd_qty": "2", "trd_uit_pr": "210",
+                        }]}]
+                    raise AssertionError(payload)
+                raise AssertionError(path)
+
+        trades, warnings, diagnostics = FakeClient().transaction_history(
+            "123", datetime(2026, 9, 1), datetime(2026, 9, 18)
+        )
+        self.assertFalse(warnings)
+        self.assertEqual(diagnostics["common_pages"], 2)
+        self.assertEqual(diagnostics["us_daily_pages"], 2)
+        self.assertEqual(diagnostics["us_daily_trades"], 2)
+        self.assertEqual(diagnostics["us_daily_sell_trades"], 1)
+        self.assertEqual({item["code"] for item in trades}, {"005930", "000660", "NVDA", "AAPL"})
 
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")
@@ -172,6 +357,17 @@ class PortfolioTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for token in forbidden:
                 self.assertNotIn(token, text, f"{token} remains in {path}")
+
+    def test_legacy_us_transaction_fallback_zero_is_migrated_to_unknown(self) -> None:
+        rows = sanitize_legacy_realized_events([{
+            "id": "US:20260918:CURE", "date": "20260918", "market": "US",
+            "code": "CURE", "source": "transaction_fallback",
+            "realized_pnl_krw": 0, "return_pct": 0,
+        }])
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["realized_pnl_krw"])
+        self.assertIsNone(rows[0]["return_pct"])
+        self.assertFalse(rows[0]["pnl_available"])
 
     def test_windows_batch_files_are_ascii_crlf(self) -> None:
         root = Path(__file__).resolve().parent.parent

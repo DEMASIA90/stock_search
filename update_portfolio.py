@@ -29,6 +29,7 @@ from src.portfolio import (
     number,
     portfolio_totals,
     realized_summary,
+    sanitize_legacy_realized_events,
     update_snapshot_history,
     update_yield_history,
 )
@@ -201,7 +202,7 @@ def build_payload(
         holding_warnings.append(f"통합 자산현황 조회 실패: {exc}")
 
     print("[2/5] 최근 1개월 매수·매도 및 실현손익을 조회합니다...")
-    trades, trade_warnings = client.transaction_history(
+    trades, trade_warnings, trade_diagnostics = client.transaction_history(
         account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
     )
     recent_realized, realized_warnings, realized_diagnostics = client.realized_pnl_history(
@@ -223,8 +224,10 @@ def build_payload(
         old_ledger if isinstance(old_ledger, list) else [], trades
     )
     old_realized = previous.get("realized_events", [])
-    realized_events = merge_persistent_events(
-        old_realized if isinstance(old_realized, list) else [], recent_realized
+    realized_events = sanitize_legacy_realized_events(
+        merge_persistent_events(
+            old_realized if isinstance(old_realized, list) else [], recent_realized
+        )
     )
     old_flows = previous.get("cash_flows", [])
     cash_flows = merge_persistent_events(
@@ -293,6 +296,7 @@ def build_payload(
         "cumulative_realized_count": len(realized_events),
         "cumulative_realized_by_market": cumulative_market_counts,
         "transaction_ledger_count": len(transaction_ledger),
+        "transaction_api": trade_diagnostics,
         "cash_flow_count": len(cash_flows),
         "yield_history_points": len(yield_history),
         "asset_snapshot_points": sum(
@@ -307,7 +311,8 @@ def build_payload(
     print(
         "      진단: 최근30일 실현 국내 "
         f"{recent_market_counts['KR']}건 / 미국 {recent_market_counts['US']}건 | "
-        f"미국 SELL 체결 {realized_diagnostics.get('us_sell_trades', 0)}건 / "
+        f"미국 거래 {trade_diagnostics.get('us_daily_trades', 0)}건 / "
+        f"SELL {trade_diagnostics.get('us_daily_sell_trades', 0)}건 / "
         f"손익 미확인 {realized_diagnostics.get('us_pnl_unavailable_events', 0)}건 | "
         f"누적 국내 {cumulative_market_counts['KR']}건 / 미국 {cumulative_market_counts['US']}건 | "
         f"그래프 {len(yield_history)}포인트"

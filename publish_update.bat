@@ -36,11 +36,11 @@ git merge --ff-only "origin/%CURRENT_BRANCH%"
 if errorlevel 1 goto :sync_failed
 
 :run_update
-".venv\Scripts\python.exe" update_watchlist.py
-if errorlevel 1 goto :update_failed
-
 ".venv\Scripts\python.exe" update_portfolio.py %*
 if errorlevel 1 goto :update_failed
+
+".venv\Scripts\python.exe" update_watchlist.py
+if errorlevel 1 echo [WARN] Market Watch update failed. Yield Monitor data will still be uploaded.
 
 git add -- docs/data/portfolio.enc.json docs/data/watchlist.json
 if errorlevel 1 goto :git_failed

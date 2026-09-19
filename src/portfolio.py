@@ -33,7 +33,7 @@ def trade_side(row: dict[str, Any]) -> str:
     text = " ".join(
         str(row.get(key, "") or "")
         for key in (
-            "act_trd_tp_nm", "sps_cd_krl_anm", "sby_dit_cd_nm",
+            "act_trd_tp_nm", "sps_cd_krl_anm", "sps_cd_nm", "sby_dit_cd_nm",
             "sby_dit_nm", "oss_sby_dit_cd",
         )
     ).lower()
@@ -83,6 +83,53 @@ def normalize_total_transactions(rows: Iterable[dict[str, Any]]) -> list[dict[st
             "currency": currency,
             "fee": abs(number(row.get("trd_orn_fee") or row.get("fc_fee"))),
             "tax": abs(number(row.get("tax_sum") or row.get("trd_tax"))),
+        })
+    return merge_trades(out)
+
+
+def normalize_overseas_daily_transactions(
+    rows: Iterable[dict[str, Any]], forced_side: str | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize official overseas dailyTransaction rows into the common ledger.
+
+    ``forced_side`` is used when the endpoint itself was queried with an explicit
+    buy/sell filter (05/06).  This keeps a valid execution even when a response
+    omits the Korean transaction-type label used by ``trade_side``.
+    """
+    out: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        side = (forced_side or trade_side(row)).upper()
+        if side not in {"BUY", "SELL"}:
+            side = ""
+        qty = abs(number(row.get("trd_qty")))
+        trade_date = "".join(ch for ch in str(row.get("ral_trd_dt") or row.get("trd_dt") or "") if ch.isdigit())[:8]
+        code = str(row.get("iem_cd") or row.get("oss_iem_cd") or "").strip().upper()
+        if not side or qty <= 0 or len(trade_date) != 8 or not code:
+            continue
+        price = abs(number(row.get("trd_uit_pr")))
+        amount = abs(number(row.get("fc_trd_amt") or row.get("fc_amt"))) or qty * price
+        raw_krw = row.get("krw_trd_amt") or row.get("krw_amt")
+        amount_krw = abs(number(raw_krw)) if raw_krw not in (None, "") else None
+        fx_rate = number(row.get("aly_xcg_rt"))
+        if amount_krw is None and fx_rate > 0:
+            amount_krw = amount * fx_rate
+        serial = str(row.get("trd_sno") or index)
+        out.append({
+            "id": f"USDAILY:{trade_date}:{serial}:{code}:{side}",
+            "date": trade_date,
+            "time": str(row.get("rgs_tm") or ""),
+            "market": "US",
+            "code": code,
+            "name": str(row.get("iem_krl_nm") or row.get("oss_iem_nm") or code).strip(),
+            "side": side,
+            "qty": qty,
+            "price": price,
+            "amount": amount,
+            "amount_krw": amount_krw,
+            "currency": "USD",
+            "fee": abs(number(row.get("ose_fee"))) + abs(number(row.get("dmt_fee"))),
+            "tax": abs(number(row.get("fc_tax_sum") or row.get("tax_sum"))),
+            "source": "gbstock_daily_transaction",
         })
     return merge_trades(out)
 
@@ -205,6 +252,27 @@ def merge_persistent_events(
         key=lambda item: (str(item.get("date", "")), str(item.get("time", "")), str(item.get("id", ""))),
     )
     return ordered[-max(1, limit):]
+
+
+def sanitize_legacy_realized_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Repair legacy U.S. fallback rows that fabricated a zero realized P/L.
+
+    A ``transaction_fallback`` row proves that a SELL execution existed, but it
+    never proves realized P/L. Older builds stored zero in that case. Convert
+    those rows back to an explicit unknown value so the UI shows ``—`` and the
+    value is excluded from cumulative realized-P/L statistics.
+    """
+    repaired: list[dict[str, Any]] = []
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        if str(row.get("market") or "").upper() == "US" and row.get("source") == "transaction_fallback":
+            row["realized_pnl_krw"] = None
+            row["return_pct"] = None
+            row["pnl_available"] = False
+        repaired.append(row)
+    return repaired
 
 
 def realized_summary(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
