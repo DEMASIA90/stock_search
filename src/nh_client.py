@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 from src.config import AUTH_BASE, INSTRUMENTS_BASE, ConnectionProfile
 from src.models import Account, Holding
@@ -52,6 +52,130 @@ def _sellable_qty(result: dict[str, Any]) -> float | None:
 def _date_digits(value: Any) -> str:
     digits = "".join(character for character in str(value or "") if character.isdigit())
     return digits[:8]
+
+
+def _first_value(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
+
+
+def _first_number(row: dict[str, Any], *keys: str) -> float:
+    value = _first_value(row, *keys)
+    return number(value)
+
+
+def _us_realized_event(row: dict[str, Any], fallback_day: str = "") -> dict[str, Any] | None:
+    """Normalize one overseas realized-P/L row from periodPnl or periodPnlDetail."""
+    day = _date_digits(_first_value(row, "orr_dt", "sll_dt", "trd_dt", "trad_dt")) or fallback_day
+    code = str(_first_value(row, "iem_cd", "pdno", "ovrs_pdno", "item_code") or "").strip().upper()
+    if len(day) != 8 or not code:
+        return None
+
+    qty = abs(_first_number(row, "sll_qty", "sell_qty", "tot_sll_qty", "qty"))
+    pnl = _first_number(
+        row,
+        "fc_rzt_pls", "rzt_pls", "frcr_rlzt_pfls_amt", "ovrs_rlzt_pfls_amt",
+        "rlzt_pfls", "pls_amt",
+    )
+    sell_price = abs(_first_number(row, "sll_uit_pr", "sell_uit_pr", "sll_pr", "sell_price"))
+    buy_price = abs(_first_number(row, "byn_uit_pr", "buy_uit_pr", "byn_pr", "buy_price"))
+
+    # periodPnl is itself a realized-P/L endpoint, so a valid dated security row is an
+    # event even when the realized amount is exactly zero. Detail endpoints can also
+    # return zero-profit sales, hence code/date are the authoritative presence signal.
+    return {
+        "id": f"US:{day}:{code}",
+        "date": day,
+        "market": "US",
+        "code": code,
+        "name": str(_first_value(row, "iem_nm", "prdt_name", "ovrs_item_name", "item_name") or code).strip(),
+        "qty": qty,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "realized_pnl_krw": pnl,
+        "return_pct": _first_number(row, "fc_rzt_pft_rt", "rzt_pft_rt", "pft_rt", "return_pct"),
+        "fee_krw": abs(_first_number(row, "fc_sdr_xps", "sdr_xps", "fee_sum", "fee")),
+        "tax_krw": abs(_first_number(row, "tax_sum", "tax")),
+        "currency": "KRW",
+        "pnl_available": True,
+        "source": "period_pnl",
+    }
+
+
+def _merge_realized_event(primary: dict[str, Any], supplement: dict[str, Any]) -> dict[str, Any]:
+    """Keep periodPnl as source of truth while filling blanks from detail rows."""
+    merged = dict(primary)
+    for key in ("name", "qty", "buy_price", "sell_price", "return_pct", "fee_krw", "tax_krw"):
+        current = merged.get(key)
+        if current in (None, "", 0, 0.0) and supplement.get(key) not in (None, "", 0, 0.0):
+            merged[key] = supplement[key]
+    # Only replace P/L when the primary row did not supply it. Never turn an
+    # unavailable transaction-ledger fallback into a fabricated zero-profit sale.
+    if merged.get("realized_pnl_krw") in (None, "") and supplement.get("realized_pnl_krw") not in (None, ""):
+        merged["realized_pnl_krw"] = supplement.get("realized_pnl_krw")
+        merged["pnl_available"] = supplement.get("pnl_available", True)
+    if merged.get("pnl_available") is not False and merged.get("realized_pnl_krw") not in (None, ""):
+        merged["pnl_available"] = True
+    if supplement.get("source") == "period_pnl_detail" and merged.get("source") != "period_pnl":
+        merged["source"] = "period_pnl_detail"
+    return merged
+
+
+
+
+def _us_sell_fallback_events(trades: Iterable[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """Build minimum US realized-sale records from the transaction ledger.
+
+    These rows intentionally do not invent realized P/L. They are used only when
+    periodPnl/periodPnlDetail fail to return a sale that is already visible in the
+    account transaction history. Multiple fills of the same symbol on the same day
+    are aggregated into one row to match the period-P/L table granularity.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for trade in trades or []:
+        if not isinstance(trade, dict):
+            continue
+        if str(trade.get("market") or "").upper() != "US" or str(trade.get("side") or "").upper() != "SELL":
+            continue
+        day = _date_digits(trade.get("date"))
+        code = str(trade.get("code") or "").strip().upper()
+        qty = abs(number(trade.get("qty")))
+        if len(day) != 8 or not code or qty <= 0:
+            continue
+        event_id = f"US:{day}:{code}"
+        price = abs(number(trade.get("price")))
+        existing = grouped.get(event_id)
+        if existing is None:
+            grouped[event_id] = {
+                "id": event_id,
+                "date": day,
+                "market": "US",
+                "code": code,
+                "name": str(trade.get("name") or code).strip(),
+                "qty": qty,
+                "buy_price": None,
+                "sell_price": price if price > 0 else None,
+                "realized_pnl_krw": None,
+                "return_pct": None,
+                "fee_krw": None,
+                "tax_krw": None,
+                "currency": str(trade.get("currency") or "USD").upper(),
+                "pnl_available": False,
+                "source": "transaction_fallback",
+            }
+            continue
+        old_qty = number(existing.get("qty"))
+        new_qty = old_qty + qty
+        old_price = number(existing.get("sell_price"))
+        if price > 0 and new_qty > 0:
+            existing["sell_price"] = ((old_price * old_qty) + (price * qty)) / new_qty
+        existing["qty"] = new_qty
+        if not existing.get("name") and trade.get("name"):
+            existing["name"] = str(trade.get("name"))
+    return grouped
 
 
 def _cash_side(row: dict[str, Any]) -> str:
@@ -300,9 +424,32 @@ class NhReadOnlyClient:
 
     def realized_pnl_history(
         self, account_no: str, start_date: datetime, end_date: datetime,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+        trades: Iterable[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
         events: dict[str, dict[str, Any]] = {}
         warnings: list[str] = []
+        diagnostics: dict[str, Any] = {
+            "kr_events": 0,
+            "us_period_rows": 0,
+            "us_period_events": 0,
+            "us_detail_calls": 0,
+            "us_detail_rows": 0,
+            "us_sell_trades": 0,
+            "us_sell_days": 0,
+            "us_transaction_fallback_events": 0,
+            "us_pnl_unavailable_events": 0,
+            "us_period_rsp_cd": "",
+            "us_period_rsp_msg": "",
+            "us_events": 0,
+        }
+        transaction_fallback = _us_sell_fallback_events(trades)
+        diagnostics["us_sell_trades"] = sum(
+            1 for item in (trades or [])
+            if isinstance(item, dict)
+            and str(item.get("market") or "").upper() == "US"
+            and str(item.get("side") or "").upper() == "SELL"
+        )
+        diagnostics["us_sell_days"] = len({item["date"] for item in transaction_fallback.values()})
         cursor = start_date
         while cursor.date() <= end_date.date():
             if cursor.weekday() < 5:
@@ -338,6 +485,8 @@ class NhReadOnlyClient:
                     warnings.append(f"{day} 국내 실현손익 조회 실패: {exc}")
             cursor += timedelta(days=1)
 
+        diagnostics["kr_events"] = sum(1 for item in events.values() if item.get("market") == "KR")
+
         try:
             period = self._api("/gbstock/inquiry/v1/periodPnl", {
                 "act_no": account_no,
@@ -348,44 +497,111 @@ class NhReadOnlyClient:
                 "trd_cur_cd": "KRW",
                 "fc_sec_trd_nat_cd": "200",
             })
-            sale_dates = {
-                _date_digits(row.get("orr_dt"))
-                for row in _list(period.get("Output_1"))
-                if number(row.get("sll_qty")) > 0 and _date_digits(row.get("orr_dt"))
-            }
+            period_rows = _list(period.get("Output_1"))
+            diagnostics["us_period_rows"] = len(period_rows)
+            diagnostics["us_period_rsp_cd"] = str(period.get("rsp_cd") or "")
+            diagnostics["us_period_rsp_msg"] = str(period.get("rsp_msg") or "")
+
+            # Primary source: periodPnl.Output_1. The transaction ledger supplies an
+            # independent set of US SELL dates so periodPnlDetail can still be tried
+            # when periodPnl unexpectedly returns an empty first block.
+            sale_dates: set[str] = {item["date"] for item in transaction_fallback.values()}
+            for row in period_rows:
+                event = _us_realized_event(row)
+                if not event:
+                    continue
+                sale_dates.add(str(event["date"]))
+                events[event["id"]] = event
+            diagnostics["us_period_events"] = sum(
+                1 for item in events.values() if item.get("market") == "US"
+            )
+
+            if not period_rows and transaction_fallback:
+                message = diagnostics["us_period_rsp_msg"]
+                suffix = f" (API 메시지: {message})" if message else ""
+                warnings.append(
+                    "미국 기간손익 periodPnl은 0건이지만 최근 거래내역에서 "
+                    f"미국 매도 {len(transaction_fallback)}종목을 확인해 상세조회로 보완합니다.{suffix}"
+                )
+            elif not period_rows and not transaction_fallback:
+                message = diagnostics["us_period_rsp_msg"]
+                suffix = f" (API 메시지: {message})" if message else ""
+                warnings.append(
+                    "미국 기간손익 periodPnl이 0건이고 최근 종합거래내역에서도 미국 SELL을 "
+                    f"찾지 못했습니다. 실제 미국 매도가 있었다면 거래내역 조회조건을 확인하세요.{suffix}"
+                )
+            elif diagnostics["us_period_events"] == 0:
+                warnings.append(
+                    f"미국 기간손익 Output_1 {len(period_rows)}건을 받았지만 종목·매도일을 "
+                    "실현 이벤트로 해석하지 못했습니다. 응답 필드 형식을 확인하세요."
+                )
+
             for day in sorted(sale_dates):
-                detail = self._api("/gbstock/inquiry/v1/periodPnlDetail", {
-                    "act_no": account_no,
-                    "iqr_dit": "2",
-                    "iem_cd": "",
-                    "orr_dt": day,
-                    "fc_sec_trd_nat_cd": "200",
-                    "trd_cur_cd": "KRW",
-                })
-                for row in _list(detail.get("Output_0")):
-                    code = str(row.get("iem_cd") or "").strip().upper()
-                    sell_qty = number(row.get("sll_qty"))
-                    if not code or sell_qty <= 0:
-                        continue
-                    event_id = f"US:{day}:{code}"
-                    events[event_id] = {
-                        "id": event_id,
-                        "date": day,
-                        "market": "US",
-                        "code": code,
-                        "name": str(row.get("iem_nm") or code).strip(),
-                        "qty": sell_qty,
-                        "buy_price": number(row.get("byn_uit_pr")),
-                        "sell_price": number(row.get("sll_uit_pr")),
-                        "realized_pnl_krw": number(row.get("fc_rzt_pls")),
-                        "return_pct": number(row.get("fc_rzt_pft_rt")),
-                        "fee_krw": number(row.get("fc_sdr_xps")),
-                        "tax_krw": 0.0,
-                        "currency": "KRW",
-                    }
+                try:
+                    diagnostics["us_detail_calls"] += 1
+                    detail = self._api("/gbstock/inquiry/v1/periodPnlDetail", {
+                        "act_no": account_no,
+                        "iqr_dit": "2",
+                        "iem_cd": "",
+                        "orr_dt": day,
+                        "fc_sec_trd_nat_cd": "200",
+                        "trd_cur_cd": "KRW",
+                    })
+                    detail_rows = _list(detail.get("Output_0"))
+                    diagnostics["us_detail_rows"] += len(detail_rows)
+                    for row in detail_rows:
+                        event = _us_realized_event(row, day)
+                        if not event:
+                            continue
+                        event["source"] = "period_pnl_detail"
+                        event["pnl_available"] = True
+                        if event["id"] in events:
+                            events[event["id"]] = _merge_realized_event(events[event["id"]], event)
+                        else:
+                            events[event["id"]] = event
+                except Exception as exc:
+                    # Detail lookup is non-fatal because either periodPnl or the transaction
+                    # ledger can still preserve the fact that a US sale occurred.
+                    warnings.append(f"{day} 미국 실현손익 상세조회 실패(확인된 매도내역은 유지): {exc}")
+
+            # Final safety net: every US SELL visible in transaction history must remain
+            # visible in the portfolio even when both P/L endpoints return no row.
+            for event_id, fallback_event in transaction_fallback.items():
+                if event_id in events:
+                    events[event_id] = _merge_realized_event(events[event_id], fallback_event)
+                else:
+                    events[event_id] = fallback_event
+                    diagnostics["us_transaction_fallback_events"] += 1
+            diagnostics["us_pnl_unavailable_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("pnl_available") is False
+            )
+            if diagnostics["us_pnl_unavailable_events"]:
+                warnings.append(
+                    f"미국 매도 {diagnostics['us_pnl_unavailable_events']}종목은 체결내역은 확인했지만 "
+                    "기간손익/상세손익이 없어 종목·수량·매도가는 표시하고 실현손익은 '—'로 표시합니다."
+                )
         except Exception as exc:
             warnings.append(f"미국주식 실현손익 조회 실패: {exc}")
-        return sorted(events.values(), key=lambda item: (item["date"], item["market"], item["code"])), warnings
+            for event_id, fallback_event in transaction_fallback.items():
+                if event_id not in events:
+                    events[event_id] = fallback_event
+                    diagnostics["us_transaction_fallback_events"] += 1
+            diagnostics["us_pnl_unavailable_events"] = sum(
+                1 for item in events.values()
+                if item.get("market") == "US" and item.get("pnl_available") is False
+            )
+            if diagnostics["us_pnl_unavailable_events"]:
+                warnings.append(
+                    f"미국 매도 {diagnostics['us_pnl_unavailable_events']}종목은 거래내역으로 보존했지만 "
+                    "실현손익 API 조회에 실패해 손익은 '—'로 표시합니다."
+                )
+        diagnostics["us_events"] = sum(1 for item in events.values() if item.get("market") == "US")
+        return (
+            sorted(events.values(), key=lambda item: (item["date"], item["market"], item["code"])),
+            warnings,
+            diagnostics,
+        )
 
     def market_bars(self, market: str, code: str, count: int = 260) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Fetch read-only live quote metadata and ascending daily OHLC bars."""

@@ -1,77 +1,57 @@
 name: Market Watch & Yield Monitor · Update and Deploy
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "firebase.json"
-      - ".firebaserc"
-      - ".github/workflows/update-and-deploy.yml"
+  workflow_dispatch:
   schedule:
     - cron: "17 * * * *"
-  workflow_dispatch:
-    inputs:
-      refresh_data:
-        description: "Refresh watchlist and private account data before deploy"
-        required: true
-        type: boolean
-        default: true
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
-  group: personal-asset-deploy
-  cancel-in-progress: true
-
-env:
-  FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
-  FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}
-  FIREBASE_LIVE: https://${{ vars.FIREBASE_SITE_ID || vars.FIREBASE_PROJECT_ID }}.web.app
+  group: market-watch-yield-monitor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Validate and package static site
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      NHPLUG_APP_KEY: ${{ secrets.NHPLUG_APP_KEY }}
+      NHPLUG_APP_SECRET: ${{ secrets.NHPLUG_APP_SECRET }}
+      ASSET_WEB_ACCOUNT: ${{ secrets.ASSET_WEB_ACCOUNT }}
+      PORTFOLIO_PIN: ${{ secrets.PORTFOLIO_PIN }}
+      ASSET_WEB_ENV: ${{ vars.ASSET_WEB_ENV }}
+      USD_KRW_RATE: ${{ vars.USD_KRW_RATE }}
+      FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+      FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID }}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Check out latest repository history
+        uses: actions/checkout@v4
         with:
-          ref: main
+          fetch-depth: 0
 
-      - name: Set up Python for hourly refresh
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_data)
-        uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
 
-      - name: Install read-only market and account dependencies
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_data)
+      - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Refresh watchlist and encrypted Yield Monitor
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_data)
-        env:
-          NHPLUG_APP_KEY: ${{ secrets.NHPLUG_APP_KEY }}
-          NHPLUG_APP_SECRET: ${{ secrets.NHPLUG_APP_SECRET }}
-          ASSET_WEB_ENV: ${{ vars.ASSET_WEB_ENV || 'live' }}
-          ASSET_WEB_ACCOUNT: ${{ secrets.ASSET_WEB_ACCOUNT }}
-          PORTFOLIO_PIN: ${{ secrets.PORTFOLIO_PIN }}
-          PORTFOLIO_OLD_PIN: ${{ secrets.PORTFOLIO_OLD_PIN }}
-          USD_KRW_RATE: ${{ vars.USD_KRW_RATE || '1400' }}
-        run: |
-          set -euo pipefail
-          python update_watchlist.py --non-interactive
-          python update_portfolio.py --non-interactive
+      - name: Update market watch
+        run: python update_watchlist.py --non-interactive
 
-      - name: Keep the hourly encrypted history in Git
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_data)
+      - name: Update encrypted portfolio history
+        run: python update_portfolio.py --non-interactive
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Commit cumulative data
         shell: bash
         run: |
           set -euo pipefail
@@ -79,141 +59,40 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- docs/data/watchlist.json docs/data/portfolio.enc.json
           if git diff --cached --quiet; then
-            echo "No market or portfolio changes to commit."
-          else
-            git commit -m "Hourly market and yield update"
-            git push origin HEAD:main
+            echo "No generated data changes to commit."
+            exit 0
           fi
+          git commit -m "Hourly market and yield update"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Validate asset dashboard
+      - name: Set up Node.js for Firebase CLI
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Firebase CLI
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
+        run: npm install -g firebase-tools
+
+      - name: Deploy docs to configured Firebase Hosting site
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT_JSON != '' && env.FIREBASE_PROJECT_ID != '' && env.FIREBASE_SITE_ID != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -s docs/index.html
-          test -s docs/assets/app.mjs
-          test -s docs/assets/crypto.mjs
-          test -s docs/assets/styles.css
-          test -s docs/data/portfolio.enc.json
-          test -s docs/data/watchlist.json
-          node --check docs/assets/app.mjs
-          node --check docs/assets/crypto.mjs
-          node -e "JSON.parse(require('fs').readFileSync('docs/data/portfolio.enc.json','utf8'))"
-          node -e "JSON.parse(require('fs').readFileSync('docs/data/watchlist.json','utf8'))"
-
-      - name: Validate Firebase repository settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -n "${FIREBASE_PROJECT_ID}" ]] || { echo "::error::Set repository variable FIREBASE_PROJECT_ID"; exit 1; }
-          [[ -n "${FIREBASE_SITE_ID}" ]] || { echo "::error::Set repository variable FIREBASE_SITE_ID"; exit 1; }
-          echo "Firebase project: ${FIREBASE_PROJECT_ID}"
-          echo "Firebase site: ${FIREBASE_SITE_ID}"
-          echo "Firebase URL: ${FIREBASE_LIVE}"
-
-      - name: Stamp deployment
-        shell: bash
-        run: |
-          cat > docs/build-info.json <<EOF
-          {
-            "app": "personal-asset-monitor",
-            "built_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-            "github_sha": "${{ github.sha }}",
-            "run_id": "${{ github.run_id }}"
-          }
-          EOF
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v6
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: ./docs
-          include-hidden-files: true
-
-      - name: Pack Firebase deploy artifact
-        run: tar -czf asset-site.tar.gz docs firebase.json .firebaserc
-
-      - name: Upload Firebase deploy artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: asset-site
-          path: asset-site.tar.gz
-          retention-days: 1
-          if-no-files-found: error
-
-  deploy_pages:
-    name: Deploy GitHub Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
-
-  deploy_firebase:
-    name: Deploy Firebase Hosting
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Download built site
-        uses: actions/download-artifact@v6
-        with:
-          name: asset-site
-
-      - name: Extract built site
-        run: tar -xzf asset-site.tar.gz
-
-      - name: Deploy to the existing Firebase Hosting site
-        shell: bash
-        env:
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          set -euo pipefail
-          [[ -n "${FIREBASE_SERVICE_ACCOUNT_JSON}" ]] || { echo "::error::Set secret FIREBASE_SERVICE_ACCOUNT_JSON"; exit 1; }
-
-          SA_FILE="$RUNNER_TEMP/personal-asset-firebase-service-account.json"
-          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$SA_FILE"
-          chmod 600 "$SA_FILE"
-          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
-
-          python - <<'PYCFG'
+          CREDENTIALS_FILE="${RUNNER_TEMP}/firebase-service-account.json"
+          CONFIG_FILE="${RUNNER_TEMP}/firebase.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CREDENTIALS_FILE"
+          export GOOGLE_APPLICATION_CREDENTIALS="$CREDENTIALS_FILE"
+          python - <<'PY'
           import json, os
-          path = 'firebase.json'
-          config = json.load(open(path, encoding='utf-8'))
-          config['hosting']['site'] = os.environ['FIREBASE_SITE_ID']
-          open(path, 'w', encoding='utf-8').write(json.dumps(config, ensure_ascii=False, indent=2) + '\n')
-          PYCFG
+          from pathlib import Path
 
-          npx -y firebase-tools@15.25.1 deploy \
-            --only hosting \
-            --project "${FIREBASE_PROJECT_ID}" \
-            --non-interactive
-
-          rm -f "$SA_FILE"
-
-      - name: Verify Firebase Hosting
-        shell: bash
-        run: |
-          set -euo pipefail
-          EXPECTED_SHA="${{ github.sha }}"
-          LIVE_URL="${FIREBASE_LIVE}/build-info.json"
-
-          for TRY in 1 2 3 4 5 6 7 8; do
-            BODY=$(curl -fsSL -H 'Cache-Control: no-cache' \
-              "${LIVE_URL}?run=${{ github.run_id }}&try=$TRY&ts=$(date +%s)" || true)
-            if echo "$BODY" | grep -q "\"github_sha\": \"$EXPECTED_SHA\""; then
-              echo "SUCCESS: ${FIREBASE_LIVE} is serving the current build."
-              exit 0
-            fi
-            sleep 10
-          done
-
-          echo "::error::Firebase deploy finished, but the current build is not visible."
-          exit 1
+          source = json.loads(Path("firebase.json").read_text(encoding="utf-8"))
+          hosting = dict(source.get("hosting") or {})
+          hosting["site"] = os.environ["FIREBASE_SITE_ID"]
+          Path(os.environ["RUNNER_TEMP"], "firebase.json").write_text(
+              json.dumps({"hosting": hosting}, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          PY
+          firebase deploy --only hosting --project "$FIREBASE_PROJECT_ID" --config "$CONFIG_FILE" --non-interactive

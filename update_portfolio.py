@@ -19,6 +19,7 @@ from src.config import (
 )
 from src.nh_client import NhReadOnlyClient
 from src.portfolio import (
+    backfill_daily_realized_history,
     decrypt_envelope,
     encrypt_payload,
     holdings_for_web,
@@ -203,8 +204,8 @@ def build_payload(
     trades, trade_warnings = client.transaction_history(
         account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
     )
-    recent_realized, realized_warnings = client.realized_pnl_history(
-        account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
+    recent_realized, realized_warnings, realized_diagnostics = client.realized_pnl_history(
+        account_no, start.replace(tzinfo=None), now.replace(tzinfo=None), trades=trades
     )
     recent_flows, flow_warnings = client.cash_flow_history(
         account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
@@ -259,8 +260,15 @@ def build_payload(
             for item in previous.get("history", [])
             if isinstance(item, dict)
         ]
-    yield_history = update_yield_history(
+    yield_history_base = backfill_daily_realized_history(
         old_yield_history if isinstance(old_yield_history, list) else [],
+        realized_events=realized_events,
+        cash_flows=cash_flows,
+        start_date=start.date(),
+        end_date=now.date(),
+    )
+    yield_history = update_yield_history(
+        yield_history_base,
         totals=totals,
         realized=realized,
         cash_flows=cash_flows,
@@ -271,9 +279,41 @@ def build_payload(
         old_history if isinstance(old_history, list) else [], totals, now
     )
     monthly = monthly_realized_performance(realized_events, yield_history)
+    recent_market_counts = {
+        "KR": sum(1 for item in recent_realized if item.get("market") == "KR"),
+        "US": sum(1 for item in recent_realized if item.get("market") == "US"),
+    }
+    cumulative_market_counts = {
+        "KR": sum(1 for item in realized_events if item.get("market") == "KR"),
+        "US": sum(1 for item in realized_events if item.get("market") == "US"),
+    }
+    diagnostics = {
+        "recent_realized_count": len(recent_realized),
+        "recent_realized_by_market": recent_market_counts,
+        "cumulative_realized_count": len(realized_events),
+        "cumulative_realized_by_market": cumulative_market_counts,
+        "transaction_ledger_count": len(transaction_ledger),
+        "cash_flow_count": len(cash_flows),
+        "yield_history_points": len(yield_history),
+        "asset_snapshot_points": sum(
+            1 for item in yield_history if item.get("asset_recorded") is not False
+        ),
+        "realized_daily_points": sum(
+            1 for item in yield_history if item.get("kind") == "realized_daily"
+        ),
+        "realized_api": realized_diagnostics,
+    }
     print("[4/5] 누적 이력과 월별 수익 통계를 갱신합니다...")
+    print(
+        "      진단: 최근30일 실현 국내 "
+        f"{recent_market_counts['KR']}건 / 미국 {recent_market_counts['US']}건 | "
+        f"미국 SELL 체결 {realized_diagnostics.get('us_sell_trades', 0)}건 / "
+        f"손익 미확인 {realized_diagnostics.get('us_pnl_unavailable_events', 0)}건 | "
+        f"누적 국내 {cumulative_market_counts['KR']}건 / 미국 {cumulative_market_counts['US']}건 | "
+        f"그래프 {len(yield_history)}포인트"
+    )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "updated_at": now.isoformat(timespec="seconds"),
         "period": {"start": start.strftime("%Y-%m-%d"), "end": now.strftime("%Y-%m-%d")},
         "recording_started_at": previous.get("recording_started_at") or now.isoformat(timespec="seconds"),
@@ -291,6 +331,7 @@ def build_payload(
         "monthly_performance": monthly,
         "yield_history": yield_history,
         "history": history,
+        "diagnostics": diagnostics,
         "warnings": (
             holding_warnings + trade_warnings + realized_warnings
             + flow_warnings + indicator_warnings
@@ -329,7 +370,10 @@ def main() -> int:
         _keyring_set(KEYRING_SERVICE, PASSWORD_KEY, new_password)
         print(
             f"완료: 보유종목 {len(payload['holdings'])}개, "
-            f"최근 체결 {len(payload['transactions'])}건"
+            f"최근 체결 {len(payload['transactions'])}건, "
+            f"실현 국내 {payload['diagnostics']['recent_realized_by_market']['KR']}건 / "
+            f"미국 {payload['diagnostics']['recent_realized_by_market']['US']}건, "
+            f"그래프 {payload['diagnostics']['yield_history_points']}포인트"
         )
         if payload["warnings"]:
             print(f"참고: 조회 경고 {len(payload['warnings'])}건이 웹에 표시됩니다.")

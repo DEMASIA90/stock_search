@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from src.market_indicators import bollinger_state, technical_snapshot, watchlist_sort_key
 from src.models import Holding
-from src.nh_client import normalize_cash_flows
+from src.nh_client import NhReadOnlyClient, normalize_cash_flows
 from src.portfolio import (
+    backfill_daily_realized_history,
     decrypt_envelope,
     encrypt_payload,
     holdings_for_web,
@@ -106,6 +107,61 @@ class PortfolioTests(unittest.TestCase):
         monthly = monthly_realized_performance(events, history)
         self.assertAlmostEqual(monthly[0]["return_pct"], 1.0)
 
+    def test_realized_history_backfills_pnl_without_fake_asset_values(self) -> None:
+        events = [
+            {"id": "KR:1", "date": "20260902", "realized_pnl_krw": 100},
+            {"id": "US:2", "date": "20260903", "realized_pnl_krw": -25},
+        ]
+        history = backfill_daily_realized_history(
+            [], realized_events=events, cash_flows=[],
+            start_date=date(2026, 9, 1), end_date=date(2026, 9, 4),
+        )
+        self.assertEqual(len(history), 3)
+        self.assertIsNone(history[0]["total_asset_krw"])
+        self.assertFalse(history[0]["asset_recorded"])
+        self.assertEqual(history[1]["cumulative_realized_krw"], 100)
+        self.assertEqual(history[2]["cumulative_realized_krw"], 75)
+
+        summary = realized_summary(events)
+        history = update_yield_history(
+            history, totals={"total_asset_krw": 5000, "evaluation_krw": 4500},
+            realized=summary, cash_flows=[], at=datetime(2026, 9, 4, 10, 0),
+        )
+        self.assertEqual(history[-1]["total_asset_krw"], 5000)
+        self.assertTrue(history[-1]["asset_recorded"])
+        monthly = monthly_realized_performance(events, history)
+        self.assertAlmostEqual(monthly[0]["return_pct"], 75 / 5000 * 100)
+
+    def test_us_period_pnl_is_primary_when_detail_is_empty(self) -> None:
+        class FakeClient(NhReadOnlyClient):
+            @property
+            def environment(self) -> str:
+                return "live"
+
+            def _api(self, path: str, payload=None):
+                if path.endswith("/tradingPnl"):
+                    return {"Output_1": []}
+                if path.endswith("/periodPnl"):
+                    return {"Output_1": [{
+                        "orr_dt": "20260918", "iem_cd": "AAPL", "iem_nm": "Apple",
+                        "sll_qty": "2", "byn_uit_pr": "200", "sll_uit_pr": "210",
+                        "fc_rzt_pls": "28000", "fc_rzt_pft_rt": "5.0",
+                    }]}
+                if path.endswith("/periodPnlDetail"):
+                    return {"Output_0": []}
+                raise AssertionError(path)
+
+        events, warnings, diagnostics = FakeClient().realized_pnl_history(
+            "123", datetime(2026, 9, 18), datetime(2026, 9, 18)
+        )
+        us = [item for item in events if item["market"] == "US"]
+        self.assertEqual(len(us), 1)
+        self.assertEqual(us[0]["code"], "AAPL")
+        self.assertEqual(us[0]["realized_pnl_krw"], 28000)
+        self.assertEqual(diagnostics["us_period_rows"], 1)
+        self.assertEqual(diagnostics["us_events"], 1)
+        self.assertFalse(any("미국주식 실현손익 조회 실패" in warning for warning in warnings))
+
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")
 
@@ -156,6 +212,7 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn("Yield Monitor", html)
         self.assertIn('id="yieldChart"', html)
         self.assertIn('id="monthlyChart"', html)
+        self.assertIn('id="diagnostics"', html)
         self.assertIn('id="watchlistBody"', html)
         self.assertIn('pattern="[0-9]{4}"', html)
         self.assertIn('maxlength="4"', html)

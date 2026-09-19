@@ -4,7 +4,7 @@ import base64
 import json
 import os
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -209,15 +209,21 @@ def merge_persistent_events(
 
 def realized_summary(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     rows = [dict(item) for item in events if isinstance(item, dict)]
-    wins = [number(item.get("return_pct")) for item in rows if number(item.get("realized_pnl_krw")) > 0]
-    losses = [number(item.get("return_pct")) for item in rows if number(item.get("realized_pnl_krw")) < 0]
-    total = sum(number(item.get("realized_pnl_krw")) for item in rows)
+    known = [
+        item for item in rows
+        if item.get("pnl_available") is not False and item.get("realized_pnl_krw") not in (None, "")
+    ]
+    wins = [number(item.get("return_pct")) for item in known if number(item.get("realized_pnl_krw")) > 0]
+    losses = [number(item.get("return_pct")) for item in known if number(item.get("realized_pnl_krw")) < 0]
+    total = sum(number(item.get("realized_pnl_krw")) for item in known)
     return {
         "cumulative_realized_krw": total,
         "trade_count": len(rows),
+        "pnl_trade_count": len(known),
+        "pnl_unavailable_count": len(rows) - len(known),
         "win_count": len(wins),
         "loss_count": len(losses),
-        "win_rate_pct": len(wins) / len(rows) * 100.0 if rows else 0.0,
+        "win_rate_pct": len(wins) / len(known) * 100.0 if known else 0.0,
         "average_take_profit_pct": sum(wins) / len(wins) if wins else 0.0,
         "average_stop_loss_pct": sum(losses) / len(losses) if losses else 0.0,
     }
@@ -228,11 +234,15 @@ def monthly_realized_performance(
 ) -> list[dict[str, Any]]:
     pnl_by_month: dict[str, float] = {}
     for event in events:
+        if event.get("pnl_available") is False or event.get("realized_pnl_krw") in (None, ""):
+            continue
         month = str(event.get("date", ""))[:6]
         if len(month) == 6:
             pnl_by_month[month] = pnl_by_month.get(month, 0.0) + number(event.get("realized_pnl_krw"))
     first_asset_by_month: dict[str, float] = {}
     for point in sorted(asset_history, key=lambda item: str(item.get("at", ""))):
+        if point.get("asset_recorded") is False or point.get("total_asset_krw") in (None, ""):
+            continue
         month = "".join(character for character in str(point.get("at", ""))[:10] if character.isdigit())[:6]
         if len(month) == 6 and month not in first_asset_by_month:
             first_asset_by_month[month] = number(point.get("total_asset_krw"))
@@ -264,6 +274,8 @@ def update_yield_history(
         "unrealized_pnl_krw": number(totals.get("unrealized_pnl_krw") or totals.get("pnl_krw")),
         "cumulative_realized_krw": number(realized.get("cumulative_realized_krw")),
         "net_cash_flow_krw": deposits - withdrawals,
+        "asset_recorded": True,
+        "kind": "asset_snapshot",
     }
     out = [dict(item) for item in history if isinstance(item, dict) and item.get("at")]
     if out and str(out[-1].get("at", ""))[:13] == stamp[:13]:
@@ -271,6 +283,82 @@ def update_yield_history(
     else:
         out.append(point)
     return out[-max(1, limit):]
+
+
+def backfill_daily_realized_history(
+    history: Iterable[dict[str, Any]], *, realized_events: Iterable[dict[str, Any]],
+    cash_flows: Iterable[dict[str, Any]], start_date: date, end_date: date,
+    limit: int = 43_800,
+) -> list[dict[str, Any]]:
+    """Backfill daily realized-P/L points without inventing historical asset values.
+
+    NHPLUG provides recent realized events but not a historical daily total-asset series.
+    These synthetic points therefore carry only cumulative realized P/L and cash-flow data;
+    ``asset_recorded=False`` is used by the web chart to leave the asset line blank until
+    a real account snapshot was actually captured.
+    """
+    if end_date < start_date:
+        return [dict(item) for item in history if isinstance(item, dict) and item.get("at")]
+
+    realized_rows = [dict(item) for item in realized_events if isinstance(item, dict)]
+    flow_rows = [dict(item) for item in cash_flows if isinstance(item, dict)]
+
+    def digits(value: Any) -> str:
+        return "".join(character for character in str(value or "") if character.isdigit())[:8]
+
+    realized_by_day: dict[str, float] = {}
+    for item in realized_rows:
+        if item.get("pnl_available") is False or item.get("realized_pnl_krw") in (None, ""):
+            continue
+        day = digits(item.get("date"))
+        if len(day) == 8:
+            realized_by_day[day] = realized_by_day.get(day, 0.0) + number(item.get("realized_pnl_krw"))
+
+    flow_by_day: dict[str, float] = {}
+    for item in flow_rows:
+        day = digits(item.get("date"))
+        if len(day) != 8:
+            continue
+        signed = number(item.get("amount_krw")) if item.get("side") == "DEPOSIT" else -number(item.get("amount_krw"))
+        flow_by_day[day] = flow_by_day.get(day, 0.0) + signed
+
+    start_key = start_date.strftime("%Y%m%d")
+    realized_running = sum(
+        amount for day, amount in realized_by_day.items() if day < start_key
+    )
+    flow_running = sum(amount for day, amount in flow_by_day.items() if day < start_key)
+
+    # Rebuild the rolling-window daily points so newly discovered events can correct them.
+    kept: list[dict[str, Any]] = []
+    for item in history:
+        if not isinstance(item, dict) or not item.get("at"):
+            continue
+        day = digits(item.get("at"))
+        in_window = start_key <= day <= end_date.strftime("%Y%m%d")
+        if item.get("kind") == "realized_daily" and in_window:
+            continue
+        kept.append(dict(item))
+
+    day = start_date
+    # Today is represented by the real live snapshot appended by update_yield_history().
+    while day < end_date:
+        day_key = day.strftime("%Y%m%d")
+        realized_running += realized_by_day.get(day_key, 0.0)
+        flow_running += flow_by_day.get(day_key, 0.0)
+        kept.append({
+            "at": f"{day.isoformat()}T23:59:00",
+            "total_asset_krw": None,
+            "evaluation_krw": None,
+            "unrealized_pnl_krw": None,
+            "cumulative_realized_krw": realized_running,
+            "net_cash_flow_krw": flow_running,
+            "asset_recorded": False,
+            "kind": "realized_daily",
+        })
+        day += timedelta(days=1)
+
+    kept.sort(key=lambda item: str(item.get("at", "")))
+    return kept[-max(1, limit):]
 
 
 def _derive_key(password: str, salt: bytes, iterations: int) -> bytes:
