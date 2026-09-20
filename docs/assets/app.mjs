@@ -20,6 +20,7 @@ function money(value, currency = "KRW") {
 }
 
 function percent(value, digits = 2) {
+  if (value === null || value === undefined || value === "") return "—";
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "—";
   return `${parsed > 0 ? "+" : ""}${parsed.toFixed(digits)}%`;
@@ -94,6 +95,126 @@ function bandBadge(label) {
   return `<span class="band ${classes[label] || "unknown"}">${escapeHtml(label || "미확인")}</span>`;
 }
 
+
+function technicalPrice(value, currency = "KRW") {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "—";
+  return currency === "USD" ? usd.format(parsed) : won.format(parsed);
+}
+
+function closeTechnicalChart() {
+  const modal = $("#technicalChartModal");
+  if (!modal) return;
+  modal.classList.add("is-hidden");
+  if ($("#pinModal")?.classList.contains("is-hidden")) document.body.classList.remove("modal-open");
+}
+
+function technicalDomain(rows) {
+  const values = [];
+  rows.forEach((row) => {
+    [row.low, row.high, row.bb_lower, row.bb_middle, row.bb_upper, row.st_14_3].forEach((value) => {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) values.push(parsed);
+    });
+  });
+  if (!values.length) return [0, 1];
+  let low = Math.min(...values); let high = Math.max(...values);
+  const spread = Math.max((high - low) * 0.08, Math.abs(high) * 0.015, 0.01);
+  return [Math.max(0, low - spread), high + spread];
+}
+
+function technicalLine(rows, key, x, y) {
+  const segments = [];
+  let current = [];
+  rows.forEach((row, index) => {
+    const value = Number(row[key]);
+    if (Number.isFinite(value) && value > 0) current.push(`${x(index)},${y(value)}`);
+    else if (current.length) { segments.push(current.join(" ")); current = []; }
+  });
+  if (current.length) segments.push(current.join(" "));
+  return segments;
+}
+
+function openTechnicalChart(item) {
+  const rows = (Array.isArray(item?.chart_bars) ? item.chart_bars : [])
+    .filter((row) => Number(row?.close) > 0)
+    .slice(-120);
+  const modal = $("#technicalChartModal");
+  const host = $("#technicalChartHost");
+  if (!modal || !host) return;
+  setText("#technicalChartTitle", item?.name || item?.code || "종목 차트");
+  setText("#technicalChartMeta", `${item?.code || "—"} · ${item?.market || "—"} · ${rows.length ? `${dayLabel(rows[0].date)} ~ ${dayLabel(rows.at(-1).date)}` : "차트 데이터 없음"}`);
+  document.body.classList.add("modal-open");
+  modal.classList.remove("is-hidden");
+  if (!rows.length) {
+    host.innerHTML = '<div class="chart-empty">이 종목의 가격 차트 데이터가 아직 없습니다.<br>다음 관심종목/포트폴리오 업데이트 후 다시 확인해 주세요.</div>';
+    return;
+  }
+
+  const currency = item?.currency || (String(item?.market).toUpperCase() === "US" ? "USD" : "KRW");
+  const width = 1020; const height = 520;
+  const pad = { top: 22, right: 24, bottom: 48, left: 88 };
+  const [low, high] = technicalDomain(rows);
+  const x = (index) => pad.left + ((index + 0.5) / rows.length) * (width - pad.left - pad.right);
+  const y = (value) => height - pad.bottom - ((value - low) / Math.max(1e-9, high - low)) * (height - pad.top - pad.bottom);
+  const yTicks = createTicks(low, high, 5);
+  const candleSpace = (width - pad.left - pad.right) / rows.length;
+  const candleWidth = Math.max(2.2, Math.min(8, candleSpace * 0.62));
+  const xTickIndexes = [...new Set([0, Math.floor((rows.length - 1) * .25), Math.floor((rows.length - 1) * .5), Math.floor((rows.length - 1) * .75), rows.length - 1])];
+  const bbUpper = technicalLine(rows, "bb_upper", x, y);
+  const bbMiddle = technicalLine(rows, "bb_middle", x, y);
+  const bbLower = technicalLine(rows, "bb_lower", x, y);
+  const stSegments = rows.slice(1).map((row, index) => {
+    const previous = rows[index];
+    const a = Number(previous.st_14_3); const b = Number(row.st_14_3);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return "";
+    return `<line class="technical-st ${row.st_trend === "DOWN" ? "down" : "up"}" x1="${x(index)}" y1="${y(a)}" x2="${x(index + 1)}" y2="${y(b)}"/>`;
+  }).join("");
+
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(item?.name || item?.code || "종목")} 캔들 차트">
+    ${yTicks.map((tick) => `<g><line class="technical-grid" x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}"/><text class="technical-axis-label" x="${pad.left - 10}" y="${y(tick) + 4}" text-anchor="end">${escapeHtml(technicalPrice(tick, currency))}</text></g>`).join("")}
+    ${xTickIndexes.map((index) => `<text class="technical-axis-label" x="${x(index)}" y="${height - 16}" text-anchor="middle">${escapeHtml(dayLabel(rows[index].date, true))}</text>`).join("")}
+    ${bbUpper.map((points) => `<polyline class="technical-bb outer" points="${points}"/>`).join("")}
+    ${bbMiddle.map((points) => `<polyline class="technical-bb middle" points="${points}"/>`).join("")}
+    ${bbLower.map((points) => `<polyline class="technical-bb outer" points="${points}"/>`).join("")}
+    ${stSegments}
+    ${rows.map((row, index) => {
+      const open = Number(row.open); const close = Number(row.close); const highValue = Number(row.high); const lowValue = Number(row.low);
+      const up = close >= open;
+      const top = y(Math.max(open, close)); const bottom = y(Math.min(open, close));
+      const bodyHeight = Math.max(1.6, bottom - top);
+      return `<g class="technical-candle ${up ? "up" : "down"}" data-index="${index}"><line x1="${x(index)}" y1="${y(highValue)}" x2="${x(index)}" y2="${y(lowValue)}"/><rect x="${x(index) - candleWidth / 2}" y="${top}" width="${candleWidth}" height="${bodyHeight}" rx="1"/></g>`;
+    }).join("")}
+  </svg><div class="technical-hover" id="technicalHover"></div>`;
+
+  const hover = host.querySelector("#technicalHover");
+  host.querySelectorAll(".technical-candle").forEach((node) => {
+    const row = rows[Number(node.dataset.index)];
+    const show = (event) => {
+      if (!hover) return;
+      hover.innerHTML = `<strong>${escapeHtml(dayLabel(row.date))}</strong><span>O ${escapeHtml(technicalPrice(row.open, currency))} · H ${escapeHtml(technicalPrice(row.high, currency))}</span><span>L ${escapeHtml(technicalPrice(row.low, currency))} · C ${escapeHtml(technicalPrice(row.close, currency))}</span><span>ST14·3 ${escapeHtml(technicalPrice(row.st_14_3, currency))} · ${row.st_trend === "DOWN" ? "하락" : "상승"}</span>`;
+      const rect = host.getBoundingClientRect();
+      hover.style.left = `${Math.max(8, Math.min(event.clientX - rect.left + 12, host.clientWidth - 220))}px`;
+      hover.style.top = `${Math.max(8, Math.min(event.clientY - rect.top - 76, host.clientHeight - 96))}px`;
+      hover.classList.add("is-visible");
+    };
+    node.addEventListener("mouseenter", show);
+    node.addEventListener("mousemove", show);
+  });
+  host.addEventListener("mouseleave", () => hover?.classList.remove("is-visible"));
+}
+
+function attachRowChartHandlers(selector, rows) {
+  document.querySelectorAll(selector).forEach((node) => {
+    const item = rows[Number(node.dataset.rowIndex)];
+    if (!item) return;
+    node.addEventListener("click", () => openTechnicalChart(item));
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openTechnicalChart(item); }
+    });
+  });
+}
+
 function renderWatchlistRows() {
   const allRows = Array.isArray(watchlist?.items) ? watchlist.items : [];
   const market = $("#watchMarketFilter").value;
@@ -105,19 +226,20 @@ function renderWatchlistRows() {
   $("#watchlistEmpty").classList.toggle("is-hidden", rows.length > 0);
   $("#watchlistBody").innerHTML = rows.map((item, index) => {
     const currency = item.currency || (item.market === "US" ? "USD" : "KRW");
-    return `<tr class="${item.band === "최하단" ? "priority-row" : ""}">
-      <td><span class="rank">${index + 1}</span></td>
-      <td><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${item.kind === "leveraged_etf" ? "3X ETF" : escapeHtml(item.market)}${item.stale ? " · 이전 데이터" : ""}</span></div></td>
-      <td>${bandBadge(item.band)}</td>
-      <td class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/30</small></td>
-      <td>${trendBadge(item.st_10_3)}</td><td>${trendBadge(item.st_20_4)}</td>
-      <td>${slopeBadge(item.ma60_slope_pct)}</td><td>${slopeBadge(item.ma200_slope_pct)}</td>
-      <td class="numeric"><strong>${money(item.price, currency)}</strong><small class="${pnlClass(item.change_pct)}">${percent(item.change_pct)}</small></td>
-      <td class="numeric ${pnlClass(item.vs_sma60_pct)}"><strong>${percent(item.vs_sma60_pct)}</strong></td>
-      <td><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td>
-      <td class="numeric">${item.kind === "leveraged_etf" ? "3X ETF" : marketCap(item.market_cap_krw)}</td>
+    return `<tr class="instrument-row clickable-row ${item.band === "최하단" ? "priority-row" : ""}" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
+      <td data-label="#"><span class="rank">${index + 1}</span></td>
+      <td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${item.kind === "leveraged_etf" ? "3X ETF" : escapeHtml(item.market)}${item.stale ? " · 이전 데이터" : ""}</span></div></td>
+      <td data-label="밴드">${bandBadge(item.band)}</td>
+      <td data-label="점수" class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/30</small></td>
+      <td data-label="ST 10·3">${trendBadge(item.st_10_3)}</td><td data-label="ST 20·4">${trendBadge(item.st_20_4)}</td>
+      <td data-label="60일선">${slopeBadge(item.ma60_slope_pct)}</td><td data-label="200일선">${slopeBadge(item.ma200_slope_pct)}</td>
+      <td data-label="현재가" class="numeric"><strong>${money(item.price, currency)}</strong><small class="${pnlClass(item.change_pct)}">${percent(item.change_pct)}</small></td>
+      <td data-label="60일 평균 대비" class="numeric ${pnlClass(item.vs_sma60_pct)}"><strong>${percent(item.vs_sma60_pct)}</strong></td>
+      <td data-label="섹터"><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td>
+      <td data-label="시가총액" class="numeric">${item.kind === "leveraged_etf" ? "3X ETF" : marketCap(item.market_cap_krw)}</td>
     </tr>`;
   }).join("");
+  attachRowChartHandlers("#watchlistBody .instrument-row", rows);
 }
 
 function renderWatchlist(data) {
@@ -129,7 +251,11 @@ function renderWatchlist(data) {
   setText("#watchScanned", `후보 ${data.scanned_count || 0}개 분석`);
   setText("#watchBottomCount", `${rows.filter((item) => item.band === "최하단").length}개`);
   setText("#watchTopScore", rows.length ? `${Math.max(...rows.map((item) => number(item.score)))}점` : "—");
-  const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+  const warnings = Array.isArray(data.warnings) ? [...data.warnings] : [];
+  const updatedAt = new Date(data.updated_at);
+  if (!Number.isNaN(updatedAt.getTime()) && Date.now() - updatedAt.getTime() > 2.5 * 60 * 60 * 1000) {
+    warnings.unshift(`관심종목 자동 업데이트가 2시간 이상 지연되었습니다. 마지막 계산: ${dateText(data.updated_at, true)}`);
+  }
   $("#watchWarningPanel").classList.toggle("is-hidden", warnings.length === 0);
   $("#watchWarnings").innerHTML = warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   renderWatchlistRows();
@@ -174,15 +300,16 @@ function renderHoldings(holdings) {
   const rows = Array.isArray(holdings) ? holdings : [];
   setText("#positionsCount", `${rows.length}개`);
   $("#holdingsEmpty").classList.toggle("is-hidden", rows.length > 0);
-  $("#holdingsBody").innerHTML = rows.map((item) => `<tr>
-    <td><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
-    <td><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td>
-    <td class="numeric strong">${money(item.eval_amount_krw)}</td>
-    <td class="numeric ${pnlClass(item.pnl_amount_krw)}"><strong>${money(item.pnl_amount_krw)}</strong></td>
-    <td class="numeric ${pnlClass(item.pnl_pct)}"><strong>${percent(item.pnl_pct)}</strong></td>
-    <td>${bandBadge(item.band)}</td><td>${trendBadge(item.st_14_3)}</td>
-    <td>${slopeBadge(item.ma60_slope_pct)}</td><td>${slopeBadge(item.ma200_slope_pct)}</td>
+  $("#holdingsBody").innerHTML = rows.map((item, index) => `<tr class="instrument-row clickable-row" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
+    <td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
+    <td data-label="섹터"><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td>
+    <td data-label="평가금액" class="numeric strong">${money(item.eval_amount_krw)}</td>
+    <td data-label="평가손익" class="numeric ${pnlClass(item.pnl_amount_krw)}"><strong>${money(item.pnl_amount_krw)}</strong></td>
+    <td data-label="수익률" class="numeric ${pnlClass(item.pnl_pct)}"><strong>${percent(item.pnl_pct)}</strong></td>
+    <td data-label="Bollinger">${bandBadge(item.band)}</td><td data-label="ST 14·3">${trendBadge(item.st_14_3)}</td>
+    <td data-label="60일선">${slopeBadge(item.ma60_slope_pct)}</td><td data-label="200일선">${slopeBadge(item.ma200_slope_pct)}</td>
   </tr>`).join("");
+  attachRowChartHandlers("#holdingsBody .instrument-row", rows);
 }
 
 
@@ -271,7 +398,8 @@ function moneyMaybe(value, currency = "KRW") {
 }
 
 function buildChartData() {
-  const assetByDay = new Map();
+  const assetPoints = [];
+  const latestAssetByDay = new Map();
   const cumulativeByDay = new Map();
   const realizedByDay = new Map();
   const flowByDay = new Map();
@@ -285,13 +413,15 @@ function buildChartData() {
     const rawAsset = row.total_asset_krw;
     const hasAsset = row.asset_recorded !== false && row.kind !== "realized_daily" && rawAsset !== null && rawAsset !== undefined && rawAsset !== "" && Number.isFinite(Number(rawAsset));
     if (!hasAsset) return;
-    const current = assetByDay.get(day);
-    const candidateTime = Number.isNaN(new Date(row.at).getTime()) ? String(row.at) : new Date(row.at).getTime();
-    const currentTime = !current || Number.isNaN(new Date(current.at).getTime()) ? (current ? String(current.at) : null) : new Date(current.at).getTime();
-    if (!current || candidateTime >= currentTime) {
-      assetByDay.set(day, { day, at: row.at, total_asset_krw: Number(rawAsset) });
-    }
+    const parsed = new Date(row.at);
+    const fallback = parseCompactDay(day);
+    const atMs = !Number.isNaN(parsed.getTime()) ? parsed.getTime() : (fallback ? fallback.getTime() : 0);
+    const point = { day, at: row.at, at_ms: atMs, total_asset_krw: Number(rawAsset) };
+    assetPoints.push(point);
+    const current = latestAssetByDay.get(day);
+    if (!current || point.at_ms >= current.at_ms) latestAssetByDay.set(day, point);
   });
+  assetPoints.sort((a, b) => a.at_ms - b.at_ms || a.day.localeCompare(b.day));
 
   (portfolio?.realized_events || []).forEach((item) => {
     const day = realizedChartDay(item);
@@ -324,7 +454,7 @@ function buildChartData() {
   }
 
   const allDays = new Set([
-    ...assetByDay.keys(),
+    ...latestAssetByDay.keys(),
     ...realizedByDay.keys(),
     ...flowByDay.keys(),
     ...cumulativeByDay.keys(),
@@ -333,7 +463,8 @@ function buildChartData() {
   if (/^\d{8}$/.test(updatedDay)) allDays.add(updatedDay);
 
   return {
-    assetPoints: [...assetByDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
+    assetPoints,
+    latestAssetByDay,
     realizedPoints: [...realizedByDay.entries()].map(([day, value]) => ({ day, daily_realized_krw: value })).sort((a, b) => a.day.localeCompare(b.day)),
     flowByDay,
     realizedByDay,
@@ -346,6 +477,7 @@ function getRangeBounds(data) {
   const validDays = data.allDays.filter((day) => /^\d{8}$/.test(day));
   const fallbackEnd = new Date();
   const end = validDays.length ? parseCompactDay(validDays.at(-1)) : fallbackEnd;
+  end.setHours(23, 59, 59, 999);
   let start;
   if (selectedYieldRange === "ALL") {
     start = validDays.length ? parseCompactDay(validDays[0]) : new Date(end);
@@ -356,7 +488,8 @@ function getRangeBounds(data) {
     else if (selectedYieldRange === "6M") start.setMonth(start.getMonth() - 6);
     else if (selectedYieldRange === "1Y") start.setFullYear(start.getFullYear() - 1);
   }
-  if (start.getTime() === end.getTime()) start.setDate(start.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  if (start.getTime() >= end.getTime()) start.setDate(start.getDate() - 1);
   return { start, end, startDay: toDayKey(start), endDay: toDayKey(end) };
 }
 
@@ -426,7 +559,7 @@ function clearChartTooltip(host) {
 function renderSelectedDay(day, data) {
   if (!day) return;
   selectedChartDay = day;
-  const asset = data.assetPoints.find((point) => point.day === day);
+  const asset = data.latestAssetByDay.get(day);
   const dayRealized = data.realizedByDay.get(day) || 0;
   const dayFlow = data.flowByDay.get(day) || 0;
   const cumulative = data.cumulativeForDay(day);
@@ -459,7 +592,7 @@ function renderSelectedDay(day, data) {
 
 function renderAssetChart(data, bounds) {
   const host = $("#assetChart");
-  const points = data.assetPoints.filter((point) => inRange(point.day, bounds));
+  const points = data.assetPoints.filter((point) => point.at_ms >= bounds.start.getTime() && point.at_ms <= bounds.end.getTime());
   if (!points.length) {
     host.innerHTML = '<div class="chart-empty">선택 기간에 실제로 저장된 총자산 스냅샷이 없습니다.<br>과거 자산은 임의 역산하지 않습니다.</div>';
     return;
@@ -470,34 +603,54 @@ function renderAssetChart(data, bounds) {
   const [low, high] = extent(values);
   const yTicks = createTicks(low, high, 4);
   const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
-  const x = (day) => xForDay(day, bounds, pad.left, pad.right, width);
-  const line = points.map((point) => `${x(point.day)},${y(Number(point.total_asset_krw))}`).join(" ");
+  const spanMs = Math.max(1, bounds.end.getTime() - bounds.start.getTime());
+  const xPoint = (point) => pad.left + Math.max(0, Math.min(1, (point.at_ms - bounds.start.getTime()) / spanMs)) * (width - pad.left - pad.right);
+  const xDay = (day) => xForDay(day, bounds, pad.left, pad.right, width);
+  const line = points.map((point) => `${xPoint(point)},${y(Number(point.total_asset_krw))}`).join(" ");
   const ticks = dateTicks(bounds);
-  const fill = points.length >= 2 ? `<polygon points="${x(points[0].day)},${height - pad.bottom} ${line} ${x(points.at(-1).day)},${height - pad.bottom}" fill="url(#assetFill)"/>` : "";
+  const fill = points.length >= 2 ? `<polygon points="${xPoint(points[0])},${height - pad.bottom} ${line} ${xPoint(points.at(-1))},${height - pad.bottom}" fill="url(#assetFill)"/>` : "";
   const polyline = points.length >= 2 ? `<polyline points="${line}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : "";
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산 선 그래프">
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산 시간별 선 그래프">
     <defs><linearGradient id="assetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#51e4ba" stop-opacity=".28"/><stop offset="1" stop-color="#51e4ba" stop-opacity="0"/></linearGradient></defs>
     ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join("")}
-    ${ticks.map((tick) => `<g><line x1="${x(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${x(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${x(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
+    ${ticks.map((tick) => `<g><line x1="${xDay(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${xDay(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${xDay(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
     ${fill}${polyline}
-    ${points.map((point) => `<circle class="chart-point asset ${data.realizedByDay.has(point.day) ? "has-realized" : ""} ${point.day === selectedChartDay ? "selected" : ""}" data-day="${point.day}" cx="${x(point.day)}" cy="${y(Number(point.total_asset_krw))}" r="${point.day === selectedChartDay ? 6 : (data.realizedByDay.has(point.day) ? 5 : 4)}"/>`).join("")}
+    ${[...data.realizedByDay.keys()].filter((day) => inRange(day, bounds) && !data.latestAssetByDay.has(day)).map((day) => `<circle class="asset-event-marker" data-day="${day}" cx="${xDay(day)}" cy="${height - pad.bottom - 5}" r="4.5"/>`).join("")}
+    ${points.map((point) => {
+      const realizedAnchor = data.realizedByDay.has(point.day) && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
+      const selectedAnchor = point.day === selectedChartDay && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
+      return `<circle class="chart-point asset ${realizedAnchor ? "has-realized" : ""} ${selectedAnchor ? "selected" : ""}" data-at-ms="${point.at_ms}" cx="${xPoint(point)}" cy="${y(Number(point.total_asset_krw))}" r="${selectedAnchor ? 6 : (realizedAnchor ? 5 : 3.2)}"/>`;
+    }).join("")}
   </svg>`;
 
   host.querySelectorAll(".chart-point.asset").forEach((node) => {
-    const point = points.find((item) => item.day === node.dataset.day);
+    const point = points.find((item) => String(item.at_ms) === node.dataset.atMs);
+    if (!point) return;
     const tooltip = () => renderChartTooltip(host, {
       x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
       y: Number(node.getAttribute("cy")) / height * host.clientHeight - 16,
-      title: dayLabel(point.day),
-      lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `일자 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`, `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`],
+      title: dateText(point.at, true),
+      lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `해당일 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`, `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`],
     });
     node.addEventListener("mouseenter", tooltip);
     node.addEventListener("click", () => {
       selectedChartDay = point.day;
       renderSelectedDay(point.day, data);
-      host.querySelectorAll(".chart-point.asset").forEach((dot) => dot.classList.toggle("selected", dot === node));
+      host.querySelectorAll(".chart-point.asset").forEach((dot) => dot.classList.remove("selected"));
+      node.classList.add("selected");
       tooltip();
     });
+  });
+  host.querySelectorAll(".asset-event-marker").forEach((node) => {
+    const day = node.dataset.day;
+    const tooltip = () => renderChartTooltip(host, {
+      x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
+      y: (height - pad.bottom - 5) / height * host.clientHeight - 16,
+      title: dayLabel(day),
+      lines: [`실현수익 ${moneyMaybe(data.realizedByDay.get(day) || 0)}`, "이 날짜의 정확한 총자산 스냅샷은 저장되어 있지 않습니다."],
+    });
+    node.addEventListener("mouseenter", tooltip);
+    node.addEventListener("click", () => { renderSelectedDay(day, data); tooltip(); });
   });
   host.addEventListener("mouseleave", () => clearChartTooltip(host));
 }
@@ -614,13 +767,19 @@ function renderMonthly(rows) {
 
 function renderRealizedEvents(events) {
   const rows = (Array.isArray(events) ? events : []).slice().reverse();
+  const visibleRows = rows.slice(0, 100).map((item) => {
+    const key = `${String(item.market || "").toUpperCase()}:${String(item.code || "").toUpperCase()}`;
+    const chart = portfolio?.technical_charts?.[key];
+    return chart ? { ...item, chart_bars: chart.chart_bars, currency: item.currency || chart.currency } : item;
+  });
   setText("#realizedEventsCount", `${rows.length}건`);
   $("#realizedEmpty").classList.toggle("is-hidden", rows.length > 0);
-  $("#realizedBody").innerHTML = rows.slice(0, 100).map((item) => `<tr>
-    <td>${dateText(item.date)}</td><td><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
-    <td><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td><td class="numeric">${qty.format(number(item.qty))}</td><td class="numeric">${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</td>
-    <td class="numeric ${pnlClass(item.realized_pnl_krw)}"><strong>${money(item.realized_pnl_krw)}</strong></td><td class="numeric ${pnlClass(item.return_pct)}"><strong>${percent(item.return_pct)}</strong></td>
+  $("#realizedBody").innerHTML = visibleRows.map((item, index) => `<tr class="instrument-row clickable-row" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
+    <td data-label="일자">${dateText(item.date)}</td><td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
+    <td data-label="섹터"><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td><td data-label="매도수량" class="numeric">${qty.format(number(item.qty))}</td><td data-label="매도가" class="numeric">${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</td>
+    <td data-label="실현손익" class="numeric ${pnlClass(item.realized_pnl_krw)}"><strong>${moneyMaybe(item.realized_pnl_krw)}</strong></td><td data-label="수익률" class="numeric ${pnlClass(item.return_pct)}"><strong>${percent(item.return_pct)}</strong></td>
   </tr>`).join("");
+  attachRowChartHandlers("#realizedBody .instrument-row", visibleRows);
 }
 
 function render(data) {
@@ -661,7 +820,7 @@ function render(data) {
   const pendingUs = number(realizedApi.us_pnl_unavailable_events);
   const usTrades = number(transactionApi.us_daily_trades);
   const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
-  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 그래프 ${number(diagnostics.yield_history_points)}p`);
+  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 자산 스냅샷 ${number(diagnostics.asset_snapshot_points)}p / 전체 이력 ${number(diagnostics.yield_history_points)}p`);
 }
 
 async function loadEnvelope() {
@@ -683,6 +842,8 @@ $("#yieldRangeSelector")?.querySelectorAll(".range-chip[data-range]").forEach((b
     renderYieldCharts();
   });
 });
+$("#closeTechnicalChartButton")?.addEventListener("click", closeTechnicalChart);
+$("#technicalChartModal")?.addEventListener("click", (event) => { if (event.target === $("#technicalChartModal")) closeTechnicalChart(); });
 $("#openPinButton").addEventListener("click", openPinModal);
 $("#closePinButton").addEventListener("click", () => closePinModal({ returnToWatchlist: true }));
 $("#cancelPinButton").addEventListener("click", () => closePinModal({ returnToWatchlist: true }));
@@ -704,7 +865,11 @@ $("#pinForm").addEventListener("submit", async (event) => {
 $("#lockButton").addEventListener("click", () => {
   portfolio = null; $("#dashboardContent").classList.add("is-hidden"); $("#portfolioLocked").classList.remove("is-hidden"); activateTab("watchlist");
 });
-document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("#pinModal").classList.contains("is-hidden")) closePinModal({ returnToWatchlist: true }); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!$("#technicalChartModal")?.classList.contains("is-hidden")) { closeTechnicalChart(); return; }
+  if (!$("#pinModal").classList.contains("is-hidden")) closePinModal({ returnToWatchlist: true });
+});
 
 activateTab(location.hash === "#portfolio" ? "portfolio" : "watchlist");
 if (location.hash === "#portfolio") openPinModal();

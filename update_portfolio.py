@@ -248,6 +248,9 @@ def build_payload(
             "sector",
             holding_sectors.get((str(event.get("market")), str(event.get("code"))), "기타"),
         )
+    # Yield Monitor rows are clickable too. Attach the same compact candle /
+    # Bollinger / Supertrend data, reusing the analyzer's per-symbol cache.
+    technical_charts, realized_chart_warnings = analyzer.realized_chart_map(realized_events)
 
     totals = portfolio_totals(web_holdings, trades)
     totals.update({key: value for key, value in asset_status.items() if number(value) != 0})
@@ -336,7 +339,7 @@ def build_payload(
         if fields:
             print("      미국 detail 필드: " + ", ".join(str(item) for item in fields))
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "updated_at": now.isoformat(timespec="seconds"),
         "period": {"start": start.strftime("%Y-%m-%d"), "end": now.strftime("%Y-%m-%d")},
         "history_policy": {"query_window_days": 30, "yield_history_limit": 43800, "event_limit": 20000, "timezone": "Asia/Seoul"},
@@ -350,6 +353,7 @@ def build_payload(
         "transactions": trades,
         "transaction_ledger": transaction_ledger,
         "realized_events": realized_events,
+        "technical_charts": technical_charts,
         "cash_flows": cash_flows,
         "realized_summary": realized,
         "monthly_performance": monthly,
@@ -358,7 +362,7 @@ def build_payload(
         "diagnostics": diagnostics,
         "warnings": (
             holding_warnings + trade_warnings + realized_warnings
-            + flow_warnings + indicator_warnings
+            + flow_warnings + indicator_warnings + realized_chart_warnings
         )[:50],
         "source": "NH투자증권 Namuh PLUG (조회 전용)",
     }

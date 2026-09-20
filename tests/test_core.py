@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 
-from src.market_indicators import bollinger_state, technical_snapshot, watchlist_sort_key
+from src.market_indicators import bollinger_state, technical_chart_series, technical_snapshot, watchlist_sort_key
 from src.models import Holding
 from src.nh_client import NhReadOnlyClient, normalize_cash_flows
 from src.portfolio import (
@@ -87,6 +87,25 @@ class PortfolioTests(unittest.TestCase):
             {"code": "LOW", "band": "최하단", "score": 0, "band_position": 0.1},
         ]
         self.assertEqual(sorted(rows, key=watchlist_sort_key)[0]["code"], "LOW")
+
+    def test_technical_chart_series_contains_candles_bollinger_and_supertrend(self) -> None:
+        bars = [
+            {
+                "date": f"2026{(index // 28) + 1:02d}{(index % 28) + 1:02d}",
+                "open": 100 + index * 0.5,
+                "high": 102 + index * 0.5,
+                "low": 99 + index * 0.5,
+                "close": 101 + index * 0.5,
+            }
+            for index in range(180)
+        ]
+        chart = technical_chart_series(bars, max_points=120)
+        self.assertEqual(len(chart), 120)
+        self.assertIn("bb_upper", chart[-1])
+        self.assertIn("bb_lower", chart[-1])
+        self.assertIn("st_14_3", chart[-1])
+        self.assertIn(chart[-1]["st_trend"], {"UP", "DOWN"})
+        self.assertGreater(chart[-1]["high"], chart[-1]["low"])
 
     def test_yield_history_realized_and_cash_flow(self) -> None:
         events = merge_persistent_events(
@@ -592,8 +611,24 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn('id="monthlyChart"', html)
         self.assertIn('id="diagnostics"', html)
         self.assertIn('id="watchlistBody"', html)
+        self.assertIn('id="technicalChartModal"', html)
+        self.assertIn('id="technicalChartHost"', html)
+        self.assertNotIn("저평가 구간에서", html)
         self.assertIn('pattern="[0-9]{4}"', html)
         self.assertIn('maxlength="4"', html)
+
+
+    def test_mobile_tables_and_clickable_technical_chart_ui(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        css = (root / "docs" / "assets" / "styles.css").read_text(encoding="utf-8")
+        js = (root / "docs" / "assets" / "app.mjs").read_text(encoding="utf-8")
+        self.assertIn("#watchlistBody tr", css)
+        self.assertIn("grid-template-columns: repeat(4", css)
+        self.assertIn("openTechnicalChart", js)
+        self.assertIn("chart_bars", js)
+        self.assertIn("data-label=\"현재가\"", js)
+        self.assertIn("data-label=\"평가금액\"", js)
+
 
 
 if __name__ == "__main__":

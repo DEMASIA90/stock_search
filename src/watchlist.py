@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from src.config import WATCHLIST_UNIVERSE_FILE
-from src.market_indicators import technical_snapshot, watchlist_sort_key
+from src.market_indicators import technical_chart_series, technical_snapshot, watchlist_sort_key
 from src.nh_client import NhReadOnlyClient
 from src.portfolio import number
 
@@ -67,6 +67,7 @@ class MarketAnalyzer:
         code = str(item.get("code") or "").upper()
         metadata, bars = self.quote(market, code)
         technical = technical_snapshot(bars)
+        chart_bars = technical_chart_series(bars)
         price = number(technical.get("price"))
         if market == "KR":
             market_cap_krw = _kr_market_cap(metadata)
@@ -92,6 +93,7 @@ class MarketAnalyzer:
             "market_cap_krw": market_cap_krw,
             "fx_rate": fx_rate,
             **technical,
+            "chart_bars": chart_bars,
             "change_pct": change_pct,
             "stale": False,
         }
@@ -107,6 +109,7 @@ class MarketAnalyzer:
             try:
                 metadata, bars = self.quote(market, code)
                 technical = technical_snapshot(bars)
+                chart_bars = technical_chart_series(bars)
                 sector = (
                     metadata.get("bstp_kor_isnm") if market == "KR"
                     else metadata.get("industry_name")
@@ -119,6 +122,7 @@ class MarketAnalyzer:
                     "ma60_slope_pct": technical.get("ma60_slope_pct"),
                     "ma200_slope_pct": technical.get("ma200_slope_pct"),
                     "vs_sma60_pct": technical.get("vs_sma60_pct"),
+                    "chart_bars": chart_bars,
                 })
             except Exception as exc:
                 holding.update({
@@ -128,10 +132,47 @@ class MarketAnalyzer:
                     "ma60_slope_pct": None,
                     "ma200_slope_pct": None,
                     "vs_sma60_pct": None,
+                    "chart_bars": [],
                 })
                 warnings.append(f"{market} {code} 기술지표 조회 실패: {exc}")
             enriched.append(holding)
         return enriched, warnings
+
+    def realized_chart_map(
+        self, events: Iterable[dict[str, Any]], *, max_unique: int = 100,
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """Build one compact technical chart per unique realized instrument.
+
+        Charts live in a separate payload map instead of being copied into every
+        realized-event row. This keeps the encrypted history small as the event
+        ledger grows over time. ``quote`` is cached per market/code, so current
+        holdings and realized rows reuse the same API result within an update.
+        """
+        rows = [dict(item) for item in events if isinstance(item, dict)]
+        warnings: list[str] = []
+        charts: dict[str, dict[str, Any]] = {}
+        for row in reversed(rows):
+            market = str(row.get("market") or "").upper()
+            code = str(row.get("code") or "").upper()
+            if not market or not code:
+                continue
+            identifier = f"{market}:{code}"
+            if identifier in charts:
+                continue
+            if len(charts) >= max_unique:
+                break
+            try:
+                _metadata, bars = self.quote(market, code)
+                charts[identifier] = {
+                    "market": market,
+                    "code": code,
+                    "name": str(row.get("name") or code),
+                    "currency": str(row.get("currency") or ("USD" if market == "US" else "KRW")),
+                    "chart_bars": technical_chart_series(bars),
+                }
+            except Exception as exc:
+                warnings.append(f"{market} {code} 차트 조회 실패: {exc}")
+        return charts, warnings
 
     def build_watchlist(self, previous: dict[str, Any] | None = None) -> dict[str, Any]:
         previous = previous if isinstance(previous, dict) else {}

@@ -23,11 +23,6 @@
     </nav>
 
     <section class="tab-view" id="watchlistView" role="tabpanel" aria-labelledby="watchlistTab">
-      <header class="section-heading watch-heading">
-        <div><p class="eyebrow">MARKET SIGNAL BOARD</p><h1>저평가 구간에서<br>추세가 살아있는 종목.</h1><p>미국 3배 ETF · 미국 시총 500조원 이상 · 한국 시총 100조원 이상을 같은 기준으로 비교합니다.</p></div>
-        <div class="update-card"><span>최근 계산</span><strong id="watchUpdatedAt">—</strong><small id="watchSource">데이터 준비 중</small></div>
-      </header>
-
       <section class="watch-summary" aria-label="관심종목 요약">
         <article><span>조건 충족</span><strong id="watchEligible">—</strong><small id="watchScanned">후보 —</small></article>
         <article><span>최하단 구간</span><strong id="watchBottomCount">—</strong><small>볼린저 채널 하위 20%</small></article>
@@ -41,7 +36,7 @@
 
       <section class="panel table-panel watch-table-panel">
         <div class="panel-heading filter-heading">
-          <div><p class="eyebrow">RANKING</p><h2>밴드 우선 · 점수순</h2></div>
+          <div><p class="eyebrow">RANKING</p><h2>밴드 우선 · 점수순</h2><p class="watch-sync-line">최근 계산 <strong id="watchUpdatedAt">—</strong> · <span id="watchSource">데이터 준비 중</span></p></div>
           <div class="filter-group" aria-label="관심종목 필터">
             <select id="watchMarketFilter" aria-label="시장 필터"><option value="ALL">전체 시장</option><option value="US">미국</option><option value="KR">한국</option><option value="ETF">3배 ETF</option></select>
             <select id="watchBandFilter" aria-label="볼린저 밴드 필터"><option value="ALL">전체 밴드</option><option value="최하단">최하단만</option><option value="하단">하단</option><option value="중단">중단</option><option value="상단">상단</option><option value="최상단">최상단</option></select>
@@ -113,6 +108,15 @@
       </div>
     </section>
   </main>
+
+  <div class="modal-backdrop is-hidden" id="technicalChartModal" role="presentation">
+    <section class="technical-chart-dialog" role="dialog" aria-modal="true" aria-labelledby="technicalChartTitle">
+      <button class="modal-close" id="closeTechnicalChartButton" type="button" aria-label="닫기">×</button>
+      <div class="technical-chart-heading"><div><p class="eyebrow">PRICE TECHNICAL CHART</p><h2 id="technicalChartTitle">종목 차트</h2><p id="technicalChartMeta">—</p></div><div class="technical-legend"><span class="legend-candle">캔들</span><span class="legend-bb">Bollinger 20·2</span><span class="legend-st">Supertrend 14·3</span></div></div>
+      <div class="technical-chart-host" id="technicalChartHost"></div>
+      <p class="chart-help">최근 120거래일 · 캔들 + Bollinger Band(20,2) + Supertrend(14,3)</p>
+    </section>
+  </div>
 
   <div class="modal-backdrop is-hidden" id="pinModal" role="presentation">
     <section class="pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
