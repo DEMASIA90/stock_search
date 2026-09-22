@@ -227,6 +227,32 @@ def holdings_for_web(holdings: Iterable[Holding]) -> list[dict[str, Any]]:
     )
 
 
+def combine_account_totals(
+    totals: dict[str, Any], asset_status: dict[str, Any],
+) -> dict[str, Any]:
+    """Overlay integrated account assets and guarantee deposit cash is included.
+
+    NH assetStatus ``tot_aet_amt`` is authoritative. If it is unavailable,
+    the fallback is evaluated securities plus ``dca`` (deposit cash / 예수금).
+    """
+    out = dict(totals)
+    asset_total = number(asset_status.get("total_asset_krw"))
+    asset_cash = number(asset_status.get("cash_krw"))
+    asset_evaluation = number(asset_status.get("evaluation_krw"))
+    for key, value in asset_status.items():
+        if key != "total_asset_krw" and value is not None:
+            out[key] = value
+    if asset_total > 0:
+        out["total_asset_krw"] = asset_total
+    elif asset_evaluation or asset_cash:
+        out["total_asset_krw"] = asset_evaluation + asset_cash
+    else:
+        out["total_asset_krw"] = number(out.get("evaluation_krw"))
+    out["cash_krw"] = asset_cash
+    out.setdefault("unrealized_pnl_krw", out.get("pnl_krw", 0))
+    return out
+
+
 def portfolio_totals(holdings: Iterable[dict[str, Any]], trades: Iterable[dict[str, Any]]) -> dict[str, Any]:
     positions = list(holdings)
     executions = list(trades)

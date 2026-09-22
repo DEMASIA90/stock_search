@@ -361,7 +361,7 @@ function realizedChartDay(item) {
   return tradeDay;
 }
 
-let selectedYieldRange = "6M";
+let selectedYieldRange = "1M";
 let selectedChartDay = null;
 
 function parseCompactDay(value) {
@@ -766,19 +766,27 @@ function renderMonthly(rows) {
 }
 
 function renderRealizedEvents(events) {
-  const rows = (Array.isArray(events) ? events : []).slice().reverse();
-  const visibleRows = rows.slice(0, 100).map((item) => {
+  const rows = (Array.isArray(events) ? events : []).slice().sort((a, b) => {
+    const dateOrder = String(b.date || "").localeCompare(String(a.date || ""));
+    if (dateOrder) return dateOrder;
+    return String(b.id || "").localeCompare(String(a.id || ""));
+  });
+  const visibleRows = rows.slice(0, 20).map((item) => {
     const key = `${String(item.market || "").toUpperCase()}:${String(item.code || "").toUpperCase()}`;
     const chart = portfolio?.technical_charts?.[key];
     return chart ? { ...item, chart_bars: chart.chart_bars, currency: item.currency || chart.currency } : item;
   });
-  setText("#realizedEventsCount", `${rows.length}건`);
-  $("#realizedEmpty").classList.toggle("is-hidden", rows.length > 0);
-  $("#realizedBody").innerHTML = visibleRows.map((item, index) => `<tr class="instrument-row clickable-row" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
-    <td data-label="일자">${dateText(item.date)}</td><td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.market)}</span></div></td>
-    <td data-label="섹터"><span class="sector-chip">${escapeHtml(item.sector || "기타")}</span></td><td data-label="매도수량" class="numeric">${qty.format(number(item.qty))}</td><td data-label="매도가" class="numeric">${money(item.sell_price, item.currency === "USD" ? "USD" : "KRW")}</td>
-    <td data-label="실현손익" class="numeric ${pnlClass(item.realized_pnl_krw)}"><strong>${moneyMaybe(item.realized_pnl_krw)}</strong></td><td data-label="수익률" class="numeric ${pnlClass(item.return_pct)}"><strong>${percent(item.return_pct)}</strong></td>
-  </tr>`).join("");
+  setText("#realizedEventsCount", `${visibleRows.length}건`);
+  $("#realizedEmpty").classList.toggle("is-hidden", visibleRows.length > 0);
+  $("#realizedBody").innerHTML = visibleRows.map((item, index) => {
+    const pnlText = moneyMaybe(item.realized_pnl_krw);
+    const rateText = item.return_pct === null || item.return_pct === undefined || item.return_pct === "" ? "—" : percent(item.return_pct);
+    return `<div class="realized-compact-row instrument-row clickable-row" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
+      <span class="realized-compact-date">${dateText(item.date)}</span>
+      <strong class="realized-compact-name">${escapeHtml(item.name || item.code)}</strong>
+      <span class="realized-compact-pnl ${pnlClass(item.realized_pnl_krw)}">${pnlText} <small>(${rateText})</small></span>
+    </div>`;
+  }).join("");
   attachRowChartHandlers("#realizedBody .instrument-row", visibleRows);
 }
 
@@ -794,7 +802,7 @@ function render(data) {
   setText("#totalAsset", money(totals.total_asset_krw || totals.evaluation_krw));
   setText("#realizedPnl", money(realized.cumulative_realized_krw));
   $("#realizedPnl").className = pnlClass(realized.cumulative_realized_krw);
-  setText("#realizedCount", `${realized.trade_count || 0}건 실현`);
+  setText("#realizedCount", `최근 1년 · ${realized.trade_count || 0}건 실현`);
   setText("#unrealizedPnl", money(totals.unrealized_pnl_krw ?? totals.pnl_krw));
   $("#unrealizedPnl").className = pnlClass(totals.unrealized_pnl_krw ?? totals.pnl_krw);
   setText("#unrealizedRate", percent(totals.unrealized_pnl_pct ?? totals.pnl_pct));
@@ -820,7 +828,8 @@ function render(data) {
   const pendingUs = number(realizedApi.us_pnl_unavailable_events);
   const usTrades = number(transactionApi.us_daily_trades);
   const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
-  setText("#diagnostics", `진단: 최근30일 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 자산 스냅샷 ${number(diagnostics.asset_snapshot_points)}p / 전체 이력 ${number(diagnostics.yield_history_points)}p`);
+  const queryDays = number(diagnostics.history_query_days || data.history_policy?.query_window_days || 1);
+  setText("#diagnostics", `진단: 조회 ${queryDays}일 · 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 최근 1년 지표 ${number(diagnostics.realized_metric_count)}건 · 자산 스냅샷 ${number(diagnostics.asset_snapshot_points)}p`);
 }
 
 async function loadEnvelope() {
@@ -837,7 +846,7 @@ $("#watchBandFilter").addEventListener("change", renderWatchlistRows);
 $("#yieldRangeSelector")?.querySelectorAll(".range-chip[data-range]").forEach((button) => {
   button.addEventListener("click", () => {
     if (!portfolio) return;
-    selectedYieldRange = button.dataset.range || "6M";
+    selectedYieldRange = button.dataset.range || "1M";
     selectedChartDay = null;
     renderYieldCharts();
   });

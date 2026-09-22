@@ -70,7 +70,7 @@ jobs:
       # Portfolio history is the critical hourly job. Run it before the watchlist so
       # a transient scanner error cannot prevent account/Yield Monitor accumulation.
       - name: Update encrypted portfolio history
-        run: python update_portfolio.py --non-interactive
+        run: python update_portfolio.py --non-interactive --history-days 1
 
       - name: Update market watch
         id: watchlist

@@ -9,6 +9,7 @@ from src.models import Holding
 from src.nh_client import NhReadOnlyClient, normalize_cash_flows
 from src.portfolio import (
     backfill_daily_realized_history,
+    combine_account_totals,
     decrypt_envelope,
     encrypt_payload,
     holdings_for_web,
@@ -542,6 +543,49 @@ class PortfolioTests(unittest.TestCase):
         )
         self.assertEqual(history[0]["snapshot_date"], "20260919")
         self.assertTrue(str(history[0]["at"]).endswith("+09:00"))
+
+    def test_total_asset_prefers_integrated_asset_status_and_keeps_cash(self) -> None:
+        base = {"evaluation_krw": 10_000_000, "pnl_krw": 500_000}
+        totals = combine_account_totals(base, {
+            "total_asset_krw": 12_500_000,
+            "evaluation_krw": 10_500_000,
+            "cash_krw": 2_000_000,
+            "unrealized_pnl_krw": 600_000,
+        })
+        self.assertEqual(totals["total_asset_krw"], 12_500_000)
+        self.assertEqual(totals["cash_krw"], 2_000_000)
+
+        fallback = combine_account_totals(base, {
+            "total_asset_krw": 0,
+            "evaluation_krw": 10_500_000,
+            "cash_krw": 2_000_000,
+        })
+        self.assertEqual(fallback["total_asset_krw"], 12_500_000)
+
+    def test_one_year_history_query_is_chunked(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "update_portfolio.py").read_text(encoding="utf-8")
+        self.assertIn("chunk_days: int = 30", source)
+        self.assertIn("cursor = chunk_end + timedelta(days=1)", source)
+        self.assertIn("history_days: int = 365", source)
+
+    def test_manual_bootstrap_and_scheduled_refresh_windows(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        workflow = (root / ".github" / "workflows" / "update-and-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("update_portfolio.py --non-interactive --history-days 1", workflow)
+        batch = (root / "publish_update.bat").read_text(encoding="ascii")
+        self.assertIn("update_portfolio.py --history-days 365", batch)
+
+    def test_yield_ui_defaults_to_one_month_and_compact_realized_rows(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        html = (root / "docs" / "index.html").read_text(encoding="utf-8")
+        app = (root / "docs" / "assets" / "app.mjs").read_text(encoding="utf-8")
+        self.assertIn('class="range-chip is-active" data-range="1M"', html)
+        self.assertIn('id="yieldRangeLabel">최근 1개월', html)
+        self.assertLess(html.index('id="holdingsBody"'), html.index('id="realizedBody"'))
+        self.assertIn('class="realized-compact-list" id="realizedBody"', html)
+        self.assertIn("rows.slice(0, 20)", app)
+        self.assertIn('let selectedYieldRange = "1M"', app)
 
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")

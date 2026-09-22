@@ -21,6 +21,7 @@ from src.config import (
 from src.nh_client import NhReadOnlyClient
 from src.portfolio import (
     backfill_daily_realized_history,
+    combine_account_totals,
     decrypt_envelope,
     encrypt_payload,
     holdings_for_web,
@@ -30,6 +31,7 @@ from src.portfolio import (
     number,
     portfolio_totals,
     realized_summary,
+    realized_account_date,
     reconcile_us_realized_events,
     sanitize_legacy_realized_events,
     update_snapshot_history,
@@ -186,15 +188,75 @@ def _previous_payload(password: str) -> dict[str, Any]:
         raise ValueError("현재 웹 비밀번호 또는 PIN이 맞지 않아 기존 데이터를 열 수 없습니다.") from exc
 
 
+def _merge_diagnostics(total: dict[str, Any], part: dict[str, Any]) -> None:
+    for key, value in (part or {}).items():
+        if isinstance(value, bool):
+            total[key] = bool(total.get(key)) or value
+        elif isinstance(value, (int, float)):
+            total[key] = number(total.get(key)) + number(value)
+        elif isinstance(value, list):
+            if value and not total.get(key):
+                total[key] = list(value)
+        elif value not in (None, ""):
+            total[key] = value
+
+
+def _query_history(
+    client: NhReadOnlyClient, account_no: str, start: datetime, end: datetime, *, chunk_days: int = 30,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any], dict[str, Any]]:
+    """Query history in bounded chunks so a one-year bootstrap is not truncated."""
+    all_trades: list[dict[str, Any]] = []
+    all_realized: list[dict[str, Any]] = []
+    all_flows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    trade_diagnostics: dict[str, Any] = {}
+    realized_diagnostics: dict[str, Any] = {}
+
+    cursor = start
+    while cursor.date() <= end.date():
+        chunk_end = min(cursor + timedelta(days=max(1, chunk_days) - 1), end)
+        trades, trade_warnings, trade_diag = client.transaction_history(
+            account_no, cursor.replace(tzinfo=None), chunk_end.replace(tzinfo=None)
+        )
+        realized, realized_warnings, realized_diag = client.realized_pnl_history(
+            account_no, cursor.replace(tzinfo=None), chunk_end.replace(tzinfo=None), trades=trades
+        )
+        flows, flow_warnings = client.cash_flow_history(
+            account_no, cursor.replace(tzinfo=None), chunk_end.replace(tzinfo=None)
+        )
+        all_trades = merge_persistent_events(all_trades, trades)
+        all_realized = reconcile_us_realized_events(
+            sanitize_legacy_realized_events(merge_persistent_events(all_realized, realized))
+        )
+        all_flows = merge_persistent_events(all_flows, flows)
+        warnings.extend(trade_warnings + realized_warnings + flow_warnings)
+        _merge_diagnostics(trade_diagnostics, trade_diag)
+        _merge_diagnostics(realized_diagnostics, realized_diag)
+        cursor = chunk_end + timedelta(days=1)
+
+    return all_trades, all_realized, all_flows, warnings, trade_diagnostics, realized_diagnostics
+
+
+def _within_recent_year(event: dict[str, Any], start_day: str, end_day: str) -> bool:
+    day = realized_account_date(event)
+    return len(day) == 8 and start_day <= day <= end_day
+
+
 def build_payload(
     client: NhReadOnlyClient,
     account_no: str,
     previous: dict[str, Any],
     app_key: str,
     app_secret: str,
+    *,
+    history_days: int = 365,
 ) -> dict[str, Any]:
     now = datetime.now(SEOUL_TZ)
-    start = now - timedelta(days=30)
+    history_days = max(1, int(history_days))
+    start = now - timedelta(days=history_days)
+    metric_start = now - timedelta(days=365)
+    metric_start_day = metric_start.strftime("%Y%m%d")
+    metric_end_day = now.strftime("%Y%m%d")
 
     print("[1/5] 현재 국내·미국 보유종목과 총자산을 조회합니다...")
     holdings, holding_warnings = client.all_holdings(account_no)
@@ -204,16 +266,15 @@ def build_payload(
         asset_status = {}
         holding_warnings.append(f"통합 자산현황 조회 실패: {exc}")
 
-    print("[2/5] 최근 1개월 매수·매도 및 실현손익을 조회합니다...")
-    trades, trade_warnings, trade_diagnostics = client.transaction_history(
-        account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
-    )
-    recent_realized, realized_warnings, realized_diagnostics = client.realized_pnl_history(
-        account_no, start.replace(tzinfo=None), now.replace(tzinfo=None), trades=trades
-    )
-    recent_flows, flow_warnings = client.cash_flow_history(
-        account_no, start.replace(tzinfo=None), now.replace(tzinfo=None)
-    )
+    query_label = "최근 1년" if history_days >= 365 else ("최근 1일" if history_days <= 1 else f"최근 {history_days}일")
+    print(f"[2/5] {query_label} 매수·매도 및 실현손익을 조회합니다...")
+    (
+        trades, recent_realized, recent_flows, history_warnings,
+        trade_diagnostics, realized_diagnostics,
+    ) = _query_history(client, account_no, start, now)
+    trade_warnings = history_warnings
+    realized_warnings: list[str] = []
+    flow_warnings: list[str] = []
 
     print("[3/5] 현재 보유종목의 기술지표를 계산합니다...")
     web_holdings = holdings_for_web(holdings)
@@ -248,15 +309,25 @@ def build_payload(
             "sector",
             holding_sectors.get((str(event.get("market")), str(event.get("code"))), "기타"),
         )
-    # Yield Monitor rows are clickable too. Attach the same compact candle /
-    # Bollinger / Supertrend data, reusing the analyzer's per-symbol cache.
-    technical_charts, realized_chart_warnings = analyzer.realized_chart_map(realized_events)
+    # Only the 20 latest realized rows are rendered. Limit technical-chart
+    # enrichment to that same set so a one-year bootstrap does not issue
+    # unnecessary quote-history requests for hundreds of old symbols.
+    realized_for_chart = sorted(
+        realized_events, key=lambda item: (str(item.get("date", "")), str(item.get("id", "")))
+    )[-20:]
+    technical_charts, realized_chart_warnings = analyzer.realized_chart_map(realized_for_chart)
 
     totals = portfolio_totals(web_holdings, trades)
-    totals.update({key: value for key, value in asset_status.items() if number(value) != 0})
-    totals.setdefault("total_asset_krw", totals["evaluation_krw"])
-    totals.setdefault("unrealized_pnl_krw", totals["pnl_krw"])
-    realized = realized_summary(realized_events)
+    # NH assetStatus.tot_aet_amt is the integrated account total. It includes
+    # deposit cash (dca / 예수금), domestic holdings and overseas holdings.
+    # If the aggregate is unavailable, use evaluated securities + deposit cash.
+    totals = combine_account_totals(totals, asset_status)
+
+    metric_realized_events = [
+        item for item in realized_events
+        if _within_recent_year(item, metric_start_day, metric_end_day)
+    ]
+    realized = realized_summary(metric_realized_events)
     old_yield_history = previous.get("yield_history", [])
     if not old_yield_history and isinstance(previous.get("history"), list):
         old_yield_history = [
@@ -273,9 +344,9 @@ def build_payload(
         ]
     yield_history_base = backfill_daily_realized_history(
         old_yield_history if isinstance(old_yield_history, list) else [],
-        realized_events=realized_events,
+        realized_events=metric_realized_events,
         cash_flows=cash_flows,
-        start_date=start.date(),
+        start_date=metric_start.date(),
         end_date=now.date(),
     )
     yield_history = update_yield_history(
@@ -289,7 +360,7 @@ def build_payload(
     history = update_snapshot_history(
         old_history if isinstance(old_history, list) else [], totals, now
     )
-    monthly = monthly_realized_performance(realized_events, yield_history)
+    monthly = monthly_realized_performance(metric_realized_events, yield_history)
     recent_market_counts = {
         "KR": sum(1 for item in recent_realized if item.get("market") == "KR"),
         "US": sum(1 for item in recent_realized if item.get("market") == "US"),
@@ -314,10 +385,14 @@ def build_payload(
             1 for item in yield_history if item.get("kind") == "realized_daily"
         ),
         "realized_api": realized_diagnostics,
+        "history_query_days": history_days,
+        "realized_metric_window_days": 365,
+        "realized_metric_count": len(metric_realized_events),
+        "cash_included_in_total_asset": True,
     }
     print("[4/5] 누적 이력과 월별 수익 통계를 갱신합니다...")
     print(
-        "      진단: 최근30일 실현 국내 "
+        f"      진단: 조회기간({history_days}일) 실현 국내 "
         f"{recent_market_counts['KR']}건 / 미국 {recent_market_counts['US']}건 | "
         f"미국 거래 {trade_diagnostics.get('us_daily_trades', 0)}건 / "
         f"SELL {trade_diagnostics.get('us_daily_sell_trades', 0)}건 | "
@@ -339,10 +414,18 @@ def build_payload(
         if fields:
             print("      미국 detail 필드: " + ", ".join(str(item) for item in fields))
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "updated_at": now.isoformat(timespec="seconds"),
         "period": {"start": start.strftime("%Y-%m-%d"), "end": now.strftime("%Y-%m-%d")},
-        "history_policy": {"query_window_days": 30, "yield_history_limit": 43800, "event_limit": 20000, "timezone": "Asia/Seoul"},
+        "history_policy": {
+            "query_window_days": history_days,
+            "manual_bootstrap_days": 365,
+            "scheduled_refresh_days": 1,
+            "realized_metric_window_days": 365,
+            "yield_history_limit": 43800,
+            "event_limit": 20000,
+            "timezone": "Asia/Seoul",
+        },
         "recording_started_at": previous.get("recording_started_at") or now.isoformat(timespec="seconds"),
         "account": {
             "masked": mask_account(account_no),
@@ -373,7 +456,14 @@ def main() -> int:
     parser.add_argument("--configure", action="store_true", help="조회 환경과 계좌를 다시 선택")
     parser.add_argument("--change-password", action="store_true", help="포트폴리오 4자리 PIN 변경")
     parser.add_argument("--non-interactive", action="store_true", help="GitHub Actions 자동 업데이트 모드")
+    parser.add_argument(
+        "--history-days", type=int, default=None,
+        help="거래/실현손익 재조회 기간(일). 기본: 수동 365일, 자동 1일",
+    )
     args = parser.parse_args()
+    history_days = args.history_days if args.history_days is not None else (1 if args.non_interactive else 365)
+    if history_days < 1 or history_days > 3650:
+        parser.error("--history-days는 1~3650 범위여야 합니다.")
 
     try:
         app_key, app_secret = _credentials(args.non_interactive)
@@ -388,7 +478,7 @@ def main() -> int:
             f"선택 계좌: {mask_account(account_no)} / "
             f"{'실계좌' if environment == 'live' else '모의투자'}"
         )
-        payload = build_payload(client, account_no, previous, app_key, app_secret)
+        payload = build_payload(client, account_no, previous, app_key, app_secret, history_days=history_days)
         print("[5/5] 브라우저에서만 열 수 있도록 데이터를 암호화합니다...")
         envelope = encrypt_payload(payload, new_password)
         _atomic_json(ENCRYPTED_DATA_FILE, envelope)

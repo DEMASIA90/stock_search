@@ -373,3 +373,32 @@ footer { padding: 16px 0 0; color: #557086; font-size: 11px; text-align: center;
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
+
+/* Compact recent-realized list: date · instrument · P/L(return), max 20 rows. */
+.realized-compact-panel { margin-top: 16px; margin-bottom: 16px; }
+.realized-compact-list { display: grid; }
+.realized-compact-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 44px;
+  padding: 10px 4px;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+.realized-compact-row:first-child { border-top: 0; }
+.realized-compact-row:hover,
+.realized-compact-row:focus { background: rgba(105, 159, 200, .05); outline: 0; }
+.realized-compact-date { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.realized-compact-name { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.realized-compact-pnl { font-size: 12px; font-weight: 700; text-align: right; white-space: nowrap; }
+.realized-compact-pnl small { font-size: 10px; font-weight: 600; }
+
+@media (max-width: 720px) {
+  .realized-compact-row { grid-template-columns: 78px minmax(0, 1fr) auto; gap: 8px; min-height: 42px; }
+  .realized-compact-date { font-size: 9px; }
+  .realized-compact-name { font-size: 10px; }
+  .realized-compact-pnl { font-size: 10px; }
+  .realized-compact-pnl small { font-size: 9px; }
+}

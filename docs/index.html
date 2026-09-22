@@ -60,15 +60,15 @@
         <section class="monitor-section section-a" aria-labelledby="sectionATitle">
           <div class="section-label"><span>A</span><div><p class="eyebrow">ASSET & REALIZED YIELD</p><h2 id="sectionATitle">총자산과 누적 실현손익</h2></div></div>
           <div class="summary-grid yield-summary">
-            <article class="metric hero-metric"><span>총자산</span><strong id="totalAsset">—</strong><small>현금·국내·해외자산 포함</small></article>
+            <article class="metric hero-metric"><span>총자산</span><strong id="totalAsset">—</strong><small>예수금·국내·해외자산 포함</small></article>
             <article class="metric"><span>누적 실현손익</span><strong id="realizedPnl">—</strong><small id="realizedCount">—</small></article>
             <article class="metric"><span>현재 평가손익</span><strong id="unrealizedPnl">—</strong><small id="unrealizedRate">—</small></article>
             <article class="metric"><span>누적 순입출금</span><strong id="netCashFlow">—</strong><small>수익률 계산과 분리</small></article>
           </div>
           <div class="panel chart-overview-panel">
-            <div class="panel-heading chart-toolbar"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산과 실현수익 추이</h2><p class="chart-range-label" id="yieldRangeLabel">최근 6개월</p></div><div class="toolbar-right"><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized-bar">일별 실현수익</span></div><div class="range-selector" id="yieldRangeSelector" role="tablist" aria-label="수익 모니터 기간 선택"><button class="range-chip" data-range="1M" type="button">1M</button><button class="range-chip" data-range="3M" type="button">3M</button><button class="range-chip is-active" data-range="6M" type="button">6M</button><button class="range-chip" data-range="1Y" type="button">1Y</button><button class="range-chip" data-range="ALL" type="button">전체</button></div></div></div>
+            <div class="panel-heading chart-toolbar"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산과 실현수익 추이</h2><p class="chart-range-label" id="yieldRangeLabel">최근 1개월</p></div><div class="toolbar-right"><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized-bar">일별 실현수익</span></div><div class="range-selector" id="yieldRangeSelector" role="tablist" aria-label="수익 모니터 기간 선택"><button class="range-chip is-active" data-range="1M" type="button">1M</button><button class="range-chip" data-range="3M" type="button">3M</button><button class="range-chip" data-range="6M" type="button">6M</button><button class="range-chip" data-range="1Y" type="button">1Y</button><button class="range-chip" data-range="ALL" type="button">전체</button></div></div></div>
             <div class="dual-chart-grid">
-              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span>기본 6개월 · 더 긴 기간 선택 가능</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">점 클릭 시 해당 날짜의 자산과 거래 상세가 표시됩니다.</p></article>
+              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span>기본 1개월 · 더 긴 기간 선택 가능</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">점 클릭 시 해당 날짜의 자산과 거래 상세가 표시됩니다.</p></article>
               <article class="chart-card"><div class="chart-card-head"><h3>실현수익</h3><span>일별 합산 막대 그래프</span></div><div class="line-chart interactive-chart realized-chart" id="realizedChart" aria-label="실현수익 막대 그래프"></div><p class="chart-help">막대 클릭 시 해당 날짜의 실현 거래와 입출금 내역을 볼 수 있습니다.</p></article>
             </div>
           </div>
@@ -87,6 +87,11 @@
             <div class="table-wrap wide-table"><table><thead><tr><th>종목</th><th>섹터</th><th class="numeric">평가금액</th><th class="numeric">평가손익</th><th class="numeric">수익률</th><th>A · Bollinger</th><th>B · ST 14·3</th><th>C · 60일선</th><th>C · 200일선</th></tr></thead><tbody id="holdingsBody"></tbody></table></div>
             <div class="empty is-hidden" id="holdingsEmpty">현재 보유종목이 없습니다.</div>
           </section>
+          <section class="panel realized-compact-panel">
+            <div class="panel-heading"><div><p class="eyebrow">REALIZED EVENTS</p><h2>최근 실현 종목</h2></div><span id="realizedEventsCount">0건</span></div>
+            <div class="realized-compact-list" id="realizedBody"></div>
+            <div class="empty is-hidden" id="realizedEmpty">최근 1년 내 실현된 매도내역이 없습니다.</div>
+          </section>
         </section>
 
         <section class="monitor-section section-c" aria-labelledby="sectionCTitle">
@@ -96,11 +101,6 @@
             <article class="panel monthly-panel"><div class="panel-heading"><div><p class="eyebrow">MONTHLY REALIZED</p><h2>월별 실현수익률</h2></div></div><div class="monthly-chart" id="monthlyChart"></div></article>
             <article class="panel trade-stat-panel"><div class="panel-heading"><div><p class="eyebrow">EXIT QUALITY</p><h2>익절·손절 통계</h2></div></div><div class="trade-stats"><div><span>승률</span><strong id="winRate">—</strong></div><div><span>평균 익절</span><strong class="positive" id="avgTakeProfit">—</strong></div><div><span>평균 손절</span><strong class="negative" id="avgStopLoss">—</strong></div><div><span>실현 매도</span><strong id="exitCount">—</strong></div></div></article>
           </div>
-          <section class="panel table-panel realized-table-panel">
-            <div class="panel-heading"><div><p class="eyebrow">REALIZED EVENTS</p><h2>최근 실현 종목</h2></div><span id="realizedEventsCount">0건</span></div>
-            <div class="table-wrap"><table><thead><tr><th>일자</th><th>종목</th><th>섹터</th><th class="numeric">매도수량</th><th class="numeric">매도가</th><th class="numeric">실현손익</th><th class="numeric">수익률</th></tr></thead><tbody id="realizedBody"></tbody></table></div>
-            <div class="empty is-hidden" id="realizedEmpty">서버 기록 이후 실현된 매도내역이 없습니다.</div>
-          </section>
         </section>
 
         <section class="notice is-hidden" id="warningPanel"><strong>조회 참고사항</strong><ul id="warnings"></ul></section>

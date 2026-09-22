@@ -859,7 +859,7 @@ class NhReadOnlyClient:
         elif not overseas and not common_us:
             suffix = f" (API 메시지: {diagnostics['us_daily_rsp_msg']})" if diagnostics.get("us_daily_rsp_msg") else ""
             warnings.append(
-                "해외주식 일별거래내역과 종합거래내역에서 최근 30일 미국 체결을 0건으로 받았습니다. "
+                "해외주식 일별거래내역과 종합거래내역에서 조회기간 미국 체결을 0건으로 받았습니다. "
                 f"실제 거래가 있었다면 dailyTransaction 조회조건/응답을 확인하세요.{suffix}"
             )
 
