@@ -212,9 +212,12 @@ footer { padding: 16px 0 0; color: #557086; font-size: 11px; text-align: center;
 .chart-legends { display: flex; gap: 14px; color: var(--muted); font-size: 10px; }
 .legend-dot.asset::before { background: var(--mint); }
 .legend-dot.realized-bar::before { border-radius: 3px; background: var(--violet); }
-.range-selector { display: flex; gap: 8px; flex-wrap: wrap; }
-.range-chip { min-height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; color: #9fb4c8; background: rgba(7, 20, 33, .55); font-size: 11px; font-weight: 700; }
-.range-chip.is-active, .range-chip:hover { color: #071b17; background: var(--mint); border-color: rgba(82, 224, 186, .35); }
+.week-slider-wrap { width: min(330px, 42vw); min-width: 245px; padding: 9px 12px 7px; border: 1px solid var(--line); border-radius: 13px; background: rgba(7, 20, 33, .48); }
+.week-slider-copy, .week-slider-scale { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.week-slider-copy span, .week-slider-scale { color: var(--muted); font-size: 9px; }
+.week-slider-copy strong { color: var(--mint); font-size: 11px; }
+.week-slider-wrap input[type="range"] { width: 100%; height: 20px; margin: 3px 0 0; accent-color: var(--mint); cursor: pointer; }
+.week-slider-scale { margin-top: -1px; }
 .dual-chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .chart-card { padding: 18px 18px 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(4, 15, 26, .3); }
 .chart-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
@@ -326,8 +329,7 @@ footer { padding: 16px 0 0; color: #557086; font-size: 11px; text-align: center;
   .section-heading { align-items: flex-start; flex-direction: column; padding: 28px 23px; }.update-card { width: 100%; flex-basis: auto; }
   .watch-summary { grid-template-columns: 1fr; }.score-items { grid-template-columns: 1fr; }.filter-heading { align-items: flex-start; flex-direction: column; }.filter-group { width: 100%; }.filter-group select { min-width: 0; flex: 1; }
   .toolbar-right { align-items: flex-start; justify-content: flex-start; }
-  .range-selector { width: 100%; }
-  .range-chip { flex: 1; justify-content: center; }
+  .week-slider-wrap { width: 100%; min-width: 0; }
   .selected-metrics.triple { grid-template-columns: 1fr; }
   .watchlist-hero { min-height: 300px; align-items: flex-start; flex-direction: column; padding: 30px 24px; }
   .coming-badge { order: -1; }.watchlist-grid { grid-template-columns: 1fr; }.preview-card:last-child { grid-column: auto; }

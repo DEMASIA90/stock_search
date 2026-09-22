@@ -361,7 +361,7 @@ function realizedChartDay(item) {
   return tradeDay;
 }
 
-let selectedYieldRange = "1M";
+let selectedYieldWeeks = 4;
 let selectedChartDay = null;
 
 function parseCompactDay(value) {
@@ -417,11 +417,13 @@ function buildChartData() {
     const fallback = parseCompactDay(day);
     const atMs = !Number.isNaN(parsed.getTime()) ? parsed.getTime() : (fallback ? fallback.getTime() : 0);
     const point = { day, at: row.at, at_ms: atMs, total_asset_krw: Number(rawAsset) };
-    assetPoints.push(point);
     const current = latestAssetByDay.get(day);
     if (!current || point.at_ms >= current.at_ms) latestAssetByDay.set(day, point);
   });
-  assetPoints.sort((a, b) => a.at_ms - b.at_ms || a.day.localeCompare(b.day));
+  // One chart point per calendar day. Older builds stored one point per hourly
+  // GitHub run; collapse them here immediately even before the backend compacts
+  // the encrypted history on the next update.
+  assetPoints.push(...[...latestAssetByDay.values()].sort((a, b) => a.day.localeCompare(b.day)));
 
   (portfolio?.realized_events || []).forEach((item) => {
     const day = realizedChartDay(item);
@@ -478,19 +480,11 @@ function getRangeBounds(data) {
   const fallbackEnd = new Date();
   const end = validDays.length ? parseCompactDay(validDays.at(-1)) : fallbackEnd;
   end.setHours(23, 59, 59, 999);
-  let start;
-  if (selectedYieldRange === "ALL") {
-    start = validDays.length ? parseCompactDay(validDays[0]) : new Date(end);
-  } else {
-    start = new Date(end);
-    if (selectedYieldRange === "1M") start.setMonth(start.getMonth() - 1);
-    else if (selectedYieldRange === "3M") start.setMonth(start.getMonth() - 3);
-    else if (selectedYieldRange === "6M") start.setMonth(start.getMonth() - 6);
-    else if (selectedYieldRange === "1Y") start.setFullYear(start.getFullYear() - 1);
-  }
+  const weeks = Math.max(1, Math.min(156, Number(selectedYieldWeeks) || 4));
+  const start = new Date(end);
+  start.setDate(start.getDate() - (weeks * 7 - 1));
   start.setHours(0, 0, 0, 0);
-  if (start.getTime() >= end.getTime()) start.setDate(start.getDate() - 1);
-  return { start, end, startDay: toDayKey(start), endDay: toDayKey(end) };
+  return { start, end, startDay: toDayKey(start), endDay: toDayKey(end), weeks };
 }
 
 function inRange(day, bounds) {
@@ -707,13 +701,19 @@ function renderRealizedChart(data, bounds) {
 function renderYieldCharts() {
   const data = buildChartData();
   const bounds = getRangeBounds(data);
-  const labels = { "1M": "최근 1개월", "3M": "최근 3개월", "6M": "최근 6개월", "1Y": "최근 1년", "ALL": "전체 기록" };
-  setText("#yieldRangeLabel", `${labels[selectedYieldRange]} · ${dayLabel(bounds.startDay)} ~ ${dayLabel(bounds.endDay)}`);
-  $("#yieldRangeSelector")?.querySelectorAll(".range-chip").forEach((node) => {
-    const active = node.dataset.range === selectedYieldRange;
-    node.classList.toggle("is-active", active);
-    node.setAttribute("aria-pressed", String(active));
-  });
+  const weeksText = bounds.weeks === 156 ? "3년" : `${bounds.weeks}주`;
+  setText("#yieldWeekValue", weeksText);
+  setText("#yieldRangeLabel", `최근 ${weeksText} · ${dayLabel(bounds.startDay)} ~ ${dayLabel(bounds.endDay)}`);
+  const slider = $("#yieldWeekSlider");
+  if (slider) slider.value = String(bounds.weeks);
+
+  if (data.assetPoints.length) {
+    const first = data.assetPoints[0].day;
+    const last = data.assetPoints.at(-1).day;
+    setText("#assetCoverageLabel", `실제 총자산 기록 ${dayLabel(first)} ~ ${dayLabel(last)} · ${data.assetPoints.length}일`);
+  } else {
+    setText("#assetCoverageLabel", "실제 저장된 총자산 기록 없음");
+  }
 
   renderAssetChart(data, bounds);
   renderRealizedChart(data, bounds);
@@ -843,13 +843,12 @@ $("#watchlistTab").addEventListener("click", () => { closePinModal(); activateTa
 $("#portfolioTab").addEventListener("click", () => { activateTab("portfolio"); if (!portfolio) openPinModal(); });
 $("#watchMarketFilter").addEventListener("change", renderWatchlistRows);
 $("#watchBandFilter").addEventListener("change", renderWatchlistRows);
-$("#yieldRangeSelector")?.querySelectorAll(".range-chip[data-range]").forEach((button) => {
-  button.addEventListener("click", () => {
-    if (!portfolio) return;
-    selectedYieldRange = button.dataset.range || "1M";
-    selectedChartDay = null;
-    renderYieldCharts();
-  });
+$("#yieldWeekSlider")?.addEventListener("input", (event) => {
+  selectedYieldWeeks = Math.max(1, Math.min(156, Number(event.target.value) || 4));
+  setText("#yieldWeekValue", selectedYieldWeeks === 156 ? "3년" : `${selectedYieldWeeks}주`);
+  if (!portfolio) return;
+  selectedChartDay = null;
+  renderYieldCharts();
 });
 $("#closeTechnicalChartButton")?.addEventListener("click", closeTechnicalChart);
 $("#technicalChartModal")?.addEventListener("click", (event) => { if (event.target === $("#technicalChartModal")) closeTechnicalChart(); });

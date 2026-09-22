@@ -315,10 +315,33 @@ def build_payload(
     technical_charts, realized_chart_warnings = analyzer.realized_chart_map(realized_for_chart)
 
     totals = portfolio_totals(web_holdings, trades)
-    # NH assetStatus.tot_aet_amt is the integrated account total. It includes
-    # deposit cash (dca / 예수금), domestic holdings and overseas holdings.
-    # If the aggregate is unavailable, use evaluated securities + deposit cash.
+    # Query the live integrated asset total on every run. Keep the direct NH
+    # total as primary, but independently reconstruct holdings + deposit cash so
+    # a suspicious total can be detected in diagnostics instead of silently used.
     totals = combine_account_totals(totals, asset_status)
+    asset_warnings: list[str] = []
+    direct_total = number(totals.get("asset_status_total_krw"))
+    reconstructed_total = number(totals.get("reconstructed_total_asset_krw"))
+    total_gap = totals.get("total_asset_gap_krw")
+    if direct_total <= 0:
+        asset_warnings.append(
+            f"NH 통합 총자산(tot_aet_amt)이 0/미수신이라 {totals.get('total_asset_source')} 방식으로 계산했습니다."
+        )
+    elif reconstructed_total > 0 and total_gap is not None:
+        gap_abs = abs(number(total_gap))
+        gap_ratio = gap_abs / max(direct_total, reconstructed_total, 1.0)
+        if gap_abs >= 100_000 and gap_ratio >= 0.03:
+            asset_warnings.append(
+                "총자산 검증 차이가 큽니다: NH 통합 총자산과 보유평가+예수금 재구성값을 확인하세요."
+            )
+    print(
+        "      총자산 검증: "
+        f"NH통합 {direct_total:,.0f}원 | "
+        f"보유평가 {number(totals.get('holdings_evaluation_krw')):,.0f}원 + "
+        f"예수금 {number(totals.get('cash_krw')):,.0f}원 = {reconstructed_total:,.0f}원 | "
+        f"사용값 {number(totals.get('total_asset_krw')):,.0f}원 "
+        f"({totals.get('total_asset_source')})"
+    )
 
     metric_realized_events = [
         item for item in realized_events
@@ -386,6 +409,16 @@ def build_payload(
         "realized_metric_window_days": 365,
         "realized_metric_count": len(metric_realized_events),
         "cash_included_in_total_asset": True,
+        "asset_verification": {
+            "source": totals.get("total_asset_source"),
+            "used_total_krw": number(totals.get("total_asset_krw")),
+            "nh_integrated_total_krw": direct_total,
+            "holdings_evaluation_krw": number(totals.get("holdings_evaluation_krw")),
+            "deposit_cash_krw": number(totals.get("cash_krw")),
+            "reconstructed_total_krw": reconstructed_total,
+            "gap_krw": total_gap,
+        },
+        "asset_chart_granularity": "daily_latest",
     }
     print("[4/5] 누적 이력과 월별 수익 통계를 갱신합니다...")
     print(
@@ -441,7 +474,7 @@ def build_payload(
         "history": history,
         "diagnostics": diagnostics,
         "warnings": (
-            holding_warnings + trade_warnings + realized_warnings
+            holding_warnings + asset_warnings + trade_warnings + realized_warnings
             + flow_warnings + indicator_warnings + realized_chart_warnings
         )[:50],
         "source": "NH투자증권 Namuh PLUG (조회 전용)",

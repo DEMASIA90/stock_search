@@ -10,6 +10,7 @@ from src.nh_client import NhReadOnlyClient, normalize_cash_flows
 from src.portfolio import (
     backfill_daily_realized_history,
     combine_account_totals,
+    compact_yield_history_daily,
     decrypt_envelope,
     encrypt_payload,
     holdings_for_web,
@@ -576,16 +577,31 @@ class PortfolioTests(unittest.TestCase):
         batch = (root / "publish_update.bat").read_text(encoding="ascii")
         self.assertIn("update_portfolio.py --history-days 365", batch)
 
-    def test_yield_ui_defaults_to_one_month_and_compact_realized_rows(self) -> None:
+    def test_yield_ui_uses_week_slider_and_compact_realized_rows(self) -> None:
         root = Path(__file__).resolve().parent.parent
         html = (root / "docs" / "index.html").read_text(encoding="utf-8")
         app = (root / "docs" / "assets" / "app.mjs").read_text(encoding="utf-8")
-        self.assertIn('class="range-chip is-active" data-range="1M"', html)
-        self.assertIn('id="yieldRangeLabel">최근 1개월', html)
+        self.assertIn('id="yieldWeekSlider"', html)
+        self.assertIn('min="1" max="156" step="1" value="4"', html)
+        self.assertIn('id="yieldRangeLabel">최근 4주', html)
         self.assertLess(html.index('id="holdingsBody"'), html.index('id="realizedBody"'))
         self.assertIn('class="realized-compact-list" id="realizedBody"', html)
         self.assertIn("rows.slice(0, 20)", app)
-        self.assertIn('let selectedYieldRange = "1M"', app)
+        self.assertIn('let selectedYieldWeeks = 4', app)
+
+    def test_yield_history_compacts_hourly_asset_snapshots_to_one_per_day(self) -> None:
+        rows = [
+            {"at": "2026-09-20T09:17:00+09:00", "snapshot_date": "20260920", "total_asset_krw": 100, "asset_recorded": True, "kind": "asset_snapshot"},
+            {"at": "2026-09-20T18:17:00+09:00", "snapshot_date": "20260920", "total_asset_krw": 120, "asset_recorded": True, "kind": "asset_snapshot"},
+            {"at": "2026-09-20T23:59:00+09:00", "snapshot_date": "20260920", "total_asset_krw": None, "asset_recorded": False, "kind": "realized_daily"},
+            {"at": "2026-09-21T09:17:00+09:00", "snapshot_date": "20260921", "total_asset_krw": 130, "asset_recorded": True, "kind": "asset_snapshot"},
+        ]
+        compacted = compact_yield_history_daily(rows)
+        assets = [row for row in compacted if row.get("asset_recorded") is not False and row.get("kind") != "realized_daily"]
+        self.assertEqual(len(assets), 2)
+        self.assertEqual(assets[0]["total_asset_krw"], 120)
+        self.assertEqual(assets[1]["total_asset_krw"], 130)
+        self.assertEqual(sum(1 for row in compacted if row.get("kind") == "realized_daily"), 1)
 
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")
@@ -650,7 +666,7 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn("Yield Monitor", html)
         self.assertIn('id="assetChart"', html)
         self.assertIn('id="realizedChart"', html)
-        self.assertIn('id="yieldRangeSelector"', html)
+        self.assertIn('id="yieldWeekSlider"', html)
         self.assertIn('id="yieldRangeLabel"', html)
         self.assertIn('id="monthlyChart"', html)
         self.assertIn('id="diagnostics"', html)

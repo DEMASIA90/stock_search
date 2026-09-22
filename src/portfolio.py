@@ -238,23 +238,43 @@ def combine_account_totals(
 ) -> dict[str, Any]:
     """Overlay integrated account assets and guarantee deposit cash is included.
 
-    NH assetStatus ``tot_aet_amt`` is authoritative. If it is unavailable,
-    the fallback is evaluated securities plus ``dca`` (deposit cash / 예수금).
+    The live integrated ``assetStatus`` total is kept as the primary current
+    account value.  We also retain an independent ``holdings + deposit cash``
+    reconstruction so every update can diagnose a suspicious gap instead of
+    silently hiding it.
     """
     out = dict(totals)
+    holdings_evaluation = number(totals.get("evaluation_krw"))
     asset_total = number(asset_status.get("total_asset_krw"))
     asset_cash = number(asset_status.get("cash_krw"))
     asset_evaluation = number(asset_status.get("evaluation_krw"))
+    reconstructed = holdings_evaluation + asset_cash
+
     for key, value in asset_status.items():
         if key != "total_asset_krw" and value is not None:
             out[key] = value
+
     if asset_total > 0:
-        out["total_asset_krw"] = asset_total
+        final_total = asset_total
+        source = "assetStatus.tot_aet_amt"
     elif asset_evaluation or asset_cash:
-        out["total_asset_krw"] = asset_evaluation + asset_cash
+        final_total = asset_evaluation + asset_cash
+        source = "assetStatus_evaluation_plus_cash"
+    elif reconstructed > 0:
+        final_total = reconstructed
+        source = "holdings_evaluation_plus_cash"
     else:
-        out["total_asset_krw"] = number(out.get("evaluation_krw"))
+        final_total = holdings_evaluation
+        source = "holdings_evaluation_only"
+
+    out["total_asset_krw"] = final_total
     out["cash_krw"] = asset_cash
+    out["holdings_evaluation_krw"] = holdings_evaluation
+    out["asset_status_total_krw"] = asset_total
+    out["asset_status_evaluation_krw"] = asset_evaluation
+    out["reconstructed_total_asset_krw"] = reconstructed
+    out["total_asset_gap_krw"] = asset_total - reconstructed if asset_total > 0 and reconstructed > 0 else None
+    out["total_asset_source"] = source
     out.setdefault("unrealized_pnl_krw", out.get("pnl_krw", 0))
     return out
 
@@ -288,6 +308,48 @@ def portfolio_totals(holdings: Iterable[dict[str, Any]], trades: Iterable[dict[s
     }
 
 
+def _history_day_key(item: dict[str, Any]) -> str:
+    explicit = "".join(ch for ch in str(item.get("snapshot_date") or "") if ch.isdigit())[:8]
+    if len(explicit) == 8:
+        return explicit
+    return "".join(ch for ch in str(item.get("at") or "")[:10] if ch.isdigit())[:8]
+
+
+def compact_yield_history_daily(history: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the latest real asset snapshot per Seoul calendar day.
+
+    Older builds stored one asset point per hourly GitHub run.  Realized-only
+    synthetic points are preserved separately because they carry historical P/L
+    but intentionally do not invent a historical account asset value.
+    """
+    latest_asset: dict[str, dict[str, Any]] = {}
+    realized_daily: dict[str, dict[str, Any]] = {}
+    others: list[dict[str, Any]] = []
+    for raw in history:
+        if not isinstance(raw, dict) or not raw.get("at"):
+            continue
+        item = dict(raw)
+        day = _history_day_key(item)
+        if item.get("kind") == "realized_daily" or item.get("asset_recorded") is False:
+            if day:
+                current = realized_daily.get(day)
+                if current is None or str(item.get("at", "")) >= str(current.get("at", "")):
+                    realized_daily[day] = item
+            else:
+                others.append(item)
+            continue
+        has_asset = item.get("total_asset_krw") not in (None, "")
+        if has_asset and day:
+            current = latest_asset.get(day)
+            if current is None or str(item.get("at", "")) >= str(current.get("at", "")):
+                latest_asset[day] = item
+        else:
+            others.append(item)
+    out = others + list(realized_daily.values()) + list(latest_asset.values())
+    out.sort(key=lambda item: str(item.get("at", "")))
+    return out
+
+
 def update_snapshot_history(
     history: Iterable[dict[str, Any]], totals: dict[str, Any], at: datetime | None = None,
     limit: int = 43_800,
@@ -303,10 +365,10 @@ def update_snapshot_history(
         "us_krw": number(totals.get("us_krw")),
     }
     out = [dict(item) for item in history if isinstance(item, dict) and item.get("at")]
-    if out and str(out[-1].get("at", ""))[:16] == stamp[:16]:
-        out[-1] = point
-    else:
-        out.append(point)
+    day_key = now.strftime("%Y%m%d")
+    out = [item for item in out if _history_day_key(item) != day_key]
+    out.append(point)
+    out.sort(key=lambda item: str(item.get("at", "")))
     return out[-max(1, limit):]
 
 
@@ -568,11 +630,20 @@ def update_yield_history(
         "asset_recorded": True,
         "kind": "asset_snapshot",
     }
-    out = [dict(item) for item in history if isinstance(item, dict) and item.get("at")]
-    if out and str(out[-1].get("at", ""))[:13] == stamp[:13]:
-        out[-1] = point
-    else:
-        out.append(point)
+    out = compact_yield_history_daily(history)
+    day_key = now.strftime("%Y%m%d")
+    # One real total-asset observation per day. Each hourly run refreshes today
+    # in-place; it does not add another visual/chart point.
+    out = [
+        item for item in out
+        if not (
+            _history_day_key(item) == day_key
+            and item.get("asset_recorded") is not False
+            and item.get("kind") != "realized_daily"
+        )
+    ]
+    out.append(point)
+    out.sort(key=lambda item: str(item.get("at", "")))
     return out[-max(1, limit):]
 
 
@@ -649,7 +720,7 @@ def backfill_daily_realized_history(
         })
         day += timedelta(days=1)
 
-    kept.sort(key=lambda item: str(item.get("at", "")))
+    kept = compact_yield_history_daily(kept)
     return kept[-max(1, limit):]
 
 
