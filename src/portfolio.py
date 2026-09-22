@@ -257,12 +257,20 @@ def combine_account_totals(
     if asset_total > 0:
         final_total = asset_total
         source = "assetStatus.tot_aet_amt"
-    elif asset_evaluation or asset_cash:
+    elif asset_evaluation > 0:
+        # If NH returns a usable integrated evaluation but not tot_aet_amt,
+        # rebuild from that evaluation plus deposit cash.
         final_total = asset_evaluation + asset_cash
         source = "assetStatus_evaluation_plus_cash"
-    elif reconstructed > 0:
+    elif holdings_evaluation > 0:
+        # Some live assetStatus responses expose deposit cash correctly while
+        # both tot_aet_amt and integrated evaluation are zero. Never let the
+        # presence of cash alone collapse total assets to the deposit balance.
         final_total = reconstructed
         source = "holdings_evaluation_plus_cash"
+    elif asset_cash > 0:
+        final_total = asset_cash
+        source = "assetStatus_cash_only"
     else:
         final_total = holdings_evaluation
         source = "holdings_evaluation_only"

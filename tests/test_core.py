@@ -563,6 +563,16 @@ class PortfolioTests(unittest.TestCase):
         })
         self.assertEqual(fallback["total_asset_krw"], 12_500_000)
 
+        cash_only_asset_status = combine_account_totals(
+            {"evaluation_krw": 35_556_039, "pnl_krw": 0},
+            {"total_asset_krw": 0, "evaluation_krw": 0, "cash_krw": 3_210},
+        )
+        self.assertEqual(cash_only_asset_status["total_asset_krw"], 35_559_249)
+        self.assertEqual(
+            cash_only_asset_status["total_asset_source"],
+            "holdings_evaluation_plus_cash",
+        )
+
     def test_one_year_history_query_is_chunked(self) -> None:
         root = Path(__file__).resolve().parent.parent
         source = (root / "update_portfolio.py").read_text(encoding="utf-8")
