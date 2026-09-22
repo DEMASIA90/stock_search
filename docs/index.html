@@ -26,17 +26,17 @@
       <section class="watch-summary" aria-label="관심종목 요약">
         <article><span>조건 충족</span><strong id="watchEligible">—</strong><small id="watchScanned">후보 —</small></article>
         <article><span>최하단 구간</span><strong id="watchBottomCount">—</strong><small>볼린저 채널 하위 20%</small></article>
-        <article><span>최고 점수</span><strong id="watchTopScore">—</strong><small>최대 50점</small></article>
+        <article><span>최고 점수</span><strong id="watchTopScore">—</strong><small>최대 60점</small></article>
       </section>
 
       <section class="panel score-guide">
         <div><p class="eyebrow">SCORING</p><h2>점수 산정 기준</h2></div>
-        <div class="score-items"><span><b>+10</b> Supertrend 10·3 상승</span><span><b>+10</b> Supertrend 20·4 상승</span><span><b>+5</b> 60일선 기울기 양수</span><span><b>+5</b> 200일선 기울기 양수</span><span><b>+10</b> 주봉 BB20 최하단</span><span><b>+10</b> 월봉 BB20 최하단</span></div>
+        <div class="score-items"><span><b>+10</b> Supertrend 10·3 상승</span><span><b>+10</b> Supertrend 20·4 상승</span><span><b>+5</b> 60일선 기울기 양수</span><span><b>+5</b> 200일선 기울기 양수</span><span><b>+10</b> 일봉 BB20 최하단 (D)</span><span><b>+10</b> 주봉 BB20 최하단 (W)</span><span><b>+10</b> 월봉 BB20 최하단 (M)</span></div>
       </section>
 
       <section class="panel table-panel watch-table-panel">
         <div class="panel-heading filter-heading">
-          <div><p class="eyebrow">RANKING</p><h2>밴드 우선 · 점수순</h2><p class="watch-sync-line">최근 계산 <strong id="watchUpdatedAt">—</strong> · <span id="watchSource">데이터 준비 중</span></p></div>
+          <div><p class="eyebrow">RANKING</p><h2>총점 순위</h2><p class="watch-sync-line">최근 계산 <strong id="watchUpdatedAt">—</strong> · <span id="watchSource">데이터 준비 중</span></p></div>
           <div class="filter-group" aria-label="관심종목 필터">
             <select id="watchMarketFilter" aria-label="시장 필터"><option value="ALL">전체 시장</option><option value="US">미국</option><option value="KR">한국</option><option value="ETF">3배 ETF</option></select>
             <select id="watchBandFilter" aria-label="볼린저 밴드 필터"><option value="ALL">전체 밴드</option><option value="최하단">최하단만</option><option value="하단">하단</option><option value="중단">중단</option><option value="상단">상단</option><option value="최상단">최상단</option></select>
@@ -68,7 +68,7 @@
           <div class="panel chart-overview-panel">
             <div class="panel-heading chart-toolbar"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산과 실현수익 추이</h2><p class="chart-range-label" id="yieldRangeLabel">최근 4주</p></div><div class="toolbar-right"><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized-bar">일별 실현수익</span></div><div class="week-slider-wrap"><div class="week-slider-copy"><span>표시 기간</span><strong id="yieldWeekValue">4주</strong></div><input id="yieldWeekSlider" type="range" min="1" max="156" step="1" value="4" aria-label="총자산 및 실현수익 표시 기간, 1주에서 3년"/><div class="week-slider-scale"><span>1주</span><span>3년</span></div></div></div></div>
             <div class="dual-chart-grid">
-              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span id="assetCoverageLabel">실제 저장된 일별 스냅샷</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">총자산은 실제 저장된 일별 스냅샷만 표시합니다. 예수금 포함 여부는 점 툴팁에서 확인할 수 있습니다.</p></article>
+              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span id="assetCoverageLabel">실제 저장된 일별 스냅샷</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">총자산은 오늘의 예수금 포함 총자산을 기준으로 실현손익·순입출금을 역산합니다. 실제 저장 스냅샷이 있는 날은 실제값을 우선합니다.</p></article>
               <article class="chart-card"><div class="chart-card-head"><h3>실현수익</h3><span>일별 합산 막대 그래프</span></div><div class="line-chart interactive-chart realized-chart" id="realizedChart" aria-label="실현수익 막대 그래프"></div><p class="chart-help">막대 클릭 시 해당 날짜의 실현 거래와 입출금 내역을 볼 수 있습니다.</p></article>
             </div>
           </div>
@@ -90,7 +90,7 @@
           <section class="panel realized-compact-panel">
             <div class="panel-heading"><div><p class="eyebrow">REALIZED EVENTS</p><h2>최근 실현 종목</h2></div><span id="realizedEventsCount">0건</span></div>
             <div class="realized-compact-list" id="realizedBody"></div>
-            <div class="empty is-hidden" id="realizedEmpty">최근 1년 내 실현된 매도내역이 없습니다.</div>
+            <div class="empty is-hidden" id="realizedEmpty">저장된 실현 매도내역이 없습니다.</div>
           </section>
         </section>
 

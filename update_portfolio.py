@@ -22,6 +22,7 @@ from src.portfolio import (
     combine_account_totals,
     decrypt_envelope,
     encrypt_payload,
+    estimate_asset_history_from_current,
     holdings_for_web,
     mask_account,
     merge_persistent_events,
@@ -246,14 +247,12 @@ def build_payload(
     app_key: str,
     app_secret: str,
     *,
-    history_days: int = 365,
+    history_days: int = 3650,
 ) -> dict[str, Any]:
     now = datetime.now(SEOUL_TZ)
     history_days = max(1, int(history_days))
     start = now - timedelta(days=history_days)
-    metric_start = now - timedelta(days=365)
-    metric_start_day = metric_start.strftime("%Y%m%d")
-    metric_end_day = now.strftime("%Y%m%d")
+    chart_start = now - timedelta(weeks=156)
 
     print("[1/5] 현재 국내·미국 보유종목과 총자산을 조회합니다...")
     holdings, holding_warnings = client.all_holdings(account_no)
@@ -263,7 +262,7 @@ def build_payload(
         asset_status = {}
         holding_warnings.append(f"통합 자산현황 조회 실패: {exc}")
 
-    query_label = "최근 1년" if history_days >= 365 else ("최근 1일" if history_days <= 1 else f"최근 {history_days}일")
+    query_label = "과거 최대 10년" if history_days >= 3650 else ("최근 1일" if history_days <= 1 else f"최근 {history_days}일")
     print(f"[2/5] {query_label} 매수·매도 및 실현손익을 조회합니다...")
     (
         trades, recent_realized, recent_flows, history_warnings,
@@ -342,12 +341,18 @@ def build_payload(
         f"사용값 {number(totals.get('total_asset_krw')):,.0f}원 "
         f"({totals.get('total_asset_source')})"
     )
+    print(
+        "      평가손익 검증: "
+        f"보유종목 합 {number(totals.get('holdings_unrealized_pnl_krw')):,.0f}원 | "
+        f"NH통합 {number(totals.get('asset_status_unrealized_pnl_krw')):,.0f}원 | "
+        f"사용값 {number(totals.get('unrealized_pnl_krw')):,.0f}원 "
+        f"({totals.get('unrealized_pnl_source')})"
+    )
 
-    metric_realized_events = [
-        item for item in realized_events
-        if _within_recent_year(item, metric_start_day, metric_end_day)
-    ]
-    realized = realized_summary(metric_realized_events)
+    # Cumulative performance is no longer a rolling one-year metric. Use every
+    # realized event preserved in the server ledger, including events that age
+    # past one year on future scheduled updates.
+    realized = realized_summary(realized_events)
     old_yield_history = previous.get("yield_history", [])
     if not old_yield_history and isinstance(previous.get("history"), list):
         old_yield_history = [
@@ -364,9 +369,9 @@ def build_payload(
         ]
     yield_history_base = backfill_daily_realized_history(
         old_yield_history if isinstance(old_yield_history, list) else [],
-        realized_events=metric_realized_events,
+        realized_events=realized_events,
         cash_flows=cash_flows,
-        start_date=metric_start.date(),
+        start_date=chart_start.date(),
         end_date=now.date(),
     )
     yield_history = update_yield_history(
@@ -376,11 +381,19 @@ def build_payload(
         cash_flows=cash_flows,
         at=now,
     )
+    estimated_asset_history = estimate_asset_history_from_current(
+        current_total_krw=number(totals.get("total_asset_krw")),
+        realized_events=realized_events,
+        cash_flows=cash_flows,
+        actual_history=yield_history,
+        start_date=chart_start.date(),
+        end_date=now.date(),
+    )
     old_history = previous.get("history", []) if isinstance(previous, dict) else []
     history = update_snapshot_history(
         old_history if isinstance(old_history, list) else [], totals, now
     )
-    monthly = monthly_realized_performance(metric_realized_events, yield_history)
+    monthly = monthly_realized_performance(realized_events, yield_history)
     recent_market_counts = {
         "KR": sum(1 for item in recent_realized if item.get("market") == "KR"),
         "US": sum(1 for item in recent_realized if item.get("market") == "US"),
@@ -406,8 +419,9 @@ def build_payload(
         ),
         "realized_api": realized_diagnostics,
         "history_query_days": history_days,
-        "realized_metric_window_days": 365,
-        "realized_metric_count": len(metric_realized_events),
+        "realized_metric_window_days": None,
+        "realized_metric_scope": "all_stored",
+        "realized_metric_count": len(realized_events),
         "cash_included_in_total_asset": True,
         "asset_verification": {
             "source": totals.get("total_asset_source"),
@@ -418,7 +432,14 @@ def build_payload(
             "reconstructed_total_krw": reconstructed_total,
             "gap_krw": total_gap,
         },
-        "asset_chart_granularity": "daily_latest",
+        "asset_chart_granularity": "daily_actual_or_reverse_estimate",
+        "estimated_asset_points": len(estimated_asset_history),
+        "unrealized_verification": {
+            "source": totals.get("unrealized_pnl_source"),
+            "used_pnl_krw": number(totals.get("unrealized_pnl_krw")),
+            "holdings_pnl_krw": number(totals.get("holdings_unrealized_pnl_krw")),
+            "nh_integrated_pnl_krw": number(totals.get("asset_status_unrealized_pnl_krw")),
+        },
     }
     print("[4/5] 누적 이력과 월별 수익 통계를 갱신합니다...")
     print(
@@ -449,9 +470,10 @@ def build_payload(
         "period": {"start": start.strftime("%Y-%m-%d"), "end": now.strftime("%Y-%m-%d")},
         "history_policy": {
             "query_window_days": history_days,
-            "manual_bootstrap_days": 365,
+            "manual_bootstrap_days": 3650,
             "scheduled_refresh_days": 1,
-            "realized_metric_window_days": 365,
+            "realized_metric_window_days": None,
+            "realized_metric_scope": "all_stored",
             "yield_history_limit": 43800,
             "event_limit": 20000,
             "timezone": "Asia/Seoul",
@@ -471,6 +493,7 @@ def build_payload(
         "realized_summary": realized,
         "monthly_performance": monthly,
         "yield_history": yield_history,
+        "estimated_asset_history": estimated_asset_history,
         "history": history,
         "diagnostics": diagnostics,
         "warnings": (
@@ -488,10 +511,10 @@ def main() -> int:
     parser.add_argument("--non-interactive", action="store_true", help="GitHub Actions 자동 업데이트 모드")
     parser.add_argument(
         "--history-days", type=int, default=None,
-        help="거래/실현손익 재조회 기간(일). 기본: 수동 365일, 자동 1일",
+        help="거래/실현손익 재조회 기간(일). 기본: 수동 최대 3650일, 자동 1일",
     )
     args = parser.parse_args()
-    history_days = args.history_days if args.history_days is not None else (1 if args.non_interactive else 365)
+    history_days = args.history_days if args.history_days is not None else (1 if args.non_interactive else 3650)
     if history_days < 1 or history_days > 3650:
         parser.error("--history-days는 1~3650 범위여야 합니다.")
 

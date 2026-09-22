@@ -14,6 +14,16 @@ from src.portfolio import number
 TECHNICAL_BAR_COUNT = 520
 
 
+def _is_bear_or_inverse(item: dict[str, Any]) -> bool:
+    """Exclude inverse/bear/short leveraged ETFs from the ranking universe."""
+    if str(item.get("kind") or "").lower() != "leveraged_etf":
+        return False
+    haystack = " ".join(
+        str(item.get(key) or "") for key in ("name", "sector", "code")
+    ).upper()
+    return any(token in haystack for token in ("BEAR", "SHORT", "INVERSE"))
+
+
 def load_universe(path: Path = WATCHLIST_UNIVERSE_FILE) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
@@ -197,6 +207,8 @@ class MarketAnalyzer:
         for item in self._universe["items"]:
             if not isinstance(item, dict):
                 continue
+            if _is_bear_or_inverse(item):
+                continue
             scanned += 1
             identifier = f"{str(item.get('market', '')).upper()}:{str(item.get('code', '')).upper()}"
             try:
@@ -218,9 +230,9 @@ class MarketAnalyzer:
             "method": {
                 "bollinger": "20일·2표준편차 채널을 동일 폭 5단계로 구분",
                 "ma_slope": "각 이동평균의 최근 5거래일 변화율",
-                "score_max": 50,
-                "bollinger_timeframes": "일봉은 기존 밴드 단계, 주봉/월봉 최하단은 각 +10점 (BB20·2)",
-                "sorting": "일봉 밴드 단계 우선, 같은 단계는 50점 점수 내림차순",
+                "score_max": 60,
+                "bollinger_timeframes": "일봉/주봉/월봉 BB20·2 최하단은 각각 +10점",
+                "sorting": "밴드 단계와 무관하게 총점 내림차순",
             },
             "thresholds": {
                 "us_market_cap_krw": us_threshold,

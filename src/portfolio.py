@@ -275,6 +275,24 @@ def combine_account_totals(
         final_total = holdings_evaluation
         source = "holdings_evaluation_only"
 
+    # Validate current unrealized P/L independently. Some assetStatus responses
+    # return zero integrated evaluation/P&L while cash is still populated. In
+    # that case the per-position holding sum is the only usable live P/L source.
+    holdings_unrealized = number(totals.get("pnl_krw"))
+    holdings_principal = holdings_evaluation - holdings_unrealized
+    asset_unrealized = number(asset_status.get("unrealized_pnl_krw"))
+    asset_unrealized_pct = number(asset_status.get("unrealized_pnl_pct"))
+    if asset_evaluation > 0:
+        final_unrealized = asset_unrealized
+        final_unrealized_pct = asset_unrealized_pct
+        unrealized_source = "assetStatus.tot_eal_pls_amt"
+    else:
+        final_unrealized = holdings_unrealized
+        final_unrealized_pct = (
+            holdings_unrealized / holdings_principal * 100.0 if holdings_principal else 0.0
+        )
+        unrealized_source = "holdings_pnl_sum"
+
     out["total_asset_krw"] = final_total
     out["cash_krw"] = asset_cash
     out["holdings_evaluation_krw"] = holdings_evaluation
@@ -283,7 +301,11 @@ def combine_account_totals(
     out["reconstructed_total_asset_krw"] = reconstructed
     out["total_asset_gap_krw"] = asset_total - reconstructed if asset_total > 0 and reconstructed > 0 else None
     out["total_asset_source"] = source
-    out.setdefault("unrealized_pnl_krw", out.get("pnl_krw", 0))
+    out["holdings_unrealized_pnl_krw"] = holdings_unrealized
+    out["asset_status_unrealized_pnl_krw"] = asset_unrealized
+    out["unrealized_pnl_krw"] = final_unrealized
+    out["unrealized_pnl_pct"] = final_unrealized_pct
+    out["unrealized_pnl_source"] = unrealized_source
     return out
 
 
@@ -740,6 +762,105 @@ def backfill_daily_realized_history(
 
     kept = compact_yield_history_daily(kept)
     return kept[-max(1, limit):]
+
+
+def estimate_asset_history_from_current(
+    *, current_total_krw: float, realized_events: Iterable[dict[str, Any]],
+    cash_flows: Iterable[dict[str, Any]], actual_history: Iterable[dict[str, Any]],
+    start_date: date, end_date: date,
+) -> list[dict[str, Any]]:
+    """Build a daily asset series backwards from today's verified total asset.
+
+    Actual saved snapshots always win. Missing dates are estimated by reversing
+    known realized P/L and net deposits/withdrawals. Market-price changes in
+    still-open positions are not reconstructable historically, so estimated
+    rows are explicitly marked ``asset_estimated=True``.
+    """
+    if end_date < start_date:
+        return []
+
+    def digits(value: Any) -> str:
+        return "".join(ch for ch in str(value or "") if ch.isdigit())[:8]
+
+    realized_by_day: dict[str, float] = {}
+    for item in realized_events:
+        if not isinstance(item, dict):
+            continue
+        if item.get("pnl_available") is False or item.get("realized_pnl_krw") in (None, ""):
+            continue
+        day = realized_account_date(item)
+        if len(day) == 8:
+            realized_by_day[day] = realized_by_day.get(day, 0.0) + number(item.get("realized_pnl_krw"))
+
+    flow_by_day: dict[str, float] = {}
+    for item in cash_flows:
+        if not isinstance(item, dict):
+            continue
+        day = digits(item.get("date"))
+        if len(day) != 8:
+            continue
+        amount = number(item.get("amount_krw"))
+        signed = amount if item.get("side") == "DEPOSIT" else -amount
+        flow_by_day[day] = flow_by_day.get(day, 0.0) + signed
+
+    actual_by_day: dict[str, dict[str, Any]] = {}
+    for item in actual_history:
+        if not isinstance(item, dict) or item.get("asset_recorded") is False:
+            continue
+        raw = item.get("total_asset_krw")
+        if raw in (None, ""):
+            continue
+        total_value = number(raw)
+        holdings_value = number(item.get("holdings_evaluation_krw"))
+        cash_value = number(item.get("cash_krw"))
+        reconstructed = holdings_value + cash_value
+        # Ignore legacy snapshots created by the old cash-only fallback bug.
+        # When the row contains enough components to verify itself and differs
+        # materially, the reverse-estimated series is safer than preserving a
+        # known-bad point.
+        if reconstructed > 0:
+            gap = abs(total_value - reconstructed)
+            ratio = gap / max(abs(total_value), abs(reconstructed), 1.0)
+            if gap >= 100_000 and ratio >= 0.10:
+                continue
+        day = _history_day_key(item)
+        if len(day) != 8:
+            continue
+        previous = actual_by_day.get(day)
+        if previous is None or str(item.get("at", "")) >= str(previous.get("at", "")):
+            actual_by_day[day] = dict(item)
+
+    running = number(current_total_krw)
+    out_reversed: list[dict[str, Any]] = []
+    day = end_date
+    while day >= start_date:
+        key = day.strftime("%Y%m%d")
+        actual = actual_by_day.get(key)
+        if actual is not None:
+            running = number(actual.get("total_asset_krw"), running)
+            out_reversed.append({
+                "date": key,
+                "total_asset_krw": running,
+                "asset_estimated": False,
+                "source": "actual_snapshot",
+                "cash_krw": actual.get("cash_krw"),
+                "holdings_evaluation_krw": actual.get("holdings_evaluation_krw"),
+            })
+        else:
+            out_reversed.append({
+                "date": key,
+                "total_asset_krw": running,
+                "asset_estimated": True,
+                "source": "reverse_realized_and_cashflow",
+                "cash_krw": None,
+                "holdings_evaluation_krw": None,
+            })
+        # Move from end-of-day D to end-of-day D-1 by reversing all known
+        # account-value changes recorded on D.
+        running -= realized_by_day.get(key, 0.0) + flow_by_day.get(key, 0.0)
+        day -= timedelta(days=1)
+
+    return list(reversed(out_reversed))
 
 
 def _derive_key(password: str, salt: bytes, iterations: int) -> bytes:

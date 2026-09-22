@@ -36,7 +36,7 @@ git merge --ff-only "origin/%CURRENT_BRANCH%"
 if errorlevel 1 goto :sync_failed
 
 :run_update
-".venv\Scripts\python.exe" update_portfolio.py --history-days 365 %*
+".venv\Scripts\python.exe" update_portfolio.py --history-days 3650 %*
 if errorlevel 1 goto :update_failed
 
 ".venv\Scripts\python.exe" update_watchlist.py

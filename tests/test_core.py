@@ -13,6 +13,7 @@ from src.portfolio import (
     compact_yield_history_daily,
     decrypt_envelope,
     encrypt_payload,
+    estimate_asset_history_from_current,
     holdings_for_web,
     mask_account,
     merge_persistent_events,
@@ -88,7 +89,7 @@ class PortfolioTests(unittest.TestCase):
             {"code": "HIGH", "band": "하단", "score": 30, "band_position": 0.25},
             {"code": "LOW", "band": "최하단", "score": 0, "band_position": 0.1},
         ]
-        self.assertEqual(sorted(rows, key=watchlist_sort_key)[0]["code"], "LOW")
+        self.assertEqual(sorted(rows, key=watchlist_sort_key)[0]["code"], "HIGH")
 
 
     def test_weekly_monthly_bottom_bands_add_twenty_points_and_display_flags(self) -> None:
@@ -121,7 +122,8 @@ class PortfolioTests(unittest.TestCase):
             + (5 if result["ma200_slope_pct"] is not None and result["ma200_slope_pct"] > 0 else 0)
             + (5 if result["ma60_slope_pct"] is not None and result["ma60_slope_pct"] > 0 else 0)
         )
-        self.assertEqual(result["score"], base + 20)
+        expected = base + 20 + (10 if result["band"] == "최하단" else 0)
+        self.assertEqual(result["score"], expected)
         if result["band"] == "최하단":
             self.assertEqual(result["band_display"], "최하단 DWM")
         self.assertGreaterEqual(len(aggregate_bars(bars, "W")), 20)
@@ -622,14 +624,14 @@ class PortfolioTests(unittest.TestCase):
         source = (root / "update_portfolio.py").read_text(encoding="utf-8")
         self.assertIn("chunk_days: int = 30", source)
         self.assertIn("cursor = chunk_end + timedelta(days=1)", source)
-        self.assertIn("history_days: int = 365", source)
+        self.assertIn("history_days: int = 3650", source)
 
     def test_manual_bootstrap_and_scheduled_refresh_windows(self) -> None:
         root = Path(__file__).resolve().parent.parent
         workflow = (root / ".github" / "workflows" / "update-and-deploy.yml").read_text(encoding="utf-8")
         self.assertIn("update_portfolio.py --non-interactive --history-days 1", workflow)
         batch = (root / "publish_update.bat").read_text(encoding="ascii")
-        self.assertIn("update_portfolio.py --history-days 365", batch)
+        self.assertIn("update_portfolio.py --history-days 3650", batch)
 
     def test_yield_ui_uses_week_slider_and_compact_realized_rows(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -656,6 +658,60 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(assets[0]["total_asset_krw"], 120)
         self.assertEqual(assets[1]["total_asset_krw"], 130)
         self.assertEqual(sum(1 for row in compacted if row.get("kind") == "realized_daily"), 1)
+
+    def test_estimated_asset_history_reverses_realized_and_cashflow_and_prefers_actual(self) -> None:
+        estimated = estimate_asset_history_from_current(
+            current_total_krw=1_100_000,
+            realized_events=[
+                {"date": "20260921", "account_date": "20260921", "realized_pnl_krw": 100_000, "pnl_available": True},
+            ],
+            cash_flows=[
+                {"date": "20260922", "side": "DEPOSIT", "amount_krw": 200_000},
+            ],
+            actual_history=[
+                {"at": "2026-09-21T18:00:00+09:00", "snapshot_date": "20260921", "total_asset_krw": 850_000, "holdings_evaluation_krw": 800_000, "cash_krw": 50_000, "asset_recorded": True},
+            ],
+            start_date=date(2026, 9, 20),
+            end_date=date(2026, 9, 22),
+        )
+        by_day = {row["date"]: row for row in estimated}
+        self.assertEqual(by_day["20260922"]["total_asset_krw"], 1_100_000)
+        self.assertTrue(by_day["20260922"]["asset_estimated"])
+        self.assertEqual(by_day["20260921"]["total_asset_krw"], 850_000)
+        self.assertFalse(by_day["20260921"]["asset_estimated"])
+        self.assertEqual(by_day["20260920"]["total_asset_krw"], 750_000)
+
+    def test_estimated_asset_history_ignores_legacy_cash_only_bad_snapshot(self) -> None:
+        rows = estimate_asset_history_from_current(
+            current_total_krw=35_559_249,
+            realized_events=[],
+            cash_flows=[],
+            actual_history=[{
+                "at": "2026-09-21T18:00:00+09:00", "snapshot_date": "20260921",
+                "total_asset_krw": 3_210, "holdings_evaluation_krw": 35_556_039,
+                "cash_krw": 3_210, "asset_recorded": True,
+            }],
+            start_date=date(2026, 9, 21), end_date=date(2026, 9, 22),
+        )
+        self.assertTrue(rows[0]["asset_estimated"])
+        self.assertEqual(rows[0]["total_asset_krw"], 35_559_249)
+
+    def test_unrealized_pnl_falls_back_to_holding_sum_when_asset_status_evaluation_missing(self) -> None:
+        totals = combine_account_totals(
+            {"evaluation_krw": 35_000_000, "pnl_krw": 1_250_000},
+            {"total_asset_krw": 0, "evaluation_krw": 0, "cash_krw": 10_000, "unrealized_pnl_krw": 0},
+        )
+        self.assertEqual(totals["unrealized_pnl_krw"], 1_250_000)
+        self.assertEqual(totals["unrealized_pnl_source"], "holdings_pnl_sum")
+
+    def test_score_sort_is_score_first_and_bear_filter_exists(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "src" / "watchlist.py").read_text(encoding="utf-8")
+        self.assertIn("_is_bear_or_inverse", source)
+        self.assertIn('"score_max": 60', source)
+        self.assertIn('"sorting": "밴드 단계와 무관하게 총점 내림차순"', source)
+        app = (root / "docs" / "assets" / "app.mjs").read_text(encoding="utf-8")
+        self.assertIn("isBearOrInverse", app)
 
     def test_account_mask(self) -> None:
         self.assertEqual(mask_account("123-45-678901"), "***-***-8901")
@@ -722,7 +778,8 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn('id="realizedChart"', html)
         self.assertIn('id="yieldWeekSlider"', html)
         self.assertIn('id="yieldRangeLabel"', html)
-        self.assertIn("최대 50점", html)
+        self.assertIn("최대 60점", html)
+        self.assertIn("일봉 BB20 최하단", html)
         self.assertIn("주봉 BB20 최하단", html)
         self.assertIn("월봉 BB20 최하단", html)
         self.assertIn('id="monthlyChart"', html)
@@ -745,7 +802,7 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn("chart_bars", js)
         self.assertIn("data-label=\"현재가\"", js)
         self.assertIn("data-label=\"평가금액\"", js)
-        self.assertIn("<small>/50</small>", js)
+        self.assertIn("<small>/60</small>", js)
         self.assertIn("item.band_display || item.band", js)
         self.assertNotIn("asset-event-marker", js)
 

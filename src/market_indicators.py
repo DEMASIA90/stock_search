@@ -208,6 +208,7 @@ def technical_snapshot(bars: Iterable[dict[str, Any]]) -> dict[str, Any]:
     monthly_bars = aggregate_bars(ordered, "M")
     weekly_band = bollinger_state(_series(weekly_bars, "close"))
     monthly_band = bollinger_state(_series(monthly_bars, "close"))
+    daily_bottom = band.get("label") == "최하단"
     weekly_bottom = weekly_band.get("label") == "최하단"
     monthly_bottom = monthly_band.get("label") == "최하단"
     ma60 = simple_average(closes, 60)
@@ -221,6 +222,7 @@ def technical_snapshot(bars: Iterable[dict[str, Any]]) -> dict[str, Any]:
         + (10 if st20 == "UP" else 0)
         + (5 if slope200 is not None and slope200 > 0 else 0)
         + (5 if slope60 is not None and slope60 > 0 else 0)
+        + (10 if daily_bottom else 0)
         + (10 if weekly_bottom else 0)
         + (10 if monthly_bottom else 0)
     )
@@ -339,10 +341,9 @@ def technical_chart_series(
         })
     return output
 
-def watchlist_sort_key(item: dict[str, Any]) -> tuple[int, float, float, str]:
-    band_rank = {label: index for index, label in enumerate(BAND_LABELS)}
+def watchlist_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
+    """Rank strictly by total score; Bollinger position is only a tie-breaker."""
     return (
-        band_rank.get(str(item.get("band")), len(BAND_LABELS)),
         -number(item.get("score")),
         number(item.get("band_position"), 999.0),
         str(item.get("code", "")),

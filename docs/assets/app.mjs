@@ -95,6 +95,12 @@ function bandBadge(label) {
   return `<span class="band ${classes[label] || "unknown"}">${escapeHtml(label || "미확인")}</span>`;
 }
 
+function isBearOrInverse(item) {
+  if (String(item?.kind || "").toLowerCase() !== "leveraged_etf") return false;
+  const text = `${item?.name || ""} ${item?.sector || ""} ${item?.code || ""}`.toUpperCase();
+  return text.includes("BEAR") || text.includes("SHORT") || text.includes("INVERSE");
+}
+
 
 function technicalPrice(value, currency = "KRW") {
   const parsed = Number(value);
@@ -216,7 +222,7 @@ function attachRowChartHandlers(selector, rows) {
 }
 
 function renderWatchlistRows() {
-  const allRows = Array.isArray(watchlist?.items) ? watchlist.items : [];
+  const allRows = (Array.isArray(watchlist?.items) ? watchlist.items : []).filter((item) => !isBearOrInverse(item));
   const market = $("#watchMarketFilter").value;
   const band = $("#watchBandFilter").value;
   const rows = allRows.filter((item) => {
@@ -230,7 +236,7 @@ function renderWatchlistRows() {
       <td data-label="#"><span class="rank">${index + 1}</span></td>
       <td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${item.kind === "leveraged_etf" ? "3X ETF" : escapeHtml(item.market)}${item.stale ? " · 이전 데이터" : ""}</span></div></td>
       <td data-label="밴드">${bandBadge(item.band_display || item.band)}</td>
-      <td data-label="점수" class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/50</small></td>
+      <td data-label="점수" class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/60</small></td>
       <td data-label="ST 10·3">${trendBadge(item.st_10_3)}</td><td data-label="ST 20·4">${trendBadge(item.st_20_4)}</td>
       <td data-label="60일선">${slopeBadge(item.ma60_slope_pct)}</td><td data-label="200일선">${slopeBadge(item.ma200_slope_pct)}</td>
       <td data-label="현재가" class="numeric"><strong>${money(item.price, currency)}</strong><small class="${pnlClass(item.change_pct)}">${percent(item.change_pct)}</small></td>
@@ -399,6 +405,7 @@ function moneyMaybe(value, currency = "KRW") {
 
 function buildChartData() {
   const assetPoints = [];
+  const actualAssetByDay = new Map();
   const latestAssetByDay = new Map();
   const cumulativeByDay = new Map();
   const realizedByDay = new Map();
@@ -416,18 +423,47 @@ function buildChartData() {
     const parsed = new Date(row.at);
     const fallback = parseCompactDay(day);
     const atMs = !Number.isNaN(parsed.getTime()) ? parsed.getTime() : (fallback ? fallback.getTime() : 0);
+    const cashValue = row.cash_krw === null || row.cash_krw === undefined || row.cash_krw === "" ? null : Number(row.cash_krw);
+    const holdingsValue = row.holdings_evaluation_krw === null || row.holdings_evaluation_krw === undefined || row.holdings_evaluation_krw === "" ? null : Number(row.holdings_evaluation_krw);
+    const totalValue = Number(rawAsset);
+    if (Number.isFinite(holdingsValue) && Number.isFinite(cashValue)) {
+      const reconstructed = holdingsValue + cashValue;
+      const gap = Math.abs(totalValue - reconstructed);
+      const ratio = gap / Math.max(Math.abs(totalValue), Math.abs(reconstructed), 1);
+      if (gap >= 100000 && ratio >= 0.10) return;
+    }
     const point = {
-      day, at: row.at, at_ms: atMs, total_asset_krw: Number(rawAsset),
-      cash_krw: row.cash_krw === null || row.cash_krw === undefined || row.cash_krw === "" ? null : Number(row.cash_krw),
-      holdings_evaluation_krw: row.holdings_evaluation_krw === null || row.holdings_evaluation_krw === undefined || row.holdings_evaluation_krw === "" ? null : Number(row.holdings_evaluation_krw),
+      day, at: row.at, at_ms: atMs, total_asset_krw: totalValue,
+      cash_krw: cashValue,
+      holdings_evaluation_krw: holdingsValue,
       total_asset_source: String(row.total_asset_source || ""),
     };
-    const current = latestAssetByDay.get(day);
-    if (!current || point.at_ms >= current.at_ms) latestAssetByDay.set(day, point);
+    point.asset_estimated = false;
+    point.source = "actual_snapshot";
+    const current = actualAssetByDay.get(day);
+    if (!current || point.at_ms >= current.at_ms) actualAssetByDay.set(day, point);
   });
-  // One chart point per calendar day. Older builds stored one point per hourly
-  // GitHub run; collapse them here immediately even before the backend compacts
-  // the encrypted history on the next update.
+
+  // The backend provides a reverse-estimated daily series anchored to today's
+  // verified total asset (cash included). Actual stored snapshots override the
+  // estimate whenever they exist.
+  (portfolio?.estimated_asset_history || []).forEach((row) => {
+    const day = compactDate(row?.date);
+    if (!/^\d{8}$/.test(day)) return;
+    const parsedDay = parseCompactDay(day);
+    latestAssetByDay.set(day, {
+      day,
+      at: `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}T23:59:00+09:00`,
+      at_ms: parsedDay ? parsedDay.getTime() : 0,
+      total_asset_krw: Number(row.total_asset_krw),
+      cash_krw: row.cash_krw === null || row.cash_krw === undefined || row.cash_krw === "" ? null : Number(row.cash_krw),
+      holdings_evaluation_krw: row.holdings_evaluation_krw === null || row.holdings_evaluation_krw === undefined || row.holdings_evaluation_krw === "" ? null : Number(row.holdings_evaluation_krw),
+      total_asset_source: String(row.source || "reverse_realized_and_cashflow"),
+      asset_estimated: row.asset_estimated !== false,
+      source: String(row.source || "reverse_realized_and_cashflow"),
+    });
+  });
+  actualAssetByDay.forEach((point, day) => latestAssetByDay.set(day, point));
   assetPoints.push(...[...latestAssetByDay.values()].sort((a, b) => a.day.localeCompare(b.day)));
 
   (portfolio?.realized_events || []).forEach((item) => {
@@ -471,6 +507,7 @@ function buildChartData() {
 
   return {
     assetPoints,
+    actualAssetByDay,
     latestAssetByDay,
     realizedPoints: [...realizedByDay.entries()].map(([day, value]) => ({ day, daily_realized_krw: value })).sort((a, b) => a.day.localeCompare(b.day)),
     flowByDay,
@@ -564,7 +601,7 @@ function renderSelectedDay(day, data) {
   const cumulative = data.cumulativeForDay(day);
 
   setText("#eventDetailTitle", dayLabel(day));
-  setText("#selectedAsset", asset ? moneyMaybe(asset.total_asset_krw) : "—");
+  setText("#selectedAsset", asset ? `${moneyMaybe(asset.total_asset_krw)}${asset.asset_estimated ? " (추정)" : ""}` : "—");
   const dayRealizedNode = $("#selectedDayRealized");
   dayRealizedNode.textContent = moneyMaybe(dayRealized);
   dayRealizedNode.className = pnlClass(dayRealized);
@@ -591,9 +628,9 @@ function renderSelectedDay(day, data) {
 
 function renderAssetChart(data, bounds) {
   const host = $("#assetChart");
-  const points = data.assetPoints.filter((point) => point.at_ms >= bounds.start.getTime() && point.at_ms <= bounds.end.getTime());
+  const points = data.assetPoints.filter((point) => inRange(point.day, bounds));
   if (!points.length) {
-    host.innerHTML = '<div class="chart-empty">선택 기간에 실제로 저장된 총자산 스냅샷이 없습니다.<br>과거 자산은 임의 역산하지 않습니다.</div>';
+    host.innerHTML = '<div class="chart-empty">선택 기간에 총자산 계산에 사용할 데이터가 없습니다.</div>';
     return;
   }
   const width = 860; const height = 280;
@@ -602,8 +639,7 @@ function renderAssetChart(data, bounds) {
   const [low, high] = extent(values);
   const yTicks = createTicks(low, high, 4);
   const y = (value) => height - pad.bottom - ((value - low) / Math.max(1, high - low)) * (height - pad.top - pad.bottom);
-  const spanMs = Math.max(1, bounds.end.getTime() - bounds.start.getTime());
-  const xPoint = (point) => pad.left + Math.max(0, Math.min(1, (point.at_ms - bounds.start.getTime()) / spanMs)) * (width - pad.left - pad.right);
+  const xPoint = (point) => xForDay(point.day, bounds, pad.left, pad.right, width);
   const xDay = (day) => xForDay(day, bounds, pad.left, pad.right, width);
   const line = points.map((point) => `${xPoint(point)},${y(Number(point.total_asset_krw))}`).join(" ");
   const ticks = dateTicks(bounds);
@@ -615,21 +651,22 @@ function renderAssetChart(data, bounds) {
     ${ticks.map((tick) => `<g><line x1="${xDay(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${xDay(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${xDay(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
     ${fill}${polyline}
     ${points.map((point) => {
-      const realizedAnchor = data.realizedByDay.has(point.day) && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
-      const selectedAnchor = point.day === selectedChartDay && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
-      return `<circle class="chart-point asset ${realizedAnchor ? "has-realized" : ""} ${selectedAnchor ? "selected" : ""}" data-at-ms="${point.at_ms}" cx="${xPoint(point)}" cy="${y(Number(point.total_asset_krw))}" r="${selectedAnchor ? 6 : (realizedAnchor ? 5 : 3.2)}"/>`;
+      const realizedAnchor = data.realizedByDay.has(point.day);
+      const selectedAnchor = point.day === selectedChartDay;
+      return `<circle class="chart-point asset ${realizedAnchor ? "has-realized" : ""} ${selectedAnchor ? "selected" : ""}" data-day="${point.day}" cx="${xPoint(point)}" cy="${y(Number(point.total_asset_krw))}" r="${selectedAnchor ? 6 : (realizedAnchor ? 5 : 3.2)}"/>`;
     }).join("")}
   </svg>`;
 
   host.querySelectorAll(".chart-point.asset").forEach((node) => {
-    const point = points.find((item) => String(item.at_ms) === node.dataset.atMs);
+    const point = points.find((item) => item.day === node.dataset.day);
     if (!point) return;
     const tooltip = () => renderChartTooltip(host, {
       x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
       y: Number(node.getAttribute("cy")) / height * host.clientHeight - 16,
-      title: dateText(point.at, true),
+      title: point.asset_estimated ? `${dayLabel(point.day)} · 역산 추정` : dateText(point.at, true),
       lines: [
-        `총자산 ${moneyMaybe(point.total_asset_krw)}`,
+        `총자산 ${moneyMaybe(point.total_asset_krw)}${point.asset_estimated ? " (추정)" : ""}`,
+        ...(point.asset_estimated ? ["오늘 총자산에서 실현손익·순입출금을 역산"] : []),
         ...(Number.isFinite(point.holdings_evaluation_krw) ? [`보유평가 ${moneyMaybe(point.holdings_evaluation_krw)}`] : []),
         ...(Number.isFinite(point.cash_krw) ? [`예수금 ${moneyMaybe(point.cash_krw)} · 총자산에 포함`] : []),
         `해당일 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`,
@@ -709,9 +746,11 @@ function renderYieldCharts() {
   if (data.assetPoints.length) {
     const first = data.assetPoints[0].day;
     const last = data.assetPoints.at(-1).day;
-    setText("#assetCoverageLabel", `실제 총자산 기록 ${dayLabel(first)} ~ ${dayLabel(last)} · ${data.assetPoints.length}일`);
+    const actualCount = data.actualAssetByDay.size;
+    const estimatedCount = data.assetPoints.filter((point) => point.asset_estimated).length;
+    setText("#assetCoverageLabel", `총자산 ${dayLabel(first)} ~ ${dayLabel(last)} · 실제 ${actualCount}일 / 역산 ${estimatedCount}일`);
   } else {
-    setText("#assetCoverageLabel", "실제 저장된 총자산 기록 없음");
+    setText("#assetCoverageLabel", "총자산 기록 없음");
   }
 
   renderAssetChart(data, bounds);
@@ -828,7 +867,7 @@ function render(data) {
   const usTrades = number(transactionApi.us_daily_trades);
   const usSellTrades = number(transactionApi.us_daily_sell_trades || realizedApi.us_sell_trades);
   const queryDays = number(diagnostics.history_query_days || data.history_policy?.query_window_days || 1);
-  setText("#diagnostics", `진단: 조회 ${queryDays}일 · 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 최근 1년 지표 ${number(diagnostics.realized_metric_count)}건 · 자산 스냅샷 ${number(diagnostics.asset_snapshot_points)}p`);
+  setText("#diagnostics", `진단: 조회 ${queryDays}일 · 실현 KR ${number(recentByMarket.KR)} / US ${number(recentByMarket.US)} · US 거래 ${usTrades} / SELL ${usSellTrades}${pendingUs ? ` / 손익 미확인 ${pendingUs}` : ""} · 누적 실현지표 ${number(diagnostics.realized_metric_count)}건 · 자산 스냅샷 ${number(diagnostics.asset_snapshot_points)}p`);
 }
 
 async function loadEnvelope() {
