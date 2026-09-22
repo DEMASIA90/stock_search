@@ -4,7 +4,7 @@ import base64
 import json
 import os
 from dataclasses import asdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,13 @@ from src.config import ENVELOPE_AAD, PBKDF2_ITERATIONS
 from src.models import Holding
 
 
-SEOUL_TZ = ZoneInfo("Asia/Seoul")
+try:
+    SEOUL_TZ = ZoneInfo("Asia/Seoul")
+except Exception:
+    # Windows Python installations may not ship the IANA timezone database.
+    # Korea has used UTC+09:00 without DST for the period handled by this app,
+    # so a fixed offset is a safe runtime fallback.
+    SEOUL_TZ = timezone(timedelta(hours=9), name="Asia/Seoul")
 
 
 def _seoul_datetime(value: datetime | None = None) -> datetime:

@@ -8,8 +8,6 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
-
 import keyring
 
 from src.config import (
@@ -34,6 +32,7 @@ from src.portfolio import (
     realized_account_date,
     reconcile_us_realized_events,
     sanitize_legacy_realized_events,
+    SEOUL_TZ,
     update_snapshot_history,
     update_yield_history,
 )
@@ -43,8 +42,6 @@ from src.watchlist import MarketAnalyzer
 ENV_KEY = "web_environment"
 ACCOUNT_KEY = "web_account"
 PASSWORD_KEY = "web_password"
-SEOUL_TZ = ZoneInfo("Asia/Seoul")
-
 
 def _read_json(path: Path, default: Any) -> Any:
     try:

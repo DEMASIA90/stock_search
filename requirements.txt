@@ -1,3 +1,4 @@
 nhplug==0.4.0
 keyring>=25,<26
 cryptography>=43,<47
+tzdata>=2025.2
