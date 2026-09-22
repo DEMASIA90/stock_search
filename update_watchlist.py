@@ -37,7 +37,7 @@ def main() -> int:
         client = NhReadOnlyClient()
         client.configure(ConnectionProfile(app_key, app_secret, "live"))
         previous = _read_json(WATCHLIST_DATA_FILE, {})
-        print("관심종목의 시가총액과 260거래일 기술지표를 조회합니다...")
+        print("관심종목의 시가총액과 520거래일 기술지표(일·주·월 Bollinger)를 조회합니다...")
         payload = MarketAnalyzer(client).build_watchlist(previous)
         _atomic_json(WATCHLIST_DATA_FILE, payload)
         print(

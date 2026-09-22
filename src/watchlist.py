@@ -11,6 +11,8 @@ from src.market_indicators import technical_chart_series, technical_snapshot, wa
 from src.nh_client import NhReadOnlyClient
 from src.portfolio import number
 
+TECHNICAL_BAR_COUNT = 520
+
 
 def load_universe(path: Path = WATCHLIST_UNIVERSE_FILE) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -59,7 +61,7 @@ class MarketAnalyzer:
     def quote(self, market: str, code: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         key = (market.upper(), code.upper())
         if key not in self._cache:
-            self._cache[key] = self.client.market_bars(*key)
+            self._cache[key] = self.client.market_bars(key[0], key[1], count=TECHNICAL_BAR_COUNT)
         return self._cache[key]
 
     def analyze(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +119,9 @@ class MarketAnalyzer:
                 holding.update({
                     "sector": str(sector or configured.get("sector") or ("ETF" if "ETF" in str(holding.get("name", "")).upper() else "기타")),
                     "band": technical.get("band"),
+                    "band_display": technical.get("band_display") or technical.get("band"),
+                    "band_weekly": technical.get("band_weekly"),
+                    "band_monthly": technical.get("band_monthly"),
                     "band_position": technical.get("band_position"),
                     "st_14_3": technical.get("st_14_3"),
                     "ma60_slope_pct": technical.get("ma60_slope_pct"),
@@ -128,6 +133,9 @@ class MarketAnalyzer:
                 holding.update({
                     "sector": str(configured.get("sector") or "기타"),
                     "band": "조회 실패",
+                    "band_display": "조회 실패",
+                    "band_weekly": "조회 실패",
+                    "band_monthly": "조회 실패",
                     "st_14_3": "UNKNOWN",
                     "ma60_slope_pct": None,
                     "ma200_slope_pct": None,
@@ -210,8 +218,9 @@ class MarketAnalyzer:
             "method": {
                 "bollinger": "20일·2표준편차 채널을 동일 폭 5단계로 구분",
                 "ma_slope": "각 이동평균의 최근 5거래일 변화율",
-                "score_max": 30,
-                "sorting": "밴드 단계 우선, 같은 단계는 점수 내림차순",
+                "score_max": 50,
+                "bollinger_timeframes": "일봉은 기존 밴드 단계, 주봉/월봉 최하단은 각 +10점 (BB20·2)",
+                "sorting": "일봉 밴드 단계 우선, 같은 단계는 50점 점수 내림차순",
             },
             "thresholds": {
                 "us_market_cap_krw": us_threshold,

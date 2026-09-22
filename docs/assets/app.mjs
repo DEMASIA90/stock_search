@@ -229,8 +229,8 @@ function renderWatchlistRows() {
     return `<tr class="instrument-row clickable-row ${item.band === "최하단" ? "priority-row" : ""}" data-row-index="${index}" tabindex="0" title="클릭하여 캔들·Bollinger·Supertrend 차트 보기">
       <td data-label="#"><span class="rank">${index + 1}</span></td>
       <td data-label="종목" class="mobile-span-all"><div class="instrument"><strong>${escapeHtml(item.name || item.code)}</strong><span>${escapeHtml(item.code)} · ${item.kind === "leveraged_etf" ? "3X ETF" : escapeHtml(item.market)}${item.stale ? " · 이전 데이터" : ""}</span></div></td>
-      <td data-label="밴드">${bandBadge(item.band)}</td>
-      <td data-label="점수" class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/30</small></td>
+      <td data-label="밴드">${bandBadge(item.band_display || item.band)}</td>
+      <td data-label="점수" class="numeric"><span class="score">${number(item.score).toFixed(0)}</span><small>/50</small></td>
       <td data-label="ST 10·3">${trendBadge(item.st_10_3)}</td><td data-label="ST 20·4">${trendBadge(item.st_20_4)}</td>
       <td data-label="60일선">${slopeBadge(item.ma60_slope_pct)}</td><td data-label="200일선">${slopeBadge(item.ma200_slope_pct)}</td>
       <td data-label="현재가" class="numeric"><strong>${money(item.price, currency)}</strong><small class="${pnlClass(item.change_pct)}">${percent(item.change_pct)}</small></td>
@@ -306,7 +306,7 @@ function renderHoldings(holdings) {
     <td data-label="평가금액" class="numeric strong">${money(item.eval_amount_krw)}</td>
     <td data-label="평가손익" class="numeric ${pnlClass(item.pnl_amount_krw)}"><strong>${money(item.pnl_amount_krw)}</strong></td>
     <td data-label="수익률" class="numeric ${pnlClass(item.pnl_pct)}"><strong>${percent(item.pnl_pct)}</strong></td>
-    <td data-label="Bollinger">${bandBadge(item.band)}</td><td data-label="ST 14·3">${trendBadge(item.st_14_3)}</td>
+    <td data-label="Bollinger">${bandBadge(item.band_display || item.band)}</td><td data-label="ST 14·3">${trendBadge(item.st_14_3)}</td>
     <td data-label="60일선">${slopeBadge(item.ma60_slope_pct)}</td><td data-label="200일선">${slopeBadge(item.ma200_slope_pct)}</td>
   </tr>`).join("");
   attachRowChartHandlers("#holdingsBody .instrument-row", rows);
@@ -416,7 +416,12 @@ function buildChartData() {
     const parsed = new Date(row.at);
     const fallback = parseCompactDay(day);
     const atMs = !Number.isNaN(parsed.getTime()) ? parsed.getTime() : (fallback ? fallback.getTime() : 0);
-    const point = { day, at: row.at, at_ms: atMs, total_asset_krw: Number(rawAsset) };
+    const point = {
+      day, at: row.at, at_ms: atMs, total_asset_krw: Number(rawAsset),
+      cash_krw: row.cash_krw === null || row.cash_krw === undefined || row.cash_krw === "" ? null : Number(row.cash_krw),
+      holdings_evaluation_krw: row.holdings_evaluation_krw === null || row.holdings_evaluation_krw === undefined || row.holdings_evaluation_krw === "" ? null : Number(row.holdings_evaluation_krw),
+      total_asset_source: String(row.total_asset_source || ""),
+    };
     const current = latestAssetByDay.get(day);
     if (!current || point.at_ms >= current.at_ms) latestAssetByDay.set(day, point);
   });
@@ -604,12 +609,11 @@ function renderAssetChart(data, bounds) {
   const ticks = dateTicks(bounds);
   const fill = points.length >= 2 ? `<polygon points="${xPoint(points[0])},${height - pad.bottom} ${line} ${xPoint(points.at(-1))},${height - pad.bottom}" fill="url(#assetFill)"/>` : "";
   const polyline = points.length >= 2 ? `<polyline points="${line}" fill="none" stroke="#51e4ba" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : "";
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산 시간별 선 그래프">
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="총자산 일별 선 그래프">
     <defs><linearGradient id="assetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#51e4ba" stop-opacity=".28"/><stop offset="1" stop-color="#51e4ba" stop-opacity="0"/></linearGradient></defs>
     ${yTicks.map((tick) => `<g><line x1="${pad.left}" y1="${y(tick)}" x2="${width - pad.right}" y2="${y(tick)}" class="chart-grid-line"/><text x="${pad.left - 10}" y="${y(tick) + 4}" class="chart-y-label" text-anchor="end">${axisMoney(tick)}</text></g>`).join("")}
     ${ticks.map((tick) => `<g><line x1="${xDay(toDayKey(tick.date))}" y1="${height - pad.bottom}" x2="${xDay(toDayKey(tick.date))}" y2="${height - pad.bottom + 6}" class="chart-axis-line"/><text x="${xDay(toDayKey(tick.date))}" y="${height - 14}" class="chart-x-label" text-anchor="middle">${tick.label}</text></g>`).join("")}
     ${fill}${polyline}
-    ${[...data.realizedByDay.keys()].filter((day) => inRange(day, bounds) && !data.latestAssetByDay.has(day)).map((day) => `<circle class="asset-event-marker" data-day="${day}" cx="${xDay(day)}" cy="${height - pad.bottom - 5}" r="4.5"/>`).join("")}
     ${points.map((point) => {
       const realizedAnchor = data.realizedByDay.has(point.day) && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
       const selectedAnchor = point.day === selectedChartDay && data.latestAssetByDay.get(point.day)?.at_ms === point.at_ms;
@@ -624,7 +628,13 @@ function renderAssetChart(data, bounds) {
       x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
       y: Number(node.getAttribute("cy")) / height * host.clientHeight - 16,
       title: dateText(point.at, true),
-      lines: [`총자산 ${moneyMaybe(point.total_asset_krw)}`, `해당일 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`, `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`],
+      lines: [
+        `총자산 ${moneyMaybe(point.total_asset_krw)}`,
+        ...(Number.isFinite(point.holdings_evaluation_krw) ? [`보유평가 ${moneyMaybe(point.holdings_evaluation_krw)}`] : []),
+        ...(Number.isFinite(point.cash_krw) ? [`예수금 ${moneyMaybe(point.cash_krw)} · 총자산에 포함`] : []),
+        `해당일 실현수익 ${moneyMaybe(data.realizedByDay.get(point.day) || 0)}`,
+        `누적 실현손익 ${moneyMaybe(data.cumulativeForDay(point.day))}`,
+      ],
     });
     node.addEventListener("mouseenter", tooltip);
     node.addEventListener("click", () => {
@@ -634,17 +644,6 @@ function renderAssetChart(data, bounds) {
       node.classList.add("selected");
       tooltip();
     });
-  });
-  host.querySelectorAll(".asset-event-marker").forEach((node) => {
-    const day = node.dataset.day;
-    const tooltip = () => renderChartTooltip(host, {
-      x: Number(node.getAttribute("cx")) / width * host.clientWidth + 10,
-      y: (height - pad.bottom - 5) / height * host.clientHeight - 16,
-      title: dayLabel(day),
-      lines: [`실현수익 ${moneyMaybe(data.realizedByDay.get(day) || 0)}`, "이 날짜의 정확한 총자산 스냅샷은 저장되어 있지 않습니다."],
-    });
-    node.addEventListener("mouseenter", tooltip);
-    node.addEventListener("click", () => { renderSelectedDay(day, data); tooltip(); });
   });
   host.addEventListener("mouseleave", () => clearChartTooltip(host));
 }

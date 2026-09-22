@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from src.market_indicators import bollinger_state, technical_chart_series, technical_snapshot, watchlist_sort_key
+from src.market_indicators import aggregate_bars, bollinger_state, technical_chart_series, technical_snapshot, watchlist_sort_key
 from src.models import Holding
 from src.nh_client import NhReadOnlyClient, normalize_cash_flows
 from src.portfolio import (
@@ -90,6 +90,43 @@ class PortfolioTests(unittest.TestCase):
         ]
         self.assertEqual(sorted(rows, key=watchlist_sort_key)[0]["code"], "LOW")
 
+
+    def test_weekly_monthly_bottom_bands_add_twenty_points_and_display_flags(self) -> None:
+        bars = []
+        day = date(2024, 1, 1)
+        index = 0
+        while len(bars) < 520:
+            if day.weekday() < 5:
+                # Keep a broad rising history, then make the latest month/week sharply weak
+                # so both higher-timeframe Bollinger states are unambiguously in the bottom zone.
+                close = 100.0 + index * 0.08
+                if len(bars) >= 498:
+                    close = 68.0 - (len(bars) - 498) * 0.45
+                bars.append({
+                    "date": day.strftime("%Y%m%d"),
+                    "open": close + 0.4,
+                    "high": close + 1.0,
+                    "low": max(1.0, close - 1.0),
+                    "close": max(1.0, close),
+                })
+                index += 1
+            day += timedelta(days=1)
+
+        result = technical_snapshot(bars)
+        self.assertEqual(result["band_weekly"], "최하단")
+        self.assertEqual(result["band_monthly"], "최하단")
+        base = (
+            (10 if result["st_10_3"] == "UP" else 0)
+            + (10 if result["st_20_4"] == "UP" else 0)
+            + (5 if result["ma200_slope_pct"] is not None and result["ma200_slope_pct"] > 0 else 0)
+            + (5 if result["ma60_slope_pct"] is not None and result["ma60_slope_pct"] > 0 else 0)
+        )
+        self.assertEqual(result["score"], base + 20)
+        if result["band"] == "최하단":
+            self.assertEqual(result["band_display"], "최하단 DWM")
+        self.assertGreaterEqual(len(aggregate_bars(bars, "W")), 20)
+        self.assertGreaterEqual(len(aggregate_bars(bars, "M")), 20)
+
     def test_technical_chart_series_contains_candles_bollinger_and_supertrend(self) -> None:
         bars = [
             {
@@ -125,10 +162,17 @@ class PortfolioTests(unittest.TestCase):
             {"act_trd_dtl_cd": "BB", "trd_dt": "20260904", "trd_sno": "2", "xcl_amt": "200", "cur_cd": "KRW"},
         ])
         history = update_yield_history(
-            [], totals={"total_asset_krw": 10000, "evaluation_krw": 9000},
+            [], totals={
+                "total_asset_krw": 10000, "evaluation_krw": 9000,
+                "holdings_evaluation_krw": 9000, "cash_krw": 1000,
+                "total_asset_source": "holdings_evaluation_plus_cash",
+            },
             realized=summary, cash_flows=flows, at=datetime(2026, 9, 18, 10, 0),
         )
         self.assertEqual(history[0]["net_cash_flow_krw"], 800)
+        self.assertEqual(history[0]["cash_krw"], 1000)
+        self.assertEqual(history[0]["holdings_evaluation_krw"], 9000)
+        self.assertEqual(history[0]["total_asset_krw"], 10000)
         monthly = monthly_realized_performance(events, history)
         self.assertAlmostEqual(monthly[0]["return_pct"], 1.0)
 
@@ -678,6 +722,9 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn('id="realizedChart"', html)
         self.assertIn('id="yieldWeekSlider"', html)
         self.assertIn('id="yieldRangeLabel"', html)
+        self.assertIn("최대 50점", html)
+        self.assertIn("주봉 BB20 최하단", html)
+        self.assertIn("월봉 BB20 최하단", html)
         self.assertIn('id="monthlyChart"', html)
         self.assertIn('id="diagnostics"', html)
         self.assertIn('id="watchlistBody"', html)
@@ -698,6 +745,9 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn("chart_bars", js)
         self.assertIn("data-label=\"현재가\"", js)
         self.assertIn("data-label=\"평가금액\"", js)
+        self.assertIn("<small>/50</small>", js)
+        self.assertIn("item.band_display || item.band", js)
+        self.assertNotIn("asset-event-marker", js)
 
 
 

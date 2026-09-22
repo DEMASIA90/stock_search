@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from datetime import datetime
 from typing import Any, Iterable
 
 from src.portfolio import number
@@ -42,6 +43,63 @@ def bollinger_state(
         "upper": upper,
     }
 
+
+
+def aggregate_bars(bars: Iterable[dict[str, Any]], timeframe: str) -> list[dict[str, Any]]:
+    """Aggregate ascending daily OHLC bars to ISO-week or calendar-month bars."""
+    ordered = sorted(
+        [dict(row) for row in bars if number(row.get("close")) > 0 and str(row.get("date") or "")],
+        key=lambda row: str(row.get("date", "")),
+    )
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in ordered:
+        raw = ''.join(ch for ch in str(row.get("date") or "") if ch.isdigit())[:8]
+        if len(raw) != 8:
+            continue
+        try:
+            parsed = datetime.strptime(raw, "%Y%m%d")
+        except ValueError:
+            continue
+        if timeframe.upper() == "W":
+            iso = parsed.isocalendar()
+            key = f"{iso.year:04d}W{iso.week:02d}"
+        elif timeframe.upper() == "M":
+            key = raw[:6]
+        else:
+            raise ValueError("timeframe must be 'W' or 'M'")
+        groups.setdefault(key, []).append(row)
+
+    out: list[dict[str, Any]] = []
+    for rows in groups.values():
+        first = rows[0]
+        last = rows[-1]
+        closes = [number(row.get("close")) for row in rows]
+        highs = [number(row.get("high")) for row in rows]
+        lows = [number(row.get("low")) for row in rows]
+        opens = [number(row.get("open")) for row in rows]
+        out.append({
+            "date": str(last.get("date") or ""),
+            "open": opens[0] if opens and opens[0] > 0 else closes[0],
+            "high": max(highs) if highs else max(closes),
+            "low": min(lows) if lows else min(closes),
+            "close": closes[-1],
+            "volume": sum(number(row.get("volume")) for row in rows),
+        })
+    return out
+
+
+def _band_display(daily_label: str, weekly_label: str, monthly_label: str) -> str:
+    weekly_bottom = weekly_label == "최하단"
+    monthly_bottom = monthly_label == "최하단"
+    if daily_label == "최하단":
+        suffix = "D" + ("W" if weekly_bottom else "") + ("M" if monthly_bottom else "")
+        return f"최하단 {suffix}"
+    extras = []
+    if weekly_bottom:
+        extras.append("W")
+    if monthly_bottom:
+        extras.append("M")
+    return daily_label if not extras else f"{daily_label} · 최하단 {''.join(extras)}"
 
 def _atr(highs: list[float], lows: list[float], closes: list[float], period: int) -> list[float | None]:
     true_ranges: list[float] = []
@@ -129,6 +187,11 @@ def technical_snapshot(bars: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "price": 0.0,
             "change_pct": 0.0,
             "band": "데이터 부족",
+            "band_display": "데이터 부족",
+            "band_weekly": "데이터 부족",
+            "band_monthly": "데이터 부족",
+            "band_weekly_position": None,
+            "band_monthly_position": None,
             "band_position": None,
             "st_10_3": "UNKNOWN",
             "st_20_4": "UNKNOWN",
@@ -141,6 +204,12 @@ def technical_snapshot(bars: Iterable[dict[str, Any]]) -> dict[str, Any]:
     latest = closes[-1]
     previous = closes[-2] if len(closes) > 1 else latest
     band = bollinger_state(closes)
+    weekly_bars = aggregate_bars(ordered, "W")
+    monthly_bars = aggregate_bars(ordered, "M")
+    weekly_band = bollinger_state(_series(weekly_bars, "close"))
+    monthly_band = bollinger_state(_series(monthly_bars, "close"))
+    weekly_bottom = weekly_band.get("label") == "최하단"
+    monthly_bottom = monthly_band.get("label") == "최하단"
     ma60 = simple_average(closes, 60)
     slope60 = moving_average_slope(closes, 60)
     slope200 = moving_average_slope(closes, 200)
@@ -152,11 +221,18 @@ def technical_snapshot(bars: Iterable[dict[str, Any]]) -> dict[str, Any]:
         + (10 if st20 == "UP" else 0)
         + (5 if slope200 is not None and slope200 > 0 else 0)
         + (5 if slope60 is not None and slope60 > 0 else 0)
+        + (10 if weekly_bottom else 0)
+        + (10 if monthly_bottom else 0)
     )
     return {
         "price": latest,
         "change_pct": (latest / previous - 1.0) * 100.0 if previous else 0.0,
         "band": band["label"],
+        "band_display": _band_display(str(band["label"]), str(weekly_band.get("label")), str(monthly_band.get("label"))),
+        "band_weekly": weekly_band.get("label"),
+        "band_monthly": monthly_band.get("label"),
+        "band_weekly_position": weekly_band.get("position"),
+        "band_monthly_position": monthly_band.get("position"),
         "band_position": band["position"],
         "bollinger_lower": band["lower"],
         "bollinger_middle": band["middle"],
