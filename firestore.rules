@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rooms/{roomCode} {
+      // 실시간 관전은 참여자만 허용; 모든 쓰기는 Cloud Functions Admin SDK만 수행
+      allow get: if request.auth != null
+        && request.auth.uid in resource.data.memberUids;
+      allow list, create, update, delete: if false;
+    }
+    match /questions/{questionId} {
+      // 정답 유출 금지: 클라이언트 직접 읽기/쓰기 차단
+      allow read, write: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

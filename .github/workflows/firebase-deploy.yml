@@ -1,0 +1,29 @@
+name: Knowledge Battle Firebase Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Firebase dependencies
+        run: |
+          npm install --no-audit --no-fund
+          npm install --prefix functions --no-audit --no-fund
+      - name: Validate battle engine
+        run: npm test
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_MORNINGINV }}'
+      - name: Deploy Hosting, Rules and Functions
+        env:
+          FIREBASE_PROJECT_ID: morninginv
+        run: npx firebase deploy --only hosting,firestore:rules,functions --project "$FIREBASE_PROJECT_ID" --non-interactive

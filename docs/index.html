@@ -2,129 +2,93 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#07111f">
-  <title>Market Watch & Yield Monitor</title>
-  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="assets/styles.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#06141c">
+  <meta name="description" content="Knowledge Battle - 2~4인 실시간 전술 퀴즈 전략 게임">
+  <title>Knowledge Battle — Tactical Quiz Warfare</title>
+  <link rel="icon" type="image/svg+xml" href="./assets/icon.svg">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./firebase-config.js"></script>
+  <script type="module" src="./app.js"></script>
 </head>
 <body>
-  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
-  <main class="app-shell">
-    <header class="app-header">
-      <a class="brand" href="#watchlist" aria-label="모니터 홈"><span class="brand-mark" aria-hidden="true">Y</span><span><b>Yield Monitor</b><small>Market signal & realized performance</small></span></a>
-      <div class="service-status"><i></i><span>Hourly sync</span></div>
-    </header>
-
-    <nav class="tab-bar" role="tablist" aria-label="메인 메뉴">
-      <button class="tab-button is-active" id="watchlistTab" type="button" role="tab" aria-selected="true" aria-controls="watchlistView"><span class="tab-icon" aria-hidden="true">⌁</span>관심종목</button>
-      <button class="tab-button" id="portfolioTab" type="button" role="tab" aria-selected="false" aria-controls="portfolioView"><span class="tab-icon lock-icon" aria-hidden="true">◇</span>Yield Monitor</button>
-    </nav>
-
-    <section class="tab-view" id="watchlistView" role="tabpanel" aria-labelledby="watchlistTab">
-      <section class="watch-summary" aria-label="관심종목 요약">
-        <article><span>조건 충족</span><strong id="watchEligible">—</strong><small id="watchScanned">후보 —</small></article>
-        <article><span>최하단 구간</span><strong id="watchBottomCount">—</strong><small>볼린저 채널 하위 20%</small></article>
-        <article><span>최고 점수</span><strong id="watchTopScore">—</strong><small>최대 60점</small></article>
-      </section>
-
-      <section class="panel score-guide">
-        <div><p class="eyebrow">SCORING</p><h2>점수 산정 기준</h2></div>
-        <div class="score-items"><span><b>+10</b> Supertrend 10·3 상승</span><span><b>+10</b> Supertrend 20·4 상승</span><span><b>+5</b> 60일선 기울기 양수</span><span><b>+5</b> 200일선 기울기 양수</span><span><b>+10</b> 일봉 BB20 최하단 (D)</span><span><b>+10</b> 주봉 BB20 최하단 (W)</span><span><b>+10</b> 월봉 BB20 최하단 (M)</span></div>
-      </section>
-
-      <section class="panel table-panel watch-table-panel">
-        <div class="panel-heading filter-heading">
-          <div><p class="eyebrow">RANKING</p><h2>총점 순위</h2><p class="watch-sync-line">최근 계산 <strong id="watchUpdatedAt">—</strong> · <span id="watchSource">데이터 준비 중</span></p></div>
-          <div class="filter-group" aria-label="관심종목 필터">
-            <select id="watchMarketFilter" aria-label="시장 필터"><option value="ALL">전체 시장</option><option value="US">미국</option><option value="KR">한국</option><option value="ETF">3배 ETF</option></select>
-            <select id="watchBandFilter" aria-label="볼린저 밴드 필터"><option value="ALL">전체 밴드</option><option value="최하단">최하단만</option><option value="하단">하단</option><option value="중단">중단</option><option value="상단">상단</option><option value="최상단">최상단</option></select>
-          </div>
-        </div>
-        <div class="table-wrap wide-table"><table><thead><tr><th>#</th><th>종목</th><th>밴드</th><th class="numeric">점수</th><th>ST 10·3</th><th>ST 20·4</th><th>60일선</th><th>200일선</th><th class="numeric">현재가</th><th class="numeric">60일 평균 대비</th><th>섹터</th><th class="numeric">시가총액</th></tr></thead><tbody id="watchlistBody"></tbody></table></div>
-        <div class="empty is-hidden" id="watchlistEmpty">조건에 맞는 종목이 없거나 첫 업데이트가 아직 완료되지 않았습니다.</div>
-      </section>
-      <section class="notice is-hidden" id="watchWarningPanel"><strong>관심종목 조회 참고사항</strong><ul id="watchWarnings"></ul></section>
-    </section>
-
-    <section class="tab-view is-hidden" id="portfolioView" role="tabpanel" aria-labelledby="portfolioTab">
-      <div class="portfolio-locked" id="portfolioLocked">
-        <div class="lock-orb" aria-hidden="true">◇</div><p class="eyebrow">PRIVATE YIELD MONITOR</p><h1>수익 모니터가 잠겨 있습니다.</h1><p>계좌 자산·실현손익·입출금 기록을 열려면 숫자 4자리 PIN을 입력하세요.</p><button class="primary compact" id="openPinButton" type="button">PIN 입력</button>
+<div class="scanlines" aria-hidden="true"></div>
+<div id="app-shell">
+  <header class="topbar">
+    <div class="identity">
+      <div class="brand-shield"><span>⌁</span></div>
+      <div><div class="brand-name">KNOWLEDGE<span>BATTLE</span></div><div class="brand-sub">TACTICAL INTELLIGENCE WARFARE <span class="tiny-dot">◆</span> V1.0</div></div>
+    </div>
+    <div class="top-stats">
+      <div class="top-stat"><div class="eyebrow">작전 상태</div><strong id="status-label"><span class="live-dot"></span> 대기 중</strong></div>
+      <div class="top-stat"><div class="eyebrow">현재 라운드</div><strong id="round-label">—</strong></div>
+      <div class="top-stat"><div class="eyebrow">생존 국가</div><strong id="alive-label">—</strong></div>
+      <div class="room-tag" id="room-tag" title="클릭하여 방 코드 복사">ROOM <b>DEMO</b> <span>⧉</span></div>
+    </div>
+  </header>
+  <main class="dashboard">
+    <aside class="sidebar sidebar-left">
+      <div class="panel-head"><span class="panel-index">01 / INTEL</span><h2>전장 상황판</h2><p>ALLIED & HOSTILE FORCES</p></div>
+      <div id="player-roster" class="player-roster"></div>
+      <div class="intel-box"><span class="intel-icon">◈</span><div><strong>작전 브리핑</strong><p>정답을 맞혀야만 명령이 실행됩니다. 적의 방어 상태와 체력을 확인하세요.</p></div></div>
+      <div class="rules-mini"><div class="eyebrow">작전 규약 // 04</div><div><span class="legend-dot aqua"></span> 핵공격 : 전체 피해</div><div><span class="legend-dot orange"></span> ICBM : 최강의 적 공격</div><div><span class="legend-dot sky"></span> 방어 : 다음 피격 1회</div><div><span class="legend-dot lime"></span> 수리 : 최근 피해 복구</div></div>
+    </aside>
+    <section class="main-stage">
+      <div class="stage-top"><div><span class="eyebrow mint">LIVE TACTICAL MAP</span><h1>전장 통제 시스템 <span class="map-sub">SECTOR-04</span></h1></div><div class="signal"><span class="live-dot"></span> <span id="signal-text">전술망 연결</span></div></div>
+      <div class="battle-map" id="battle-map">
+        <div class="water-flow"></div>
+        <svg class="map-grid" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <pattern id="seaGrid" width="50" height="50" patternUnits="userSpaceOnUse"><path d="M 50 0 L 0 0 0 50" fill="none" stroke="#6bbec4" stroke-opacity=".13" stroke-width=".8"/></pattern>
+            <radialGradient id="seaGlow"><stop stop-color="#1a4e5c"/><stop offset="1" stop-color="#09222e"/></radialGradient>
+          </defs>
+          <rect width="1000" height="1000" fill="url(#seaGrid)"/>
+          <circle cx="500" cy="500" r="220" fill="none" stroke="#8bc9ca" stroke-opacity=".14" stroke-dasharray="9 13"/>
+          <circle cx="500" cy="500" r="80" fill="none" stroke="#8bc9ca" stroke-opacity=".20"/>
+          <path d="M500 0V1000M0 500H1000" stroke="#66c1c1" stroke-opacity=".13" stroke-dasharray="12 9"/>
+          <path d="M487 500h26M500 487v26" stroke="#c9e8d6" stroke-width="2" stroke-opacity=".38"/>
+        </svg>
+        <div class="map-coord coord-tl">N 37° 31' 42"<br>E 126° 58' 26"</div>
+        <div class="map-coord coord-tr">WAR ZONE 001<br>GRID 1000×1000</div>
+        <div class="map-coord coord-bl">TACTICAL SATELLITE // ACTIVE</div>
+        <div class="map-coord coord-br">REAL TIME SYNC <span class="blink">●</span></div>
+        <div class="center-ocean-label"><span class="crosshair">⌖</span><span>NEUTRAL WATERS</span><small>INTERCEPTION ZONE</small></div>
+        <div id="island-container"></div>
+        <div id="fx-layer" aria-hidden="true"></div>
+        <div id="quiz-overlay" class="quiz-overlay hidden" aria-live="polite"></div>
+        <div id="result-overlay" class="result-overlay hidden"></div>
       </div>
-
-      <div class="dashboard is-hidden" id="dashboardContent">
-        <header class="dashboard-heading"><div><p class="eyebrow">PRIVATE PERFORMANCE</p><h1>Yield Monitor</h1></div><div class="top-actions"><div class="status-pill"><span></span><b id="environment">—</b></div><button class="ghost" id="lockButton" type="button">잠그기</button></div></header>
-        <section class="account-strip"><div><span>조회 계좌</span><strong id="account">—</strong></div><div><span>누적 기록 시작</span><strong id="recordingStart">—</strong></div><div><span>최근 업데이트</span><strong id="updatedAt">—</strong></div></section>
-
-        <section class="monitor-section section-a" aria-labelledby="sectionATitle">
-          <div class="section-label"><span>A</span><div><p class="eyebrow">ASSET & REALIZED YIELD</p><h2 id="sectionATitle">총자산과 누적 실현손익</h2></div></div>
-          <div class="summary-grid yield-summary">
-            <article class="metric hero-metric"><span>총자산</span><strong id="totalAsset">—</strong><small>예수금·국내·해외자산 포함</small></article>
-            <article class="metric"><span>누적 실현손익</span><strong id="realizedPnl">—</strong><small id="realizedCount">—</small></article>
-            <article class="metric"><span>현재 평가손익</span><strong id="unrealizedPnl">—</strong><small id="unrealizedRate">—</small></article>
-            <article class="metric"><span>누적 순입출금</span><strong id="netCashFlow">—</strong><small>수익률 계산과 분리</small></article>
-          </div>
-          <div class="panel chart-overview-panel">
-            <div class="panel-heading chart-toolbar"><div><p class="eyebrow">RECORDED HISTORY</p><h2>자산과 실현수익 추이</h2><p class="chart-range-label" id="yieldRangeLabel">최근 4주</p></div><div class="toolbar-right"><div class="chart-legends"><span class="legend-dot asset">총자산</span><span class="legend-dot realized-bar">일별 실현수익</span></div><div class="week-slider-wrap"><div class="week-slider-copy"><span>표시 기간</span><strong id="yieldWeekValue">4주</strong></div><input id="yieldWeekSlider" type="range" min="1" max="156" step="1" value="4" aria-label="총자산 및 실현수익 표시 기간, 1주에서 3년"/><div class="week-slider-scale"><span>1주</span><span>3년</span></div></div></div></div>
-            <div class="dual-chart-grid">
-              <article class="chart-card"><div class="chart-card-head"><h3>총자산</h3><span id="assetCoverageLabel">실제 저장된 일별 스냅샷</span></div><div class="line-chart interactive-chart asset-chart" id="assetChart" aria-label="총자산 선 그래프"></div><p class="chart-help">총자산은 오늘의 예수금 포함 총자산을 기준으로 실현손익·순입출금을 역산합니다. 실제 저장 스냅샷이 있는 날은 실제값을 우선합니다.</p></article>
-              <article class="chart-card"><div class="chart-card-head"><h3>실현수익</h3><span>일별 합산 막대 그래프</span></div><div class="line-chart interactive-chart realized-chart" id="realizedChart" aria-label="실현수익 막대 그래프"></div><p class="chart-help">막대 클릭 시 해당 날짜의 실현 거래와 입출금 내역을 볼 수 있습니다.</p></article>
-            </div>
-          </div>
-          <article class="panel event-detail-panel full-width-panel" id="eventDetailPanel">
-            <div class="panel-heading"><div><p class="eyebrow">SELECTED DATE</p><h2 id="eventDetailTitle">최근 기록</h2></div></div>
-            <div class="selected-metrics triple"><div><span>총자산</span><b id="selectedAsset">—</b></div><div><span>일자 실현수익</span><b id="selectedDayRealized">—</b></div><div><span>누적 실현손익</span><b id="selectedCumulativeRealized">—</b></div></div>
-            <div class="selected-metrics single"><div><span>당일 순입출금</span><b id="selectedDayNetFlow">—</b></div></div>
-            <div class="event-list" id="selectedEvents"><p class="muted">해당 날짜의 실현 종목 또는 입출금이 없습니다.</p></div>
-          </article>
-        </section>
-
-        <section class="monitor-section section-b" aria-labelledby="sectionBTitle">
-          <div class="section-label"><span>B</span><div><p class="eyebrow">OPEN POSITIONS</p><h2 id="sectionBTitle">현재 보유종목과 기술 상태</h2></div></div>
-          <section class="panel table-panel">
-            <div class="panel-heading"><div><h2>보유종목</h2><p>수익률·평가금액과 A/B/C 상태를 함께 표시합니다.</p></div><span id="positionsCount">0개</span></div>
-            <div class="table-wrap wide-table"><table><thead><tr><th>종목</th><th>섹터</th><th class="numeric">평가금액</th><th class="numeric">평가손익</th><th class="numeric">수익률</th><th>A · Bollinger</th><th>B · ST 14·3</th><th>C · 60일선</th><th>C · 200일선</th></tr></thead><tbody id="holdingsBody"></tbody></table></div>
-            <div class="empty is-hidden" id="holdingsEmpty">현재 보유종목이 없습니다.</div>
-          </section>
-          <section class="panel realized-compact-panel">
-            <div class="panel-heading"><div><p class="eyebrow">REALIZED EVENTS</p><h2>최근 실현 종목</h2></div><span id="realizedEventsCount">0건</span></div>
-            <div class="realized-compact-list" id="realizedBody"></div>
-            <div class="empty is-hidden" id="realizedEmpty">저장된 실현 매도내역이 없습니다.</div>
-          </section>
-        </section>
-
-        <section class="monitor-section section-c" aria-labelledby="sectionCTitle">
-          <div class="section-label"><span>C</span><div><p class="eyebrow">PERFORMANCE ANALYTICS</p><h2 id="sectionCTitle">섹터·월별·매도 통계</h2></div></div>
-          <div class="analytics-grid">
-            <article class="panel allocation-panel"><div class="panel-heading"><div><p class="eyebrow">SECTOR RETURN</p><h2>섹터별 평가손익</h2></div></div><div class="allocation-body sector-body"><div class="donut" id="sectorDonut"><span id="sectorCount">0</span><small>섹터</small></div><div class="allocation-legend sector-legend" id="sectorLegend"></div></div></article>
-            <article class="panel monthly-panel"><div class="panel-heading"><div><p class="eyebrow">MONTHLY REALIZED</p><h2>월별 실현수익률</h2></div></div><div class="monthly-chart" id="monthlyChart"></div></article>
-            <article class="panel trade-stat-panel"><div class="panel-heading"><div><p class="eyebrow">EXIT QUALITY</p><h2>익절·손절 통계</h2></div></div><div class="trade-stats"><div><span>승률</span><strong id="winRate">—</strong></div><div><span>평균 익절</span><strong class="positive" id="avgTakeProfit">—</strong></div><div><span>평균 손절</span><strong class="negative" id="avgStopLoss">—</strong></div><div><span>실현 매도</span><strong id="exitCount">—</strong></div></div></article>
-          </div>
-        </section>
-
-        <section class="notice is-hidden" id="warningPanel"><strong>조회 참고사항</strong><ul id="warnings"></ul></section>
-        <footer>NH투자증권 Namuh PLUG 조회 데이터 · 주문 기능 없음 · <span id="source"></span><span class="footer-diagnostics" id="diagnostics"></span></footer>
-      </div>
+      <div class="map-footer"><span>◉ <b>TACTICAL FEED ONLINE</b></span><span id="footer-turn">작전 준비 중</span><span>◆ ENCRYPTED CHANNEL</span></div>
     </section>
+    <aside class="sidebar sidebar-right">
+      <div class="panel-head"><span class="panel-index">02 / COMMAND</span><h2>작전 명령</h2><p>SELECT YOUR NEXT MOVE</p></div>
+      <div class="turn-banner" id="turn-banner"><div class="turn-icon">⌖</div><div><div class="eyebrow">CURRENT TURN</div><strong id="turn-name">플레이어 대기 중</strong><span id="turn-hint">게임을 시작하세요.</span></div><span class="banner-ping"></span></div>
+      <div class="action-list" id="action-list"></div>
+      <div class="comms-title"><span>03 / BATTLE LOG</span><span class="comms-led">● LIVE</span></div>
+      <div id="battle-log" class="battle-log"></div>
+    </aside>
   </main>
-
-  <div class="modal-backdrop is-hidden" id="technicalChartModal" role="presentation">
-    <section class="technical-chart-dialog" role="dialog" aria-modal="true" aria-labelledby="technicalChartTitle">
-      <button class="modal-close" id="closeTechnicalChartButton" type="button" aria-label="닫기">×</button>
-      <div class="technical-chart-heading"><div><p class="eyebrow">PRICE TECHNICAL CHART</p><h2 id="technicalChartTitle">종목 차트</h2><p id="technicalChartMeta">—</p></div><div class="technical-legend"><span class="legend-candle">캔들</span><span class="legend-bb">Bollinger 20·2</span><span class="legend-st">Supertrend 14·3</span></div></div>
-      <div class="technical-chart-host" id="technicalChartHost"></div>
-      <p class="chart-help">최근 120거래일 · 캔들 + Bollinger Band(20,2) + Supertrend(14,3)</p>
-    </section>
+  <footer class="site-footer"><span>KB DEFENSE NETWORK © 2026</span><span>KNOWLEDGE IS THE ULTIMATE WEAPON.</span><span>BUILD 1.0.0 // ALPHA</span></footer>
+</div>
+<div class="entry-backdrop" id="entry-backdrop">
+  <div class="entry-card">
+    <div class="entry-logo">⌁</div>
+    <div class="entry-kicker">WELCOME TO THE BATTLEGROUND</div>
+    <h2>KNOWLEDGE<br><em>BATTLE</em></h2>
+    <p class="entry-description">지식으로 명령하고, 전략으로 생존하라.<br>정답을 맞힌 순간 전쟁이 시작됩니다.</p>
+    <div class="entry-line"></div>
+    <label for="nickname">COMMANDER NAME <span>닉네임</span></label>
+    <input id="nickname" maxlength="16" autocomplete="nickname" placeholder="사령관 이름 입력" value="COMMANDER">
+    <div class="entry-cols"><div><label for="capacity">PLAYERS <span>참가 인원</span></label><select id="capacity"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></div>
+    <div class="entry-status"><span class="live-dot"></span><span id="entry-online-status">AI 시뮬레이션 준비 완료</span></div></div>
+    <button class="primary-button" id="demo-button">◈ AI와 전투 시작 <span>›</span></button>
+    <div class="online-actions" id="online-actions"><button class="secondary-button" id="create-button">+ 온라인 방 만들기</button><button class="secondary-button" id="join-button">↗ 방 코드로 참가</button></div>
+    <div class="join-input hidden" id="join-input"><input id="join-code" placeholder="6자리 방 코드" maxlength="6"><button id="join-confirm" class="primary-button">참가</button></div>
+    <p class="entry-footnote">체험 모드는 혼자 플레이합니다. 온라인 모드는 Firebase 설정 후 이용할 수 있습니다.</p>
   </div>
-
-  <div class="modal-backdrop is-hidden" id="pinModal" role="presentation">
-    <section class="pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
-      <button class="modal-close" id="closePinButton" type="button" aria-label="닫기">×</button><div class="pin-lock" aria-hidden="true">◇</div><p class="eyebrow">PRIVATE ACCESS</p><h2 id="pinTitle">Yield Monitor 열기</h2><p class="dialog-copy">설정한 숫자 4자리 PIN을 입력하세요.</p>
-      <form id="pinForm"><label for="pin">Portfolio PIN</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" autocomplete="off" placeholder="••••" required><p class="form-message" id="pinMessage" role="status"></p><div class="dialog-actions"><button class="ghost dialog-cancel" id="cancelPinButton" type="button">취소</button><button class="primary" id="unlockButton" type="submit">Yield Monitor 열기</button></div></form>
-      <p class="security-note">PIN은 서버로 전송되거나 브라우저에 저장되지 않습니다.</p>
-    </section>
-  </div>
-  <script type="module" src="assets/app.mjs"></script>
+</div>
+<div id="lobby-backdrop" class="lobby-backdrop hidden"><div class="lobby-card"><span class="eyebrow mint">SECURE MULTIPLAYER ROOM</span><h2>작전실 대기 중</h2><p>아래 코드를 다른 참가자에게 전달하세요.</p><button class="lobby-code" id="lobby-code">------ <span>⧉</span></button><div id="lobby-players" class="lobby-players"></div><p class="lobby-small" id="lobby-count"></p><button class="primary-button" id="start-button">전투 시작</button><p class="entry-footnote">방장만 전투를 시작할 수 있습니다. 최소 2명 필요.</p></div></div>
+<div id="toast" class="toast hidden" role="status"></div>
 </body>
 </html>
